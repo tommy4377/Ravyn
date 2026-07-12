@@ -8,6 +8,46 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{RavynError, Result};
 
+pub fn redact_sensitive_output(input: &str) -> String {
+    input
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if [
+                "authorization",
+                "proxy-authorization",
+                "cookie",
+                "password",
+                "api_key",
+                "api-key",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+            {
+                "[redacted]".to_owned()
+            } else {
+                line.split_whitespace()
+                    .map(|token| {
+                        url::Url::parse(token)
+                            .ok()
+                            .and_then(|mut url| {
+                                if url.username().is_empty() && url.password().is_none() {
+                                    return None;
+                                }
+                                let _ = url.set_username("redacted");
+                                let _ = url.set_password(Some("redacted"));
+                                Some(url.to_string())
+                            })
+                            .unwrap_or_else(|| token.to_owned())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcessLimits {
     pub wall_time: Duration,
@@ -80,10 +120,14 @@ pub async fn run(
                 return Err(RavynError::Process("external process exceeded its wall-clock limit".into()));
             }
             _ = output_check.tick(), if output_path.is_some() && limits.output_file_bytes.is_some() => {
-                let path = output_path.as_ref().expect("guarded by is_some");
-                if tokio::fs::metadata(path).await.ok().is_some_and(|metadata| {
-                    metadata.len() > limits.output_file_bytes.unwrap_or(u64::MAX)
-                }) {
+                let exceeded = match (&output_path, limits.output_file_bytes) {
+                    (Some(path), Some(limit)) => tokio::fs::metadata(path)
+                        .await
+                        .ok()
+                        .is_some_and(|metadata| metadata.len() > limit),
+                    _ => false,
+                };
+                if exceeded {
                     tree.terminate(&mut child).await;
                     return Err(RavynError::Process("external process exceeded its output file-size limit".into()));
                 }
@@ -256,6 +300,17 @@ mod tests {
             command.args(["-c", script]);
             command
         }
+    }
+
+    #[test]
+    fn redacts_headers_and_url_credentials_from_child_output() {
+        let output = redact_sensitive_output(
+            "Authorization: Bearer secret\nfetch https://user:pass@example.test/file\nnormal text",
+        );
+        assert!(!output.contains("secret"));
+        assert!(!output.contains("user:pass"));
+        assert!(output.contains("redacted:redacted"));
+        assert!(output.contains("normal text"));
     }
 
     #[tokio::test]

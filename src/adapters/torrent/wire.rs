@@ -40,7 +40,17 @@ pub(super) async fn ensure_success(response: Response, operation: &str) -> Resul
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.text().await.unwrap_or_default();
+    const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(Ok(chunk)) = stream.next().await {
+        let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() == MAX_ERROR_BODY_BYTES {
+            break;
+        }
+    }
+    let body = String::from_utf8_lossy(&body);
     let message = format!("{operation} failed with HTTP {status}: {}", truncate(&body));
     match status {
         StatusCode::NOT_FOUND => Err(RavynError::NotFound(message)),
@@ -52,9 +62,99 @@ pub(super) async fn ensure_success(response: Response, operation: &str) -> Resul
     }
 }
 
+pub(super) fn dht_stats_from_value(value: Value) -> Result<TorrentDhtStats> {
+    let object = value.as_object().ok_or_else(|| {
+        RavynError::Protocol("DHT statistics returned a non-object envelope".into())
+    })?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() <= 128)
+        .ok_or_else(|| RavynError::Protocol("DHT statistics omitted a valid node id".into()))?;
+    let required = |key: &str| {
+        object
+            .get(key)
+            .and_then(value_u64)
+            .ok_or_else(|| RavynError::Protocol(format!("DHT statistics omitted {key}")))
+    };
+    Ok(TorrentDhtStats {
+        id: id.to_owned(),
+        outstanding_requests: required("outstanding_requests")?,
+        routing_table_size: required("routing_table_size")?,
+        routing_table_size_v6: required("routing_table_size_v6")?,
+    })
+}
+
+pub(super) fn dht_table_from_value(mut value: Value) -> Result<TorrentDhtTable> {
+    const MAX_DHT_VALUE_NODES: usize = 16_384;
+    const MAX_DHT_DEPTH: usize = 32;
+    fn validate(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_DHT_VALUE_NODES || depth > MAX_DHT_DEPTH {
+            return Err(RavynError::Protocol(
+                "DHT routing table is too complex".into(),
+            ));
+        }
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    validate(item, depth + 1, nodes)?;
+                }
+            }
+            Value::Object(fields) => {
+                for item in fields.values() {
+                    validate(item, depth + 1, nodes)?;
+                }
+            }
+            Value::String(text) if text.len() > 4_096 => {
+                return Err(RavynError::Protocol(
+                    "DHT routing table contains an oversized string".into(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    validate(&value, 0, &mut 0)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        RavynError::Protocol("DHT routing table returned a non-object envelope".into())
+    })?;
+    let v4 = object
+        .remove("v4")
+        .ok_or_else(|| RavynError::Protocol("DHT routing table omitted v4".into()))?;
+    let v6 = object
+        .remove("v6")
+        .ok_or_else(|| RavynError::Protocol("DHT routing table omitted v6".into()))?;
+    Ok(TorrentDhtTable { v4, v6 })
+}
+
 pub(super) async fn decode_json(response: Response, operation: &str) -> Result<Value> {
     let response = ensure_success(response, operation).await?;
-    let bytes = response.bytes().await?;
+    const MAX_RQBIT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RQBIT_RESPONSE_BYTES as u64)
+    {
+        return Err(RavynError::Protocol(format!(
+            "{operation} response exceeds {MAX_RQBIT_RESPONSE_BYTES} bytes"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_RQBIT_RESPONSE_BYTES as u64) as usize,
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_RQBIT_RESPONSE_BYTES {
+            return Err(RavynError::Protocol(format!(
+                "{operation} response exceeds {MAX_RQBIT_RESPONSE_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     if bytes.is_empty() {
         return Ok(Value::Null);
     }
@@ -701,6 +801,31 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[1].index, 1);
         assert_eq!(files[1].size_bytes, Some(20));
+    }
+
+    #[test]
+    fn normalizes_the_documented_dht_stats_contract() {
+        let stats = dht_stats_from_value(json!({
+            "id": "0123456789abcdef",
+            "outstanding_requests": 2,
+            "routing_table_size": 40,
+            "routing_table_size_v6": "3"
+        }))
+        .unwrap();
+        assert_eq!(stats.outstanding_requests, 2);
+        assert_eq!(stats.routing_table_size, 40);
+        assert_eq!(stats.routing_table_size_v6, 3);
+    }
+
+    #[test]
+    fn rejects_hostile_or_unstable_dht_envelopes() {
+        assert!(dht_stats_from_value(json!({"id": "node"})).is_err());
+        let mut nested = json!({"leaf": true});
+        for _ in 0..40 {
+            nested = json!({"next": nested});
+        }
+        assert!(dht_table_from_value(json!({"v4": nested, "v6": {}})).is_err());
+        assert!(dht_table_from_value(json!({"ipv4": {}, "ipv6": {}})).is_err());
     }
 }
 

@@ -4,8 +4,9 @@ use uuid::Uuid;
 
 use crate::{
     adapters::torrent::{
-        TorrentDependencyStatus, TorrentDetails, TorrentEngineList, TorrentGlobalStats,
-        TorrentPeerStats, TorrentProbe, TorrentProbeRequest, TorrentSnapshot,
+        TorrentDependencyStatus, TorrentDetails, TorrentDhtStats, TorrentDhtTable,
+        TorrentEngineList, TorrentGlobalStats, TorrentPeerStats, TorrentProbe, TorrentProbeRequest,
+        TorrentSnapshot,
     },
     core::models::{JobKind, JobStatus},
     error::{RavynError, Result},
@@ -35,11 +36,11 @@ impl JobManager {
         self.torrent.global_stats().await
     }
 
-    pub async fn torrent_dht_stats(&self) -> Result<serde_json::Value> {
+    pub async fn torrent_dht_stats(&self) -> Result<TorrentDhtStats> {
         self.torrent.dht_stats().await
     }
 
-    pub async fn torrent_dht_table(&self) -> Result<serde_json::Value> {
+    pub async fn torrent_dht_table(&self) -> Result<TorrentDhtTable> {
         self.torrent.dht_table().await
     }
 

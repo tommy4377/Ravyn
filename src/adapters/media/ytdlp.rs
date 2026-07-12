@@ -701,7 +701,7 @@ pub(super) async fn dependency_output<const N: usize>(
 
 pub(super) fn process_error(name: &str, status: std::process::ExitStatus, stderr: &[u8]) -> String {
     let message = String::from_utf8_lossy(stderr);
-    let message = message.trim();
+    let message = crate::services::process::redact_sensitive_output(message.trim());
     if message.is_empty() {
         format!("{name} exited with {status}")
     } else {

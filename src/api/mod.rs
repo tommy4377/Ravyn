@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock};
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
@@ -37,11 +37,6 @@ pub async fn serve(app: Ravyn) -> Result<()> {
             "non-loopback API binding requires --allow-remote-api, --remote-api-behind-tls-proxy, and RAVYN_API_TOKEN".into(),
         ));
     }
-    let state = routes::ApiState {
-        repository: app.repository.clone(),
-        manager: app.manager.clone(),
-        base_config: app.base_config.clone(),
-    };
     let body_limit = app.config.max_api_body_mib.saturating_mul(1024 * 1024);
     let auth = AuthState {
         global_token: app
@@ -57,6 +52,12 @@ pub async fn serve(app: Ravyn) -> Result<()> {
         app.config.api_rate_limit_burst,
         Duration::from_secs(app.config.api_request_timeout_secs),
     );
+    let state = routes::ApiState {
+        repository: app.repository.clone(),
+        manager: app.manager.clone(),
+        base_config: app.base_config.clone(),
+        protection: protection.clone(),
+    };
     let router = routes::router(state)
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(protection, protect_api))
@@ -95,9 +96,14 @@ async fn shutdown_signal(manager: Arc<crate::core::manager::JobManager>) {
 }
 
 #[derive(Clone)]
-struct ApiProtectionState {
-    semaphore: Arc<Semaphore>,
+pub(crate) struct ApiProtectionState {
+    semaphore: Arc<crate::core::manager::ConcurrencyGate>,
     buckets: Arc<Mutex<HashMap<String, TokenBucket>>>,
+    config: Arc<RwLock<ApiProtectionConfig>>,
+}
+
+#[derive(Clone, Copy)]
+struct ApiProtectionConfig {
     burst: f64,
     refill_per_second: f64,
     request_timeout: Duration,
@@ -111,15 +117,41 @@ impl ApiProtectionState {
         request_timeout: Duration,
     ) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(maximum_concurrency.max(1))),
+            semaphore: Arc::new(crate::core::manager::ConcurrencyGate::new(
+                maximum_concurrency,
+            )),
             buckets: Arc::new(Mutex::new(HashMap::new())),
-            burst: burst.max(1) as f64,
-            refill_per_second: requests_per_minute.max(1) as f64 / 60.0,
-            request_timeout,
+            config: Arc::new(RwLock::new(ApiProtectionConfig {
+                burst: burst.max(1) as f64,
+                refill_per_second: requests_per_minute.max(1) as f64 / 60.0,
+                request_timeout,
+            })),
         }
     }
 
+    pub(crate) async fn reconfigure(
+        &self,
+        maximum_concurrency: usize,
+        requests_per_minute: u64,
+        burst: u64,
+        request_timeout: Duration,
+    ) {
+        let mut config = self.config.write().await;
+        *config = ApiProtectionConfig {
+            burst: burst.max(1) as f64,
+            refill_per_second: requests_per_minute.max(1) as f64 / 60.0,
+            request_timeout,
+        };
+        self.semaphore.set_limit(maximum_concurrency);
+        self.buckets.lock().await.clear();
+    }
+
+    async fn request_timeout(&self) -> Duration {
+        self.config.read().await.request_timeout
+    }
+
     async fn consume(&self, identity: &str) -> bool {
+        let config = *self.config.read().await;
         let mut buckets = self.buckets.lock().await;
         if buckets.len() > 4_096 {
             let now = Instant::now();
@@ -129,7 +161,7 @@ impl ApiProtectionState {
         }
         buckets
             .entry(identity.to_owned())
-            .or_insert_with(|| TokenBucket::new(self.burst, self.refill_per_second))
+            .or_insert_with(|| TokenBucket::new(config.burst, config.refill_per_second))
             .consume()
     }
 }
@@ -180,8 +212,9 @@ async fn protect_api(
         .map(str::to_owned);
     let path = request.uri().path().to_owned();
     if matches!(path.as_str(), "/health" | "/health/live") {
+        let request_timeout = state.request_timeout().await;
         return match tokio::time::timeout(
-            state.request_timeout.min(Duration::from_secs(5)),
+            request_timeout.min(Duration::from_secs(5)),
             next.run(request),
         )
         .await
@@ -196,9 +229,9 @@ async fn protect_api(
             ),
         };
     }
-    let permit = match state.semaphore.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
+    let permit = match state.semaphore.try_acquire() {
+        Some(permit) => permit,
+        None => {
             return api_rejection(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "API_OVERLOADED",
@@ -227,7 +260,8 @@ async fn protect_api(
     let response = if path == "/v1/events" {
         next.run(request).await
     } else {
-        match tokio::time::timeout(state.request_timeout, next.run(request)).await {
+        let request_timeout = state.request_timeout().await;
+        match tokio::time::timeout(request_timeout, next.run(request)).await {
             Ok(response) => response,
             Err(_) => api_rejection(
                 StatusCode::REQUEST_TIMEOUT,
@@ -460,5 +494,20 @@ mod tests {
         assert!(constant_time_eq(b"token", b"token"));
         assert!(!constant_time_eq(b"token", b"other"));
         assert!(!constant_time_eq(b"token", b"token-longer"));
+    }
+
+    #[tokio::test]
+    async fn protection_reconfiguration_updates_all_limits_and_resets_buckets() {
+        let state = ApiProtectionState::new(2, 60, 2, Duration::from_secs(30));
+        assert!(state.consume("client").await);
+        assert!(state.consume("client").await);
+        assert!(!state.consume("client").await);
+        state.reconfigure(1, 1, 1, Duration::from_secs(7)).await;
+        assert_eq!(state.request_timeout().await, Duration::from_secs(7));
+        assert!(state.consume("client").await);
+        assert!(!state.consume("client").await);
+        let permit = state.semaphore.try_acquire().unwrap();
+        assert!(state.semaphore.try_acquire().is_none());
+        drop(permit);
     }
 }

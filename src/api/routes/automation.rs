@@ -118,6 +118,35 @@ pub(super) async fn list_rules(
     Ok(Json(Page::from_extra_item(items, window)))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct RulePreviewRequest {
+    pub request: CreateJob,
+    pub mime: Option<String>,
+    pub extension: Option<String>,
+}
+
+pub(super) async fn preview_rules(
+    State(s): State<ApiState>,
+    Json(input): Json<RulePreviewRequest>,
+) -> Result<Json<crate::services::rules::RulePreview>> {
+    const MAX_PREVIEW_RULES: usize = 1_000;
+    let rules = s
+        .repository
+        .list_rules_page(0, MAX_PREVIEW_RULES + 1, None)
+        .await?;
+    if rules.len() > MAX_PREVIEW_RULES {
+        return Err(crate::error::RavynError::Invalid(format!(
+            "rule preview is limited to {MAX_PREVIEW_RULES} rules"
+        )));
+    }
+    Ok(Json(crate::services::rules::preview_matching(
+        &rules,
+        &input.request,
+        input.mime.as_deref(),
+        input.extension.as_deref(),
+    )))
+}
+
 pub(super) async fn get_rule(
     State(s): State<ApiState>,
     Path(id): Path<Uuid>,

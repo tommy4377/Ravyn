@@ -51,6 +51,7 @@ pub struct ApiState {
     pub repository: Repository,
     pub manager: Arc<JobManager>,
     pub base_config: Arc<crate::config::Config>,
+    pub protection: super::ApiProtectionState,
 }
 
 async fn audited<T>(
@@ -184,6 +185,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/torrents/{id}/seeding", get(torrent_seeding_state))
         .route("/v1/torrents/{id}/remove", post(remove_torrent))
         .route("/v1/rules", get(list_rules).post(create_rule))
+        .route("/v1/rules/preview", post(preview_rules))
         .route(
             "/v1/rules/{id}",
             get(get_rule).put(update_rule).delete(delete_rule),
