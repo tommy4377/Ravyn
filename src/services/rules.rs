@@ -200,4 +200,65 @@ mod tests {
         apply_matching(&rules, &mut request, None, Some("bin"));
         assert_eq!(request.destination, Some(PathBuf::from("high")));
     }
+
+    fn base_request() -> CreateJob {
+        CreateJob {
+            kind: crate::core::models::JobKind::Http,
+            source: "https://example.com/file.bin".into(),
+            destination: None,
+            filename: None,
+            priority: 0,
+            speed_limit_bps: None,
+            expected_sha256: None,
+            duplicate_policy: Default::default(),
+            options: Default::default(),
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(500))]
+
+        /// Rule evaluation is deterministic and the scalar destination always
+        /// comes from the first enabled matching rule in priority order.
+        #[test]
+        fn priority_order_is_deterministic_and_first_wins(
+            priorities in proptest::collection::vec(0_i32..1_000, 1..12),
+            has_destination in proptest::collection::vec(proptest::bool::ANY, 12),
+            enabled in proptest::collection::vec(proptest::bool::ANY, 12),
+        ) {
+            use proptest::prelude::prop_assert_eq;
+            let mut rules: Vec<Rule> = priorities
+                .iter()
+                .enumerate()
+                .map(|(index, priority)| Rule {
+                    id: uuid::Uuid::nil(),
+                    name: format!("rule-{index}"),
+                    enabled: enabled[index],
+                    priority: *priority,
+                    matcher: RuleMatcher::default(),
+                    actions: RuleActions {
+                        destination: has_destination[index]
+                            .then(|| PathBuf::from(format!("dir-{index}"))),
+                        tags: vec![format!("tag-{index}")],
+                        speed_limit_bps: None,
+                        post_actions: Vec::new(),
+                    },
+                })
+                .collect();
+            rules.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.name.cmp(&b.name)));
+
+            let mut first = base_request();
+            apply_matching(&rules, &mut first, None, None);
+            let mut second = base_request();
+            apply_matching(&rules, &mut second, None, None);
+            prop_assert_eq!(&first.destination, &second.destination);
+            prop_assert_eq!(&first.options.tags, &second.options.tags);
+
+            let expected = rules
+                .iter()
+                .find(|rule| rule.enabled && rule.actions.destination.is_some())
+                .and_then(|rule| rule.actions.destination.clone());
+            prop_assert_eq!(first.destination, expected);
+        }
+    }
 }

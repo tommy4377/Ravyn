@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+﻿use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -376,7 +376,7 @@ impl Repository {
                     media_item_id: item_id,
                     role: row.try_get("role")?,
                     created_at: row.try_get("created_at")?,
-                    output: super::repository::row_to_output(row)?,
+                    output: super::outputs::row_to_output(row)?,
                 })
             })
             .collect()

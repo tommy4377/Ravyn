@@ -13,7 +13,9 @@ use clap::Parser;
 use ravyn::{
     Ravyn,
     config::Config,
-    core::models::{CreateJob, DownloadOptions, DuplicatePolicy, JobKind, JobStatus},
+    core::models::{
+        CreateJob, DownloadOptions, DuplicatePolicy, JobKind, JobStatus, MetalinkMetadata,
+    },
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -353,6 +355,121 @@ async fn a_server_that_lies_about_ranges_falls_back_to_single_stream() {
             .await
             .unwrap(),
         body
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metalink_piece_corruption_is_discarded_before_mirror_failover() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = (0..3 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let corrupt = vec![0x7f; body.len()];
+    let bad_server = TestServer::start(corrupt, "\"bad\"", Duration::ZERO).await;
+    let good_server = TestServer::start(body.clone(), "\"good\"", Duration::ZERO).await;
+    let piece_length = 1024 * 1024_u64;
+    let piece_sha256 = body
+        .chunks(piece_length as usize)
+        .map(|piece| hex::encode(Sha256::digest(piece)))
+        .collect();
+    let expected = hex::encode(Sha256::digest(&body));
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+    let mut request = create_request(bad_server.url(), Some(expected));
+    request.options.mirrors = vec![good_server.url()];
+    request.options.metalink = Some(MetalinkMetadata {
+        size: body.len() as u64,
+        piece_length: Some(piece_length),
+        piece_sha256,
+    });
+
+    let job = app.manager.create(request).await.unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        body
+    );
+    assert!(
+        !tokio::fs::try_exists(temp.path().join("downloads/payload.bin.ravyn.part"))
+            .await
+            .unwrap()
+    );
+    app.manager.shutdown().await;
+}
+
+async fn start_redirect_loop_server() -> (SocketAddr, oneshot::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { break };
+                    tokio::spawn(async move {
+                        let mut request = Vec::with_capacity(1024);
+                        let mut buffer = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            match stream.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => request.extend_from_slice(&buffer[..read]),
+                            }
+                            if request.len() > 32 * 1024 {
+                                return;
+                            }
+                        }
+                        let response = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://{address}/payload.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        }
+    });
+    (address, shutdown_tx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redirect_loop_fails_with_a_bounded_protocol_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let (address, _shutdown) = start_redirect_loop_server().await;
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let job = app
+        .manager
+        .create(create_request(
+            format!("http://{address}/payload.bin"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let failed = wait_for_status(&app, job.id, &[JobStatus::Failed], Duration::from_secs(60)).await;
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("redirect limit")),
+        "unexpected failure detail: {:?}",
+        failed.error
     );
     app.manager.shutdown().await;
 }

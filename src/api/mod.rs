@@ -286,6 +286,7 @@ async fn require_token(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_owned();
+    let method = request.method().clone();
     if matches!(path.as_str(), "/health" | "/health/live") {
         return next.run(request).await;
     }
@@ -371,9 +372,36 @@ async fn require_token(
             .map(|ConnectInfo(address)| format!("client:{}", address.ip()))
             .unwrap_or_else(|| "local-anonymous".to_owned())
     };
-    request.extensions_mut().insert(ApiIdentity(identity));
+    request
+        .extensions_mut()
+        .insert(ApiIdentity(identity.clone()));
 
     let response = next.run(request).await;
+    if path.starts_with("/v1/")
+        && matches!(
+            method,
+            Method::POST | Method::PATCH | Method::DELETE | Method::PUT
+        )
+    {
+        let outcome = if response.status().is_success() {
+            "success"
+        } else {
+            "failure"
+        };
+        let metadata = serde_json::json!({
+            "actor": identity,
+            "request_id": request_id,
+            "method": method.as_str(),
+            "status": response.status().as_u16(),
+        });
+        if let Err(error) = state
+            .repository
+            .append_audit_with_metadata("api.mutation", "api_route", Some(&path), outcome, metadata)
+            .await
+        {
+            tracing::warn!(%error, %path, "failed to persist request-level audit record");
+        }
+    }
     if browser_scoped {
         if let Some(origin) = origin
             .as_deref()

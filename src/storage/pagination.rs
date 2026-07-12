@@ -1,4 +1,4 @@
-use sqlx::{Row, sqlite::SqliteRow};
+﻿use sqlx::{Row, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{
@@ -45,7 +45,7 @@ impl Repository {
         .fetch_all(self.pool())
         .await?
         .into_iter()
-        .map(super::repository::row_to_output)
+        .map(super::outputs::row_to_output)
         .collect()
     }
 
@@ -82,13 +82,13 @@ impl Repository {
                 .bind(&pattern).bind(&pattern).bind(&pattern)
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_job_log).collect()
+                .map(super::audit::row_to_job_log).collect()
         } else {
             sqlx::query("SELECT id,job_id,timestamp,source_module,severity,code,message,metadata_json FROM job_logs WHERE job_id=? ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(job_id.to_string())
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_job_log).collect()
+                .map(super::audit::row_to_job_log).collect()
         }
     }
 
@@ -104,12 +104,12 @@ impl Repository {
                 .bind(&pattern).bind(&pattern).bind(&pattern)
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_audit).collect()
+                .map(super::audit::row_to_audit).collect()
         } else {
             sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json FROM audit_log ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_audit).collect()
+                .map(super::audit::row_to_audit).collect()
         }
     }
 
@@ -125,12 +125,12 @@ impl Repository {
                 .bind(&pattern).bind(&pattern)
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_secret_reference).collect()
+                .map(super::secrets::row_to_secret_reference).collect()
         } else {
             sqlx::query("SELECT id,name,secret_type,created_at,updated_at FROM secret_references ORDER BY name COLLATE NOCASE,id LIMIT ? OFFSET ?")
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_secret_reference).collect()
+                .map(super::secrets::row_to_secret_reference).collect()
         }
     }
 
@@ -145,7 +145,7 @@ impl Repository {
             .bind(schedule_id.to_string())
             .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
             .fetch_all(self.pool()).await?.into_iter()
-            .map(super::repository::row_to_schedule_execution).collect()
+            .map(super::schedules::row_to_schedule_execution).collect()
     }
 
     pub async fn list_rules_page(
@@ -286,12 +286,12 @@ impl Repository {
                 .bind(&pattern).bind(&pattern).bind(&pattern).bind(&pattern)
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_torrent_record).collect()
+                .map(super::torrent_policy::row_to_torrent_record).collect()
         } else {
             sqlx::query("SELECT job_id,torrent_id,info_hash,name,state,downloaded_bytes,uploaded_bytes,total_bytes,download_speed_bps,upload_speed_bps,peers_connected,seeders,leechers,raw_json,updated_at FROM torrent_jobs ORDER BY updated_at DESC,job_id DESC LIMIT ? OFFSET ?")
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
-                .map(super::repository::row_to_torrent_record).collect()
+                .map(super::torrent_policy::row_to_torrent_record).collect()
         }
     }
 

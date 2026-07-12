@@ -58,6 +58,7 @@ impl Ravyn {
             settings.apply_to(&mut config)?;
             config.prepare_directories().await?;
         }
+        apply_managed_engine_paths(&mut config).await?;
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);
         Ok(Self {
@@ -69,6 +70,26 @@ impl Ravyn {
     }
 }
 
+/// Prefer a verified managed binary only when the operator left the matching
+/// executable at its built-in command-name default. Explicit CLI, environment,
+/// or persistent paths always win.
+async fn apply_managed_engine_paths(config: &mut Config) -> Result<()> {
+    let manager = services::engines::EngineManager::new(&config.data_dir);
+    for (engine, configured, default) in [
+        ("yt-dlp", &mut config.ytdlp, "yt-dlp"),
+        ("ffmpeg", &mut config.ffmpeg, "ffmpeg"),
+        ("7zip", &mut config.seven_zip, "7z"),
+        ("rqbit", &mut config.rqbit, "rqbit"),
+    ] {
+        if configured == std::path::Path::new(default) {
+            if let Some(active) = manager.active_path(engine).await? {
+                *configured = active;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn install_tls_provider() -> Result<()> {
     match rustls::crypto::ring::default_provider().install_default() {
         Ok(()) => Ok(()),
@@ -76,5 +97,44 @@ fn install_tls_provider() -> Result<()> {
         Err(_) => Err(error::RavynError::Internal(
             "failed to install the rustls Ring crypto provider".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod managed_engine_tests {
+    use super::*;
+    use clap::Parser;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn startup_selects_managed_defaults_but_preserves_explicit_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = Config::parse_from([
+            "ravyn",
+            "--data-dir",
+            temporary.path().to_str().unwrap(),
+            "--ffmpeg",
+            "custom-ffmpeg",
+        ]);
+        let bytes = b"managed executable";
+        let artifact = services::engines::EngineArtifact {
+            engine: "yt-dlp".into(),
+            version: "1.0.0".into(),
+            target: "test-target".into(),
+            url: "https://example.test/yt-dlp".into(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+            size_bytes: bytes.len() as u64,
+            filename: "yt-dlp.exe".into(),
+            capabilities: Vec::new(),
+        };
+        let installed = services::engines::EngineManager::new(temporary.path())
+            .install_verified(&artifact, bytes)
+            .await
+            .unwrap();
+
+        apply_managed_engine_paths(&mut config).await.unwrap();
+
+        assert_eq!(config.ytdlp, installed);
+        assert_eq!(config.ffmpeg, std::path::Path::new("custom-ffmpeg"));
     }
 }
