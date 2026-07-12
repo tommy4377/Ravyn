@@ -23,10 +23,10 @@ use crate::{
         sniffer::{ResourceKind, SniffRequest, SniffResult},
     },
     storage::{
-        AuditRecord, JobActionRecord, JobListFilter, JobLogRecord, MediaArchiveRecord,
-        MediaItemOutputRecord, MediaItemRecord, PageRecord, PageResourceRecord, Repository,
-        RuleInput, Schedule, ScheduleExecutionRecord, SecretReference, TagRecord, TorrentRecord,
-        host_profiles::HostProfile,
+        AuditChainStatus, AuditRecord, JobActionRecord, JobListFilter, JobLogRecord,
+        MediaArchiveRecord, MediaItemOutputRecord, MediaItemRecord, PageRecord, PageResourceRecord,
+        Repository, RuleInput, Schedule, ScheduleExecutionRecord, SecretReference, TagRecord,
+        TorrentRecord, host_profiles::HostProfile,
     },
 };
 use axum::{
@@ -163,6 +163,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/system/maintenance", post(run_maintenance))
         .route("/v1/audit", get(list_audit))
+        .route("/v1/audit/verify", get(verify_audit_chain))
         .route("/v1/secrets", get(list_secrets).post(put_secret))
         .route("/v1/secrets/{id}", axum::routing::delete(delete_secret))
         .route("/v1/system/hosts", get(list_host_profiles))

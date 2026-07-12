@@ -1,5 +1,12 @@
-- Persistent SQLite job lifecycle shared by HTTP, media (yt-dlp), and torrent (rqbit) jobs.
-- Axum routes live in `src/api/routes.rs`; orchestration in `src/core/manager.rs`; persistence in `src/storage/repository.rs` plus focused storage modules.
-- Ordered immutable migrations in `migrations/`; add new migrations rather than rewriting released ones.
-- Long-running work must be cancellation-aware and supervised; DB/file state must remain consistent and late completion must not overwrite paused/cancelled state.
-- Outputs and multi-file workflows are intended to converge on first-class persistent artifacts; post-actions use a durable journal.
+# Backend map
+- `src/core`: manager orchestration, lifecycle, dispatch/execution, automation, bandwidth, events/progress/metrics, media/torrent control. Fair HTTP bandwidth is weighted/capped/floored, demand-aware (500 ms idle yield with synchronous rejoin), live-reconfigurable, and supports persistent non-overlapping IANA-time-zone windows reapplied by a supervised 15-second task.
+- `src/download`: HTTP adapter, probe, adaptive planner, segmented range engine; persistent host profiles and fair bandwidth flows. Validated mirrors are admitted by exact length plus matching validator or checksum identity, then scheduled concurrently at non-overlapping work-unit boundaries; Metalink pieces are buffered up to 64 MiB, verified before commit, mirror-quarantined on corruption, and may use one delayed bounded hedge with loser-task shutdown. Single-stream SHA-256 is updated while bytes are written; resume rebuilds hash state only from the persisted prefix, and mismatches remove the partial before mirror retry. Non-piece segmented transfers run one ordered whole-file SHA-256 task that waits for durable contiguous range completion and hashes each range exactly once.
+- `src/adapters`: yt-dlp media and rqbit torrent integrations with typed wire normalization.
+- `src/services`: security, secrets, rules/schedules/cron, checksums, Metalink, managed engines, process supervision, browser/sniffer/import helpers.
+- `src/storage`: SQLx SQLite repository split by jobs, outputs, schedules, automation, audit, secrets, settings, torrent policy, segments, host profiles, backup/recovery. New audit entries form a transactionally serialized SHA-256 chain; retention advances a persisted prefix anchor and `/v1/audit/verify` checks the retained chain against its head.
+- `src/api`: Axum router, bounded pagination, OpenAPI, job/media/torrent/automation/browser/system routes.
+- `src/postprocess`: journaled post-transfer pipeline and named FFmpeg presets.
+- Tests: colocated unit/property/fault/migration tests plus `tests/http_integration.rs`; 11 cargo-fuzz targets in `fuzz/fuzz_targets`; Criterion policies in `benches/transfer_policy.rs`.
+- Migrations are ordered immutable files in `migrations/`; add migrations rather than rewriting released ones.
+- Long-running work must be cancellation-aware; DB/file state must remain consistent and late completion must not overwrite paused/cancelled state.
+- Preserve loopback defaults, output-root confinement, private-network blocking, bounded inputs, and least privilege.

@@ -1,6 +1,8 @@
 //! Job logs and the administrative audit trail.
 
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
+use sha2::{Digest, Sha256};
 use sqlx::{Row, sqlite::SqliteRow};
 use uuid::Uuid;
 
@@ -30,6 +32,15 @@ pub struct AuditRecord {
     pub resource_id: Option<String>,
     pub outcome: String,
     pub metadata: serde_json::Value,
+    pub previous_hash: Option<String>,
+    pub entry_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditChainStatus {
+    pub valid: bool,
+    pub chained_entries: usize,
+    pub head: Option<String>,
 }
 
 impl Repository {
@@ -90,20 +101,100 @@ impl Repository {
                 "audit metadata must be a JSON object".into(),
             ));
         }
-        sqlx::query("INSERT INTO audit_log(timestamp,action,resource_type,resource_id,outcome,metadata_json) VALUES(?,?,?,?,?,?)")
-            .bind(Utc::now())
+        let timestamp = Utc::now();
+        let metadata_json = serde_json::to_string(&metadata)?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("UPDATE audit_chain_head SET hash = hash WHERE id = 1")
+            .execute(&mut *transaction)
+            .await?;
+        let previous_hash = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hash FROM audit_chain_head WHERE id = 1",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        let entry_hash = audit_entry_hash(
+            timestamp,
+            action,
+            resource_type,
+            resource_id,
+            outcome,
+            &metadata_json,
+            previous_hash.as_deref(),
+        )?;
+        sqlx::query("INSERT INTO audit_log(timestamp,action,resource_type,resource_id,outcome,metadata_json,previous_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)")
+            .bind(timestamp)
             .bind(action)
             .bind(resource_type)
             .bind(resource_id)
             .bind(outcome)
-            .bind(serde_json::to_string(&metadata)?)
-            .execute(self.pool())
+            .bind(metadata_json)
+            .bind(previous_hash)
+            .bind(&entry_hash)
+            .execute(&mut *transaction)
             .await?;
+        sqlx::query("UPDATE audit_chain_head SET hash = ? WHERE id = 1")
+            .bind(entry_hash)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
+    pub async fn verify_audit_chain(&self) -> Result<AuditChainStatus> {
+        let mut expected_previous = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT anchor_hash FROM audit_chain_head WHERE id = 1",
+        )
+        .fetch_one(self.pool())
+        .await?;
+        let mut rows = sqlx::query(
+            "SELECT timestamp,action,resource_type,resource_id,outcome,metadata_json,previous_hash,entry_hash FROM audit_log WHERE entry_hash IS NOT NULL ORDER BY id ASC",
+        )
+        .fetch(self.pool());
+        let mut valid = true;
+        let mut chained_entries = 0usize;
+        while let Some(row) = rows.try_next().await? {
+            chained_entries = chained_entries
+                .checked_add(1)
+                .ok_or_else(|| RavynError::Internal("audit chain entry count overflowed".into()))?;
+            let timestamp: DateTime<Utc> = row.try_get("timestamp")?;
+            let action: String = row.try_get("action")?;
+            let resource_type: String = row.try_get("resource_type")?;
+            let resource_id: Option<String> = row.try_get("resource_id")?;
+            let outcome: String = row.try_get("outcome")?;
+            let metadata_json: String = row.try_get("metadata_json")?;
+            let previous_hash: Option<String> = row.try_get("previous_hash")?;
+            let entry_hash: String = row.try_get("entry_hash")?;
+            let computed = audit_entry_hash(
+                timestamp,
+                &action,
+                &resource_type,
+                resource_id.as_deref(),
+                &outcome,
+                &metadata_json,
+                expected_previous.as_deref(),
+            )?;
+            if previous_hash != expected_previous || entry_hash != computed {
+                valid = false;
+                break;
+            }
+            expected_previous = Some(entry_hash);
+        }
+        drop(rows);
+        let head = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hash FROM audit_chain_head WHERE id = 1",
+        )
+        .fetch_one(self.pool())
+        .await?;
+        valid &= head == expected_previous;
+        Ok(AuditChainStatus {
+            valid,
+            chained_entries,
+            head,
+        })
+    }
+
     pub async fn list_audit(&self, limit: usize) -> Result<Vec<AuditRecord>> {
-        sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json FROM audit_log ORDER BY timestamp DESC,id DESC LIMIT ?")
+        sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json,previous_hash,entry_hash FROM audit_log ORDER BY timestamp DESC,id DESC LIMIT ?")
             .bind(i64::try_from(limit.clamp(1, 500)).unwrap_or(500))
             .fetch_all(self.pool()).await?.into_iter().map(row_to_audit).collect()
     }
@@ -122,6 +213,27 @@ pub(crate) fn row_to_job_log(row: SqliteRow) -> Result<JobLogRecord> {
     })
 }
 
+fn audit_entry_hash(
+    timestamp: DateTime<Utc>,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    outcome: &str,
+    metadata_json: &str,
+    previous_hash: Option<&str>,
+) -> Result<String> {
+    let canonical = serde_json::to_vec(&(
+        timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        action,
+        resource_type,
+        resource_id,
+        outcome,
+        metadata_json,
+        previous_hash,
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
 pub(crate) fn row_to_audit(row: SqliteRow) -> Result<AuditRecord> {
     Ok(AuditRecord {
         id: row.try_get("id")?,
@@ -131,5 +243,7 @@ pub(crate) fn row_to_audit(row: SqliteRow) -> Result<AuditRecord> {
         resource_id: row.try_get("resource_id")?,
         outcome: row.try_get("outcome")?,
         metadata: serde_json::from_str(&row.try_get::<String, _>("metadata_json")?)?,
+        previous_hash: row.try_get("previous_hash")?,
+        entry_hash: row.try_get("entry_hash")?,
     })
 }

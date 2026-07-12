@@ -440,6 +440,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
     ),
     op!(
         "get",
+        "/v1/audit/verify",
+        "verifyAuditChain",
+        "Audit",
+        "Verify the tamper-evident audit hash chain",
+        "200",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "get",
         "/v1/secrets",
         "listSecrets",
         "Secrets",

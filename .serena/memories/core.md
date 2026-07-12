@@ -1,6 +1,9 @@
-- Backend-only Rust download manager; no frontend or extensions in this repository.
-- Source domains: `src/core` lifecycle/events, `src/download` HTTP engine, `src/adapters` yt-dlp/rqbit, `src/postprocess`, `src/services` rules/schedules/security/imports, `src/storage` SQLite, `src/api` Axum.
-- Authoritative roadmap: `Ravyn-Project-Status-and-Roadmap.md`; remaining-work detail: `Ravyn-Backend-Remaining-Work-Roadmap.md`.
-- Security invariants: loopback binding by default, output-root confinement, private-network blocking, bounded inputs, least privilege.
-- Backend architecture and domain boundaries: `mem:backend/core`.
-- Stack and dependency pins: `mem:tech_stack`. Commands and completion gates: `mem:suggested_commands`, `mem:task_completion`.
+# Ravyn map
+- Rust 2024 backend download manager; current checkout has no Svelte/TypeScript source despite Serena's Svelte language configuration.
+- Entrypoints: `src/main.rs` binary and `src/lib.rs` application assembly.
+- Backend domain map and persistence invariants: `mem:backend/core`.
+- Frontend availability boundary: `mem:frontend/core`.
+- Dependency/toolchain pins: `mem:tech_stack`.
+- Repository conventions and security defaults: `mem:conventions`.
+- Commands: `mem:suggested_commands`; completion gates: `mem:task_completion`.
+- `RAVYN_MASTER_PROJECT_DOCUMENT.md` is a roadmap to reconcile against code/tests, never an unquestioned status authority.

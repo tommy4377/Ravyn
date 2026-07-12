@@ -919,7 +919,10 @@ Current:
 
 Missing:
 
-- time-zone database update policy.
+- none. Time-zone data is supplied by the locked `chrono-tz` dependency; routine
+  dependency-update pull requests must update `Cargo.lock` and pass the named-zone,
+  DST-transition, schedule, and full backend gates before adoption. Ravyn does not
+  fetch mutable time-zone data at runtime.
 
 ## 7.2 rqbit typing and compatibility
 
@@ -1003,15 +1006,16 @@ Missing:
 Current:
 
 - broad administrative audit coverage;
-- secret, settings, backup, restore, maintenance, job, import, rule, schedule, tag, page, token, and torrent operations.
+- secret, settings, backup, restore, maintenance, job, import, rule, schedule, tag, page, token, and torrent operations;
+- request-level success/failure audit for every `/v1` POST, PUT, PATCH, and DELETE;
+- standardized hashed-token or local-client actor identity and request-ID correlation;
+- bounded searchable JSON export through the paginated audit API and retention through maintenance;
+- a transactionally serialized SHA-256 hash chain with retention anchors and a verification endpoint.
 
 Missing or requiring review:
 
-- consistent failure audit for every mutating route;
-- standardized actor identity;
-- audit correlation with request ID;
-- retention and export policy;
-- tamper-evidence or external audit sink.
+- none locally. An external audit sink remains an optional deployment integration,
+  not a prerequisite now that local records are tamper-evident and verifiable.
 
 ## 7.6 Metrics
 
@@ -1068,21 +1072,48 @@ Current:
 - dynamic work-unit distribution;
 - persistent host learning;
 - circuit breaker;
-- mirror failover.
+- mirror failover;
+- Metalink v4 parsing with whole-file and ordered piece SHA-256 metadata;
+- piece-verified sequential mirror failover with corruption quarantine;
+- fair HTTP bandwidth scheduling;
+- deterministic loopback network-comparative Criterion fixtures;
+- validated concurrent mirror scheduling at non-overlapping range boundaries;
+- checksum-before-commit Metalink piece transfers with per-mirror corruption quarantine;
+- one delayed, bounded, piece-verified hedge with explicit loser-task shutdown;
+- incremental single-stream SHA-256; resume rebuilds only the persisted prefix.
 
 Missing:
 
-- true speculative tail duplication;
+- speculative duplication for unverified or non-Metalink ranges;
 - splitting of an already active slow range;
-- piece-level multi-source downloading;
-- Metalink;
-- per-mirror concurrent scheduling;
-- corruption isolation by mirror;
-- fair bandwidth scheduler;
-- incremental hashing;
+- incremental whole-file SHA-256 for non-piece segmented transfers is implemented by an ordered hasher that waits for durable contiguous range completion and hashes each range exactly once;
 - explicit Happy Eyeballs;
 - HTTP/3 experiments;
 - benchmark-based socket tuning.
+
+The 2026-07-12 loopback fixture compares a 12 ms primary with a guarded
+duplicate admitted after 4 ms against a 2 ms mirror, using identical verified
+256 KiB payloads. Criterion measured the single source at
+13.754–14.060 ms and the guarded first-valid result at 9.023–9.184 ms. This
+justifies continued design work on bounded speculation, but it does not by
+itself establish a safe production policy: connection admission, destination
+isolation, loser cleanup, cancellation, and per-host thresholds remain open.
+
+Implementation reconciliation on 2026-07-12: production HTTP workers now admit
+at most the already bounded 16 mirrors only after redirect-by-redirect network
+validation, exact object length, byte-range support, and either a matching
+validator or checksum-backed identity. Distinct non-overlapping work units are
+scheduled across admitted sources under the existing per-host connection
+semaphores and fair per-job bandwidth limiter. Metalink layouts are scheduled
+at their actual piece boundaries; each piece is buffered with a 64 MiB cap,
+SHA-256 verified, and only then written and durably marked complete. A corrupt
+source is quarantined for the remainder of the transfer. For these verified
+pieces only, a single alternate source may start after 250 ms; the first valid
+piece wins and `JoinSet::shutdown` aborts and drains the loser before commit.
+Focused integration coverage proves that two validated mirrors both supply
+work units, corrupt-piece isolation still completes from a good mirror, and a
+slow verified piece is completed by the bounded hedge. General unverified
+range duplication and active-range splitting remain unfinished.
 
 ## 7.9 Release engineering
 
@@ -1092,19 +1123,19 @@ Current:
 - stable and MSRV checks in planned workflow;
 - cargo-audit and cargo-deny policy files;
 - source manifests;
-- checksums.
+- GitHub-hosted Windows, Linux, and macOS release archives;
+- SHA-256 checksums, CycloneDX SBOMs, and GitHub provenance/SBOM attestations;
+- tag-driven stable channel policy with least-privilege GitHub workflow permissions;
+- external tools are not silently bundled: verified managed-engine manifests provide
+  opt-in activation and rollback for yt-dlp/FFmpeg/rqbit-compatible executables.
 
 Missing:
 
-- GitHub-hosted release archives;
-- checksums and GitHub attestations;
-- SBOM;
-- reproducibility attestations;
-- automatic updater;
-- rollback;
-- release-channel policy;
-- external dependency bundling policy;
-- protected GitHub release permissions.
+- in-place Ravyn binary self-update/rollback. This is intentionally deferred until
+  a separately installed client can coordinate process replacement safely; the
+  repository currently ships archives rather than an installer or privileged agent;
+- protected GitHub release environment/branch rules, which are repository-host
+  settings and cannot be enforced by committed workflow YAML alone.
 
 ---
 
@@ -1325,8 +1356,9 @@ Replace simple global limiting with a policy capable of:
 - minimum and maximum share per job;
 - foreground/background classes;
 - starvation prevention;
-- separate torrent upload/download pools;
-- scheduled profiles;
+- work-conserving idle-flow redistribution;
+- persistent IANA-time-zone scheduled profiles with live boundary application;
+- separate torrent upload/download pools (blocked on upstream rqbit runtime rate APIs);
 - live reconfiguration.
 
 ## Priority 8 — Speculative HTTP completion
@@ -1639,6 +1671,12 @@ Implementation reconciliation on 2026-07-12:
 - a Criterion baseline covers transfer planning and fair-scheduler rebalance;
   measured scheduler setup/rebalance ranges from about 0.48 microseconds for
   one flow to 1.39 milliseconds for 128 flows on the local Windows fixture;
+- a deterministic loopback Criterion fixture now provides the required
+  network comparison before speculative transfer work: a 12 ms primary alone
+  measured 13.754–14.060 ms, while a verified duplicate delayed by 4 ms and
+  racing a 2 ms mirror measured 9.023–9.184 ms for the same 256 KiB body;
+  this supports guarded experimentation but production speculation remains
+  unfinished pending isolated outputs, admission limits, and loser cleanup;
 - the GitHub-only release workflow builds Windows/Linux/macOS archives, emits
   CycloneDX SBOM and SHA-256 files, creates GitHub provenance/SBOM
   attestations, and publishes tagged GitHub Releases without an external
@@ -1646,17 +1684,57 @@ Implementation reconciliation on 2026-07-12:
 - checksum failures can no longer leave a corrupt final-looking output: failed
   artifacts are quarantined (or removed if quarantine is unavailable), and
   restore/engine metadata reads are bounded against oversized state files;
-- `cargo fmt --all -- --check`, locked check, strict Clippy, and the locked
-  test gate pass; `cargo test --locked --all-targets` passes 127 unit and
-  property tests plus 5 HTTP integration tests; the locked optimized release
-  build also passes after this reconciliation.
+- the post-fixture 2026-07-12 gate is fully green: `cargo fmt --all -- --check`,
+  `cargo check --locked --all-targets`, strict all-feature/all-target Clippy,
+  and `cargo test --locked --all-targets` pass; the latter runs 127 unit and
+  property tests, 7 HTTP integration tests, and all Criterion targets in test
+  mode. The explicit locked HTTP integration run passes the same 7 tests,
+  `cargo check --manifest-path fuzz/Cargo.toml --bins` passes for all 11 fuzz
+  binaries, and `cargo build --locked --release` succeeds.
 
-Increment 6 remains partial. Scheduled bandwidth profiles, work-conserving
-idle redistribution, separate torrent pools, upstream rqbit upload-control
-APIs, destructive OS fixtures, network-comparative benchmarks, speculation,
-concurrent piece-level multi-source transfers remain open. These are not
+The post-multi-source 2026-07-12 gate is also fully green: formatting, locked
+all-target check, strict all-feature/all-target Clippy, 127 unit/property tests,
+7 HTTP integration tests, all 11 fuzz binaries, and the locked optimized build
+pass. The release build completed in 95.1 seconds after the first 60-second
+invocation timed out without a compiler error. The affected loopback benchmark
+measured the single 12 ms source at 13.671–13.843 ms and the guarded delayed
+first-valid result at 8.984–9.226 ms, with no statistically significant
+regression against the prior fixture.
+
+Increment 6 remains partial. Separate torrent pools and upstream rqbit
+upload-control APIs, destructive OS fixtures, general unverified-range speculation, and
+active-range splitting remain open. Validated concurrent piece-level
+multi-source transfer and one bounded verified-piece hedge are now implemented
+and tested. The remaining items are not
 represented as complete merely because
 their foundations or CI wiring now exist.
+
+The scheduler now detects demand through limiter callbacks: flows idle for 500
+ms yield their allocation, while a returning flow synchronously rejoins the
+weighted water-fill before consuming, so aggregate contention remains bounded.
+Persistent settings also accept at most 32 non-overlapping recurring bandwidth
+windows using an IANA time zone, ISO weekdays, and minute bounds (including
+overnight wrap). Invalid zones and overlaps are rejected before persistence;
+patches apply immediately and a supervised 15-second task reapplies the
+effective limit across time-window and DST boundaries. Unit tests cover idle
+yield/rejoin, named-zone conversion, overnight behavior, overlap rejection, and
+invalid zones. Separate torrent upload/download pools cannot be enforced by
+Ravyn's process because torrent payload bytes remain inside rqbit and its
+currently required HTTP capability contract exposes no runtime upload/download
+rate endpoint; a real pool therefore remains an upstream capability blocker,
+not a local token bucket that would fail to govern traffic.
+
+The post-scheduler 2026-07-12 gate passes `cargo fmt --all -- --check`,
+`cargo check --locked --all-targets`, strict all-feature/all-target Clippy,
+`cargo test --locked --all-targets` (130 unit/property tests, 7 HTTP integration
+tests, and Criterion targets in test mode), the explicit 7-test HTTP integration
+run, all 11 fuzz binaries, and the locked release build (147.7 seconds). After
+removing an avoidable per-rebalance allocation discovered by Criterion, fair
+scheduler setup/rebalance measures 0.674–0.717 microseconds for one flow,
+12.085–12.730 microseconds for 8, 150.26–156.26 microseconds for 32, and
+1.676–1.735 milliseconds for 128. The demand-aware policy adds bounded
+registration bookkeeping while retaining millisecond-scale setup at the
+configured high end.
 
 ---
 

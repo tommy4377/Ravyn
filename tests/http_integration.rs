@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -29,6 +29,7 @@ struct ResourceState {
     body: Arc<RwLock<Vec<u8>>>,
     etag: Arc<RwLock<String>>,
     reject_non_probe_ranges: Arc<AtomicBool>,
+    range_requests: Arc<AtomicUsize>,
     delay_per_chunk: Duration,
 }
 
@@ -46,6 +47,7 @@ impl TestServer {
             body: Arc::new(RwLock::new(body)),
             etag: Arc::new(RwLock::new(etag.to_owned())),
             reject_non_probe_ranges: Arc::new(AtomicBool::new(false)),
+            range_requests: Arc::new(AtomicUsize::new(0)),
             delay_per_chunk,
         };
         let server_state = state.clone();
@@ -84,6 +86,10 @@ impl TestServer {
         self.state
             .reject_non_probe_ranges
             .store(reject, Ordering::Release);
+    }
+
+    fn range_requests(&self) -> usize {
+        self.state.range_requests.load(Ordering::Acquire)
     }
 }
 
@@ -124,6 +130,9 @@ async fn handle_connection(mut stream: TcpStream, state: ResourceState) -> std::
         .and_then(|value| parse_range(value, body.len()));
     let reject_range = state.reject_non_probe_ranges.load(Ordering::Acquire)
         && range.is_some_and(|(start, end)| !(start == 0 && end == 0));
+    if range.is_some_and(|(start, end)| !(start == 0 && end == 0)) {
+        state.range_requests.fetch_add(1, Ordering::AcqRel);
+    }
 
     if method == "HEAD" {
         let response = format!(
@@ -470,6 +479,182 @@ async fn a_redirect_loop_fails_with_a_bounded_protocol_error() {
             .is_some_and(|error| error.contains("redirect limit")),
         "unexpected failure detail: {:?}",
         failed.error
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn validated_mirrors_supply_work_units_concurrently() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = vec![0x6d; 40 * 1024 * 1024];
+    let primary = TestServer::start(payload.clone(), "\"shared\"", Duration::from_millis(2)).await;
+    let mirror = TestServer::start(payload.clone(), "\"shared\"", Duration::from_millis(2)).await;
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let expected = hex::encode(Sha256::digest(&payload));
+    let mut request = create_request(primary.url(), Some(expected));
+    request.options.mirrors.push(mirror.url());
+    let job = app.manager.create(request).await.unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert!(primary.range_requests() > 0);
+    assert!(mirror.range_requests() > 0);
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        payload
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_verified_piece_is_completed_by_one_bounded_hedge() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = vec![0x4c; 16 * 1024 * 1024];
+    let slow = TestServer::start(payload.clone(), "\"shared\"", Duration::from_millis(400)).await;
+    let fast = TestServer::start(payload.clone(), "\"shared\"", Duration::ZERO).await;
+    let piece_hash = hex::encode(Sha256::digest(&payload));
+    let expected = piece_hash.clone();
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let mut request = create_request(slow.url(), Some(expected));
+    request.options.mirrors.push(fast.url());
+    request.options.metalink = Some(MetalinkMetadata {
+        size: payload.len() as u64,
+        piece_length: Some(payload.len() as u64),
+        piece_sha256: vec![piece_hash],
+    });
+    let started = tokio::time::Instant::now();
+    let job = app.manager.create(request).await.unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(15),
+    )
+    .await;
+
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert!(started.elapsed() < Duration::from_secs(6));
+    assert!(slow.range_requests() > 0);
+    assert!(fast.range_requests() > 0);
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        payload
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn incremental_single_stream_checksum_failure_cleans_up_before_mirror_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = vec![0x31; 512 * 1024];
+    let corrupt = vec![0x32; body.len()];
+    let bad = TestServer::start(corrupt, r#""bad""#, Duration::ZERO).await;
+    let good = TestServer::start(body.clone(), r#""good""#, Duration::ZERO).await;
+    let expected = hex::encode(Sha256::digest(&body));
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let mut request = create_request(bad.url(), Some(expected));
+    request.options.mirrors.push(good.url());
+    let job = app.manager.create(request).await.unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(15),
+    )
+    .await;
+
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        body
+    );
+    assert!(
+        !tokio::fs::try_exists(temp.path().join("downloads/payload.bin.ravyn.part"))
+            .await
+            .unwrap()
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resumed_single_stream_rebuilds_incremental_checksum_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = (0..8 * 1024 * 1024)
+        .map(|index| (index % 239) as u8)
+        .collect::<Vec<_>>();
+    let expected = hex::encode(Sha256::digest(&body));
+    let server = TestServer::start(body.clone(), r#""resume""#, Duration::from_millis(20)).await;
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let job = app
+        .manager
+        .create(create_request(server.url(), Some(expected)))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let current = app.repository.get_job(job.id).await.unwrap();
+        if current.downloaded_bytes > 0 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    app.manager.pause(job.id).await.unwrap();
+    app.manager.resume(job.id).await.unwrap();
+
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(15),
+    )
+    .await;
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        body
     );
     app.manager.shutdown().await;
 }
