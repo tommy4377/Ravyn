@@ -13,7 +13,9 @@ use clap::Parser;
 use ravyn::{
     Ravyn,
     config::Config,
-    core::models::{CreateJob, DownloadOptions, DuplicatePolicy, JobKind, JobStatus},
+    core::models::{
+        CreateJob, DownloadOptions, DuplicatePolicy, JobKind, JobStatus, MetalinkMetadata,
+    },
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -353,6 +355,60 @@ async fn a_server_that_lies_about_ranges_falls_back_to_single_stream() {
             .await
             .unwrap(),
         body
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metalink_piece_corruption_is_discarded_before_mirror_failover() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = (0..3 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let corrupt = vec![0x7f; body.len()];
+    let bad_server = TestServer::start(corrupt, "\"bad\"", Duration::ZERO).await;
+    let good_server = TestServer::start(body.clone(), "\"good\"", Duration::ZERO).await;
+    let piece_length = 1024 * 1024_u64;
+    let piece_sha256 = body
+        .chunks(piece_length as usize)
+        .map(|piece| hex::encode(Sha256::digest(piece)))
+        .collect();
+    let expected = hex::encode(Sha256::digest(&body));
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+    let mut request = create_request(bad_server.url(), Some(expected));
+    request.options.mirrors = vec![good_server.url()];
+    request.options.metalink = Some(MetalinkMetadata {
+        size: body.len() as u64,
+        piece_length: Some(piece_length),
+        piece_sha256,
+    });
+
+    let job = app.manager.create(request).await.unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        body
+    );
+    assert!(
+        !tokio::fs::try_exists(temp.path().join("downloads/payload.bin.ravyn.part"))
+            .await
+            .unwrap()
     );
     app.manager.shutdown().await;
 }

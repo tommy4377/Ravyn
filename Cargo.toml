@@ -12,10 +12,12 @@ axum = { version = "0.8", features = ["json", "macros"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = "2.2"
 futures-util = "0.3"
 hex = "0.4"
 keyring = "=3.6.3"
 percent-encoding = "2"
+quick-xml = "0.38"
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "http2", "stream", "json", "query"] }
@@ -40,8 +42,13 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 libc = "0.2"
 
 [dev-dependencies]
+criterion = "0.7"
 proptest = "1"
 tempfile = "3"
+
+[[bench]]
+name = "transfer_policy"
+harness = false
 
 [profile.release]
 lto = "thin"

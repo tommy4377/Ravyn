@@ -2,6 +2,7 @@ pub mod browser;
 pub mod checksum;
 pub mod cron;
 pub mod dedup;
+pub mod engines;
 pub mod filename;
 pub mod rules;
 pub mod scheduler;
@@ -13,4 +14,5 @@ pub mod sniffer;
 pub mod schedules;
 
 pub mod imports;
+pub mod metalink;
 pub mod process;

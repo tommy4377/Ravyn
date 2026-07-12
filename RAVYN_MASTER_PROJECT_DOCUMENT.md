@@ -47,7 +47,7 @@ production observability
 + destructive and long-running tests
 + advanced bandwidth scheduling
 + advanced multi-source performance
-+ signed reproducible releases
++ reproducible GitHub releases with checksums and attestations
 ```
 
 ---
@@ -1096,15 +1096,15 @@ Current:
 
 Missing:
 
-- signed binaries;
-- signed installers;
+- GitHub-hosted release archives;
+- checksums and GitHub attestations;
 - SBOM;
 - reproducibility attestations;
 - automatic updater;
 - rollback;
 - release-channel policy;
 - external dependency bundling policy;
-- signing credentials and secure signing infrastructure.
+- protected GitHub release permissions.
 
 ---
 
@@ -1359,8 +1359,8 @@ Implement:
 Complete:
 
 - SBOM;
-- signed builds;
-- signed installer;
+- GitHub release archives;
+- GitHub provenance and SBOM attestations;
 - reproducible build process;
 - updater metadata;
 - rollback;
@@ -1473,7 +1473,7 @@ Ravyn backend may be called beta-ready when:
 Ravyn backend may be called production-ready when:
 
 - all beta requirements are met;
-- latest releases are signed;
+- latest releases have checksums and GitHub attestations;
 - releases are reproducible;
 - SBOM and license reports are published;
 - process isolation is implemented or clearly bounded;
@@ -1607,6 +1607,56 @@ Recommended scope:
 4. after CI exists with real external binaries: the yt-dlp/rqbit tested version matrix and the remaining tool-dependent fault fixtures.
 
 Do not begin speculative HTTP multi-source work until benchmark fixtures exist.
+
+Implementation reconciliation on 2026-07-12:
+
+- the complete locked baseline is green again after repairing a strict-Clippy
+  regression in the scheduler water-filling loop;
+- the portable Priority 5 pagination-cursor and rule-priority property tests
+  were already present in the source, so the earlier open-status text was
+  stale;
+- a populated version-9 SQLite fixture now applies the remaining embedded
+  migrations, proves legacy job preservation, checks the final migration
+  ledger, verifies the named-time-zone schema, and runs integrity checking;
+- the fair scheduler is no longer an isolated prototype: HTTP transfers now
+  register scoped flows, derive weights/classes from job priority, treat the
+  existing per-job speed limit as a hard cap, rebalance active jobs when the
+  global limit changes, and automatically release allocations on every exit;
+- authenticated mutating API requests now add a request-level audit record
+  containing the bounded actor identity, request ID, method, status, route,
+  and success/failure outcome, including handler failures;
+- the managed-engine foundation now validates signed manifest entries, rejects
+  unsafe URLs and filenames, streams bounded downloads, verifies exact size
+  and SHA-256, installs into versioned directories, atomically replaces active
+  metadata on Windows/Unix, selects verified managed defaults at startup,
+  cleans failed staging files, and performs checksum-verified rollback;
+- Metalink v4 parsing and job creation now enforce bounded XML, HTTPS mirror
+  identity, exact size, whole-file SHA-256, and ordered piece SHA-256 ledgers;
+  corrupt piece data is discarded before failover to the next mirror;
+- cargo-fuzz now builds 11 parser/protocol targets, the nightly workflow runs
+  each target with a bounded budget on Linux and runs the release/test matrix
+  on Windows, Linux, and macOS;
+- a Criterion baseline covers transfer planning and fair-scheduler rebalance;
+  measured scheduler setup/rebalance ranges from about 0.48 microseconds for
+  one flow to 1.39 milliseconds for 128 flows on the local Windows fixture;
+- the GitHub-only release workflow builds Windows/Linux/macOS archives, emits
+  CycloneDX SBOM and SHA-256 files, creates GitHub provenance/SBOM
+  attestations, and publishes tagged GitHub Releases without an external
+  signing service;
+- checksum failures can no longer leave a corrupt final-looking output: failed
+  artifacts are quarantined (or removed if quarantine is unavailable), and
+  restore/engine metadata reads are bounded against oversized state files;
+- `cargo fmt --all -- --check`, locked check, strict Clippy, and the locked
+  test gate pass; `cargo test --locked --all-targets` passes 127 unit and
+  property tests plus 5 HTTP integration tests; the locked optimized release
+  build also passes after this reconciliation.
+
+Increment 6 remains partial. Scheduled bandwidth profiles, work-conserving
+idle redistribution, separate torrent pools, upstream rqbit upload-control
+APIs, destructive OS fixtures, network-comparative benchmarks, speculation,
+concurrent piece-level multi-source transfers remain open. These are not
+represented as complete merely because
+their foundations or CI wiring now exist.
 
 ---
 

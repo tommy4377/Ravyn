@@ -91,6 +91,19 @@ pub fn validate_network_source(config: &Config, source: &str) -> Result<()> {
             "only HTTP and HTTPS sources are supported".into(),
         ));
     }
+    if url.host_str().is_none() {
+        return Err(RavynError::Invalid("network source URL has no host".into()));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(RavynError::Invalid(
+            "network source URLs may not contain credentials; use a secret reference".into(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(RavynError::Invalid(
+            "network source URLs may not contain fragments".into(),
+        ));
+    }
     if config.allow_private_network {
         return Ok(());
     }
@@ -245,5 +258,15 @@ mod property_tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_embedded_credentials_even_when_private_networks_are_allowed() {
+        let mut config = Config::try_parse_from(["ravyn"]).unwrap();
+        config.allow_private_network = true;
+        assert!(
+            validate_network_source(&config, "https://user:password@example.com/file").is_err()
+        );
+        assert!(validate_network_source(&config, "https://example.com/file#secret").is_err());
     }
 }

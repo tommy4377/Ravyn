@@ -133,6 +133,54 @@ pub(super) async fn create_job(
     let job = audited(&s.repository, "job.create", "job", None, result).await?;
     Ok((StatusCode::CREATED, Json(job.redacted())))
 }
+
+#[derive(Debug, Deserialize)]
+pub(super) struct MetalinkJobRequest {
+    document: String,
+    destination: Option<std::path::PathBuf>,
+    #[serde(default)]
+    priority: i32,
+    speed_limit_bps: Option<u64>,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+pub(super) async fn create_metalink_job(
+    State(s): State<ApiState>,
+    Json(request): Json<MetalinkJobRequest>,
+) -> Result<(StatusCode, Json<Job>)> {
+    let file = crate::services::metalink::parse(request.document.as_bytes())?;
+    let mut mirrors = file.mirrors.into_iter().map(|item| item.url);
+    let source = mirrors
+        .next()
+        .ok_or_else(|| crate::error::RavynError::Invalid("Metalink has no mirrors".into()))?;
+    let metalink = crate::core::models::MetalinkMetadata {
+        size: file.size,
+        piece_length: file.pieces.as_ref().map(|pieces| pieces.length),
+        piece_sha256: file.pieces.map(|pieces| pieces.sha256).unwrap_or_default(),
+    };
+    let result = s
+        .manager
+        .create(CreateJob {
+            kind: JobKind::Http,
+            source,
+            destination: request.destination,
+            filename: Some(file.name),
+            priority: request.priority,
+            speed_limit_bps: request.speed_limit_bps,
+            expected_sha256: file.sha256,
+            duplicate_policy: DuplicatePolicy::default(),
+            options: DownloadOptions {
+                mirrors: mirrors.collect(),
+                metalink: Some(metalink),
+                overwrite: request.overwrite,
+                ..DownloadOptions::default()
+            },
+        })
+        .await;
+    let job = audited(&s.repository, "job.metalink.create", "job", None, result).await?;
+    Ok((StatusCode::CREATED, Json(job.redacted())))
+}
 pub(super) async fn create_batch(
     State(s): State<ApiState>,
     Json(requests): Json<Vec<CreateJob>>,

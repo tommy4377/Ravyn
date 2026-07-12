@@ -235,6 +235,11 @@ impl Repository {
         let started = std::time::Instant::now();
         let now = Utc::now();
         let id = Uuid::new_v4();
+        let speed_limit_bps = request
+            .speed_limit_bps
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| RavynError::Invalid("speed limit exceeds SQLite integer range".into()))?;
         let destination = request
             .destination
             .unwrap_or(default_destination)
@@ -242,7 +247,7 @@ impl Repository {
             .to_string();
         sqlx::query("INSERT INTO jobs(id,kind,source,destination,filename,status,priority,speed_limit_bps,expected_sha256,options_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(id.to_string()).bind(kind_text(request.kind)).bind(request.source).bind(destination).bind(request.filename)
-            .bind(status_text(JobStatus::Queued)).bind(request.priority).bind(request.speed_limit_bps.map(|v| v as i64))
+            .bind(status_text(JobStatus::Queued)).bind(request.priority).bind(speed_limit_bps)
             .bind(request.expected_sha256).bind(serde_json::to_string(&request.options)?).bind(now).bind(now).execute(self.pool()).await?;
         let job = self.get_job(id).await;
         self.observe_query("insert_job", started);

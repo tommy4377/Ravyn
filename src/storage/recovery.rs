@@ -13,6 +13,7 @@ const PENDING_DATABASE: &str = ".ravyn-restore-pending.sqlite3";
 const PENDING_REQUEST: &str = ".ravyn-restore-request.json";
 const ROLLBACK_DATABASE: &str = ".ravyn-restore-rollback.sqlite3";
 const LAST_RESULT: &str = "restore-last-result.json";
+const MAX_RESTORE_STATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -407,6 +408,12 @@ async fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result
     } else {
         return Ok(None);
     };
+    let metadata = tokio::fs::metadata(selected).await?;
+    if !metadata.is_file() || metadata.len() > MAX_RESTORE_STATE_BYTES {
+        return Err(RavynError::Invalid(format!(
+            "restore state must be a regular file no larger than {MAX_RESTORE_STATE_BYTES} bytes"
+        )));
+    }
     let bytes = tokio::fs::read(selected).await?;
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
@@ -435,6 +442,16 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_restore_state_is_rejected_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = pending_request_path(temp.path());
+        let file = tokio::fs::File::create(&marker).await.unwrap();
+        file.set_len(MAX_RESTORE_STATE_BYTES + 1).await.unwrap();
+
+        assert!(status(temp.path()).await.is_err());
+    }
     use crate::config::{Config, PersistentSettings};
 
     #[tokio::test]

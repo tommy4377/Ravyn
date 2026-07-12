@@ -11,7 +11,7 @@ use crate::{
     },
     error::{RavynError, Result},
     services::{
-        dedup,
+        checksum, dedup,
         rules::{self},
         security,
     },
@@ -30,6 +30,18 @@ impl JobManager {
         let loaded_rules = self.repository.list_rules().await?;
         rules::apply_matching(&loaded_rules, &mut request, None, extension.as_deref());
         validate_tags(&request.options.tags)?;
+        validate_filename(request.filename.as_deref())?;
+        if let Some(expected) = request.expected_sha256.as_deref() {
+            checksum::validate_sha256(expected)?;
+        }
+        if request
+            .speed_limit_bps
+            .is_some_and(|value| value > i64::MAX as u64)
+        {
+            return Err(RavynError::Invalid(
+                "speed limit exceeds SQLite integer range".into(),
+            ));
+        }
         self.validate_post_actions(&request.options.post_actions)?;
         self.validate_download_secret_references(&request.options)
             .await?;
@@ -94,6 +106,34 @@ impl JobManager {
             }
             for mirror in &request.options.mirrors {
                 security::validate_network_source_resolved(&self.config, mirror).await?;
+            }
+        }
+        if let Some(metalink) = request.options.metalink.as_ref() {
+            if request.kind != JobKind::Http || metalink.size == 0 {
+                return Err(RavynError::Invalid(
+                    "Metalink metadata requires an HTTP job with a positive size".into(),
+                ));
+            }
+            match metalink.piece_length {
+                Some(length) if length > 0 => {
+                    let expected = metalink.size.div_ceil(length);
+                    if metalink.piece_sha256.len() as u64 != expected
+                        || metalink.piece_sha256.len() > 16_384
+                        || metalink.piece_sha256.iter().any(|hash| {
+                            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                    {
+                        return Err(RavynError::Invalid(
+                            "Metalink piece hashes do not match the declared layout".into(),
+                        ));
+                    }
+                }
+                None if metalink.piece_sha256.is_empty() => {}
+                _ => {
+                    return Err(RavynError::Invalid(
+                        "Metalink piece hashes require a positive piece length".into(),
+                    ));
+                }
             }
         }
         let destination = request
@@ -164,17 +204,7 @@ impl JobManager {
         if let Some(destination) = request.destination.as_deref() {
             security::validate_output_path(&self.config, destination)?;
         }
-        if let Some(filename) = request.filename.as_deref() {
-            if filename.trim().is_empty()
-                || filename.len() > 255
-                || filename.chars().any(|value| value.is_control())
-                || std::path::Path::new(filename).components().count() != 1
-            {
-                return Err(RavynError::Invalid(
-                    "filename must be a single safe path component".into(),
-                ));
-            }
-        }
+        validate_filename(request.filename.as_deref())?;
         if let Some(tags) = request.tags.as_deref() {
             validate_tags(tags)?;
         }
@@ -357,4 +387,18 @@ impl JobManager {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+}
+
+fn validate_filename(filename: Option<&str>) -> Result<()> {
+    if let Some(filename) = filename
+        && (filename.trim().is_empty()
+            || filename.len() > 255
+            || filename.chars().any(|value| value.is_control())
+            || std::path::Path::new(filename).components().count() != 1)
+    {
+        return Err(RavynError::Invalid(
+            "filename must be a single safe path component".into(),
+        ));
+    }
+    Ok(())
 }

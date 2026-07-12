@@ -325,6 +325,20 @@ pub struct TorrentAdapter {
     basic_auth: Option<(String, String)>,
 }
 
+/// Runs arbitrary JSON through every rqbit normalization entry point. It is
+/// used by cargo-fuzz to keep compatibility fallbacks panic-free.
+pub fn normalize_rqbit_payload_for_fuzzing(bytes: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    let _ = wire::engine_list_from_value(value.clone());
+    let _ = wire::global_stats_from_value(value.clone());
+    let _ = wire::details_from_value("fuzz".into(), value.clone());
+    let _ = wire::peer_stats_from_value(value.clone());
+    let _ = wire::probe_from_value(value.clone());
+    let _ = wire::snapshot_from_value("fuzz".into(), value);
+}
+
 impl TorrentAdapter {
     pub async fn new(
         config: Arc<Config>,

@@ -84,6 +84,26 @@ pub struct FairBandwidthScheduler {
     inner: Arc<Mutex<SchedulerState>>,
 }
 
+/// A scoped scheduler registration. Dropping the handle releases the flow and
+/// immediately redistributes its bandwidth to the remaining transfers.
+pub struct BandwidthFlow {
+    scheduler: FairBandwidthScheduler,
+    id: Uuid,
+    limiter: Arc<RateLimiter>,
+}
+
+impl BandwidthFlow {
+    pub fn limiter(&self) -> Arc<RateLimiter> {
+        self.limiter.clone()
+    }
+}
+
+impl Drop for BandwidthFlow {
+    fn drop(&mut self) {
+        self.scheduler.unregister(self.id);
+    }
+}
+
 #[derive(Default)]
 struct SchedulerState {
     /// Zero means unlimited: flows are constrained only by their own caps.
@@ -124,6 +144,14 @@ impl FairBandwidthScheduler {
         );
         recompute(&mut state);
         limiter
+    }
+
+    pub fn register_scoped(&self, id: Uuid, config: FlowConfig) -> BandwidthFlow {
+        BandwidthFlow {
+            scheduler: self.clone(),
+            id,
+            limiter: self.register(id, config),
+        }
     }
 
     /// Reconfigures a live flow; unknown ids are ignored.
@@ -205,7 +233,7 @@ fn recompute(state: &mut SchedulerState) {
     if floor_sum > u128::from(capacity) {
         for entry in &mut entries {
             let scaled = u128::from(entry.floor) * u128::from(capacity) / floor_sum;
-            entry.floor = u64::try_from(scaled).unwrap_or(u64::MAX).max(1);
+            entry.floor = u64::try_from(scaled).unwrap_or(u64::MAX);
         }
     }
 
@@ -221,13 +249,11 @@ fn recompute(state: &mut SchedulerState) {
             .map(|index| u128::from(entries[*index].weight))
             .sum();
         let mut pinned = Vec::new();
-        for position in 0..open.len() {
-            let index = open[position];
+        for (position, index) in open.iter().copied().enumerate() {
             let entry = &entries[index];
-            let share = u64::try_from(
-                u128::from(remaining) * u128::from(entry.weight) / weight_sum.max(1),
-            )
-            .unwrap_or(u64::MAX);
+            let share =
+                u64::try_from(u128::from(remaining) * u128::from(entry.weight) / weight_sum.max(1))
+                    .unwrap_or(u64::MAX);
             if share >= entry.cap {
                 assigned.insert(entry.id, entry.cap);
                 pinned.push(position);
@@ -355,6 +381,20 @@ mod tests {
     }
 
     #[test]
+    fn capacity_smaller_than_flow_count_never_overcommits() {
+        let scheduler = FairBandwidthScheduler::new(1);
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            scheduler.register(*id, flow(1, FlowClass::Foreground));
+        }
+        let total: u64 = ids
+            .iter()
+            .map(|id| scheduler.assigned_bps(*id).unwrap())
+            .sum();
+        assert!(total <= 1, "assignments exceed tiny capacity: {total}");
+    }
+
+    #[test]
     fn assignments_never_exceed_capacity() {
         let scheduler = FairBandwidthScheduler::new(CAPACITY);
         let ids: Vec<Uuid> = (0..7).map(|_| Uuid::new_v4()).collect();
@@ -415,5 +455,20 @@ mod tests {
         scheduler.unregister(b);
         assert_eq!(scheduler.assigned_bps(a), Some(CAPACITY / 2));
         assert_eq!(scheduler.flow_count(), 1);
+    }
+
+    #[test]
+    fn scoped_registration_releases_and_redistributes_capacity() {
+        let scheduler = FairBandwidthScheduler::new(CAPACITY);
+        let persistent = Uuid::new_v4();
+        scheduler.register(persistent, flow(1, FlowClass::Foreground));
+        {
+            let temporary =
+                scheduler.register_scoped(Uuid::new_v4(), flow(1, FlowClass::Foreground));
+            assert_eq!(temporary.limiter().bytes_per_second(), CAPACITY / 2);
+            assert_eq!(scheduler.assigned_bps(persistent), Some(CAPACITY / 2));
+        }
+        assert_eq!(scheduler.flow_count(), 1);
+        assert_eq!(scheduler.assigned_bps(persistent), Some(CAPACITY));
     }
 }

@@ -1,7 +1,8 @@
 # Rust build artifacts
 /target/
+/fuzz/target/
+/ravyn-data/
 **/*.rs.bk
-Cargo.lock
 
 # IDE
 .idea/

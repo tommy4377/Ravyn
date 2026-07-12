@@ -31,6 +31,12 @@ const ITEM_SEEN_PREFIX: &str = "ravyn-item-seen:";
 const ITEM_START_PREFIX: &str = "ravyn-item-start:";
 const ITEM_DONE_PREFIX: &str = "ravyn-item-done:";
 
+/// Exercises the yt-dlp machine-progress parser without starting a process.
+/// This is intentionally small and public for the cargo-fuzz target.
+pub fn parse_ytdlp_progress_for_fuzzing(line: &str) -> Option<ProgressSnapshot> {
+    parse_progress(uuid::Uuid::nil(), line, Instant::now())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaProbeRequest {
     pub url: String,

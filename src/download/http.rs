@@ -28,23 +28,24 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::Config,
     core::{
+        bandwidth::{FairBandwidthScheduler, FlowClass, FlowConfig},
         models::{CreateJob, DuplicatePolicy, Job, JobKind, ProgressSnapshot},
         progress::ProgressPublisher,
-        rate_limit::{RateLimiter, RateLimiters},
+        rate_limit::RateLimiters,
     },
     download::{
         adapter::{DownloadAdapter, DownloadOutcome},
         probe, segmented,
     },
     error::{RavynError, Result},
-    services::{filename, rules, security},
+    services::{checksum, filename, rules, security},
     storage::{Repository, host_profiles, segments},
 };
 
 pub struct HttpAdapter {
     config: Arc<Config>,
     host_limits: Mutex<HashMap<String, Arc<Semaphore>>>,
-    global_limiter: Arc<RateLimiter>,
+    bandwidth: FairBandwidthScheduler,
     progress_publisher: ProgressPublisher,
     repository: Repository,
 }
@@ -56,7 +57,7 @@ impl HttpAdapter {
         repository: Repository,
     ) -> Result<Self> {
         Ok(Self {
-            global_limiter: Arc::new(RateLimiter::new(config.global_speed_limit_bps)),
+            bandwidth: FairBandwidthScheduler::new(config.global_speed_limit_bps),
             config,
             host_limits: Mutex::new(HashMap::new()),
             progress_publisher,
@@ -65,7 +66,7 @@ impl HttpAdapter {
     }
 
     pub fn set_global_speed_limit(&self, bytes_per_second: u64) {
-        self.global_limiter.set_bytes_per_second(bytes_per_second);
+        self.bandwidth.set_capacity_bps(bytes_per_second);
     }
 
     fn destination(&self, job: &Job, metadata: &probe::RemoteMetadata) -> PathBuf {
@@ -240,7 +241,11 @@ impl HttpAdapter {
             .to_str()
             .ok_or_else(|| RavynError::Invalid("destination path must be UTF-8".into()))?
             .to_owned();
-        effective.speed_limit_bps = request.speed_limit_bps.map(|value| value as i64);
+        effective.speed_limit_bps = request
+            .speed_limit_bps
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| RavynError::Invalid("speed limit exceeds SQLite integer range".into()))?;
         effective.options_json = request.options;
         Ok(effective)
     }
@@ -329,6 +334,14 @@ impl HttpAdapter {
             })?
         };
         let job = self.apply_post_probe_rules(job, &metadata).await?;
+        if let Some(metalink) = job.options_json.metalink.as_ref() {
+            if metadata.length != Some(metalink.size) {
+                return Err(RavynError::Protocol(format!(
+                    "Metalink mirror size mismatch: expected {}, received {:?}",
+                    metalink.size, metadata.length
+                )));
+            }
+        }
         fs::create_dir_all(&job.destination).await?;
         let client = self.client_for_job(&job, &metadata.final_url).await?;
         let headers = self.request_headers(&job)?;
@@ -363,10 +376,23 @@ impl HttpAdapter {
             )));
         }
 
-        let job_limiter = Arc::new(RateLimiter::new(
-            job.speed_limit_bps.unwrap_or_default().max(0) as u64,
-        ));
-        let limiters = RateLimiters::new(job_limiter, self.global_limiter.clone());
+        let priority = u32::try_from(job.priority.max(0)).unwrap_or(u32::MAX);
+        let bandwidth_flow = self.bandwidth.register_scoped(
+            job.id,
+            FlowConfig {
+                weight: priority.saturating_add(1),
+                class: if job.priority < 0 {
+                    FlowClass::Background
+                } else {
+                    FlowClass::Foreground
+                },
+                min_bps: None,
+                max_bps: job
+                    .speed_limit_bps
+                    .and_then(|value| u64::try_from(value).ok()),
+            },
+        );
+        let limiters = RateLimiters::single(bandwidth_flow.limiter());
         let progress = Arc::new(AtomicU64::new(0));
 
         let requested_segments = job
@@ -519,6 +545,29 @@ impl HttpAdapter {
         }
         result?;
 
+        let verification = async {
+            if let Some(metalink) = job.options_json.metalink.as_ref() {
+                if let Some(piece_length) = metalink.piece_length {
+                    checksum::verify_pieces(
+                        &partial,
+                        piece_length,
+                        &metalink.piece_sha256,
+                        &cancellation,
+                    )
+                    .await?;
+                }
+            }
+            if let Some(expected) = job.expected_sha256.as_deref() {
+                checksum::verify(&partial, expected, &cancellation).await?;
+            }
+            Ok::<(), RavynError>(())
+        }
+        .await;
+        if let Err(error) = verification {
+            reset_partial(&self.repository, job.id, &partial).await?;
+            return Err(error);
+        }
+
         let final_downloaded = progress.load(Ordering::Relaxed);
         self.progress_publisher
             .publish_terminal(ProgressSnapshot {
@@ -587,7 +636,6 @@ impl DownloadAdapter for HttpAdapter {
                         crate::error::FailureClass::Cancellation
                             | crate::error::FailureClass::DiskFull
                             | crate::error::FailureClass::Permission
-                            | crate::error::FailureClass::ChecksumMismatch
                     ) =>
                 {
                     return Err(error);
@@ -823,7 +871,9 @@ async fn single_stream(
     ))
 }
 
-fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) -> Result<()> {
+/// Validates a resume response's `Content-Range` contract. Public so the
+/// protocol boundary can be fuzzed independently of network I/O.
+pub fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) -> Result<()> {
     let value = value.ok_or_else(|| RavynError::Protocol("missing Content-Range".into()))?;
     let (range, response_total) = value
         .strip_prefix("bytes ")
@@ -853,7 +903,9 @@ fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) ->
     Ok(())
 }
 
-fn content_disposition_filename(value: Option<&str>) -> Option<String> {
+/// Extracts and sanitizes a filename candidate from Content-Disposition.
+/// Public so this untrusted-header parser remains directly fuzzable.
+pub fn content_disposition_filename(value: Option<&str>) -> Option<String> {
     let value = value?;
     for part in value.split(';').map(str::trim) {
         if let Some(encoded) = part.strip_prefix("filename*=") {

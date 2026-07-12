@@ -107,6 +107,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/metrics", get(metrics))
         .route("/openapi.json", get(openapi))
         .route("/v1/jobs", get(list_jobs).post(create_job))
+        .route("/v1/jobs/metalink", post(create_metalink_job))
         .route("/v1/jobs/batch", post(create_batch))
         .route("/v1/jobs/actions", post(apply_job_action))
         .route("/v1/jobs/import-text", post(import_text))

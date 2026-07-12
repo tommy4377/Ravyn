@@ -76,246 +76,268 @@ impl JobManager {
             .ok()
             .and_then(|outcome| outcome.terminal_message.clone());
         let final_result = match result {
-            Ok(outcome) => {
-                async {
-                    let verified_primary_checksum =
-                        if let Some(path) = outcome.primary_path.as_deref() {
-                            if let Some(expected) = job.expected_sha256.as_deref() {
-                                let _ = self
-                                    .repository
-                                    .set_status(job.id, JobStatus::Verifying, None)
-                                    .await;
-                                Some(checksum::verify_and_return(path, expected, &token).await?)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                    let primary_path = outcome.primary_path.clone();
-                    let produced = if outcome.artifacts.is_empty() {
-                        let files = if outcome.files.is_empty() {
-                            outcome.primary_path.clone().into_iter().collect::<Vec<_>>()
-                        } else {
-                            outcome.files.clone()
-                        };
-                        files
-                            .into_iter()
-                            .map(crate::download::adapter::ProducedArtifact::new)
-                            .collect::<Vec<_>>()
-                    } else {
-                        outcome.artifacts
-                    };
-                    let mut registered = Vec::with_capacity(produced.len());
-                    for produced_artifact in produced {
-                        let path = produced_artifact.path;
-                        let is_primary = primary_path.as_deref() == Some(path.as_path());
-                        let artifact = self
+            Ok(outcome) => async {
+                let verified_primary_checksum = if let Some(path) = outcome.primary_path.as_deref()
+                {
+                    if let Some(expected) = job.expected_sha256.as_deref() {
+                        let _ = self
                             .repository
-                            .register_output_with_metadata(
-                                &job,
-                                &path,
-                                produced_artifact
-                                    .output_type
-                                    .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
-                                output_source(job.kind),
-                                produced_artifact.metadata,
-                            )
-                            .await?;
-                        if is_primary {
-                            if let Some(value) = verified_primary_checksum.as_deref() {
-                                self.repository
-                                    .set_output_checksum(artifact.id, "sha256", value)
-                                    .await?;
+                            .set_status(job.id, JobStatus::Verifying, None)
+                            .await;
+                        match checksum::verify_and_return(path, expected, &token).await {
+                            Ok(actual) => Some(actual),
+                            Err(error)
+                                if error.failure_class()
+                                    == crate::error::FailureClass::ChecksumMismatch =>
+                            {
+                                let quarantine =
+                                    self.config.data_dir.join("quarantine").join("checksum");
+                                match checksum::quarantine_corrupt_output(path, &quarantine, job.id)
+                                    .await
+                                {
+                                    Ok(Some(destination)) => tracing::warn!(
+                                        job_id = %job.id,
+                                        source = %path.display(),
+                                        destination = %destination.display(),
+                                        "quarantined output that failed checksum verification"
+                                    ),
+                                    Ok(None) => {}
+                                    Err(cleanup_error) => tracing::error!(
+                                        job_id = %job.id,
+                                        source = %path.display(),
+                                        %cleanup_error,
+                                        "failed to isolate output that failed checksum verification"
+                                    ),
+                                }
+                                return Err(error);
                             }
+                            Err(error) => return Err(error),
                         }
-                        if job.kind == JobKind::Media {
-                            if let Some(item_key) = produced_artifact.media_item_key.as_deref() {
-                                self.repository
-                                    .link_media_item_artifact(
-                                        job.id,
-                                        item_key,
-                                        artifact.id,
-                                        produced_artifact.role.as_deref().unwrap_or(
-                                            if is_primary { "primary" } else { "auxiliary" },
-                                        ),
-                                    )
-                                    .await?;
-                            } else {
-                                self.repository
-                                    .link_media_item_output(job.id, &path, artifact.id)
-                                    .await?;
-                            }
-                        }
-                        if produced_artifact.postprocess {
-                            registered.push((artifact.id, path));
-                        }
+                    } else {
+                        None
                     }
-                    if registered.is_empty() || job.options_json.post_actions.is_empty() {
-                        return Ok(());
-                    }
+                } else {
+                    None
+                };
 
-                    let _ = self
+                let primary_path = outcome.primary_path.clone();
+                let produced = if outcome.artifacts.is_empty() {
+                    let files = if outcome.files.is_empty() {
+                        outcome.primary_path.clone().into_iter().collect::<Vec<_>>()
+                    } else {
+                        outcome.files.clone()
+                    };
+                    files
+                        .into_iter()
+                        .map(crate::download::adapter::ProducedArtifact::new)
+                        .collect::<Vec<_>>()
+                } else {
+                    outcome.artifacts
+                };
+                let mut registered = Vec::with_capacity(produced.len());
+                for produced_artifact in produced {
+                    let path = produced_artifact.path;
+                    let is_primary = primary_path.as_deref() == Some(path.as_path());
+                    let artifact = self
                         .repository
-                        .set_status(job.id, JobStatus::PostProcessing, None)
-                        .await;
-                    for (file_index, (output_id, path)) in registered.into_iter().enumerate() {
-                        let mut current_output_id = output_id;
-                        let mut current = path;
-                        for (action_index, action) in
-                            job.options_json.post_actions.iter().enumerate()
+                        .register_output_with_metadata(
+                            &job,
+                            &path,
+                            produced_artifact
+                                .output_type
+                                .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
+                            output_source(job.kind),
+                            produced_artifact.metadata,
+                        )
+                        .await?;
+                    if is_primary {
+                        if let Some(value) = verified_primary_checksum.as_deref() {
+                            self.repository
+                                .set_output_checksum(artifact.id, "sha256", value)
+                                .await?;
+                        }
+                    }
+                    if job.kind == JobKind::Media {
+                        if let Some(item_key) = produced_artifact.media_item_key.as_deref() {
+                            self.repository
+                                .link_media_item_artifact(
+                                    job.id,
+                                    item_key,
+                                    artifact.id,
+                                    produced_artifact.role.as_deref().unwrap_or(if is_primary {
+                                        "primary"
+                                    } else {
+                                        "auxiliary"
+                                    }),
+                                )
+                                .await?;
+                        } else {
+                            self.repository
+                                .link_media_item_output(job.id, &path, artifact.id)
+                                .await?;
+                        }
+                    }
+                    if produced_artifact.postprocess {
+                        registered.push((artifact.id, path));
+                    }
+                }
+                if registered.is_empty() || job.options_json.post_actions.is_empty() {
+                    return Ok(());
+                }
+
+                let _ = self
+                    .repository
+                    .set_status(job.id, JobStatus::PostProcessing, None)
+                    .await;
+                for (file_index, (output_id, path)) in registered.into_iter().enumerate() {
+                    let mut current_output_id = output_id;
+                    let mut current = path;
+                    for (action_index, action) in job.options_json.post_actions.iter().enumerate() {
+                        let journal_index = file_index
+                            .saturating_mul(job.options_json.post_actions.len())
+                            .saturating_add(action_index);
+                        if let Some(output) = self
+                            .repository
+                            .begin_job_action(job.id, journal_index, action, &current)
+                            .await?
                         {
-                            let journal_index = file_index
-                                .saturating_mul(job.options_json.post_actions.len())
-                                .saturating_add(action_index);
-                            if let Some(output) = self
+                            if !tokio::fs::try_exists(&output).await? {
+                                return Err(RavynError::Internal(format!(
+                                    "completed post-processing output is missing: {}",
+                                    output.display()
+                                )));
+                            }
+                            if let Some(artifact) = self
                                 .repository
-                                .begin_job_action(job.id, journal_index, action, &current)
+                                .find_job_output_by_path(job.id, &output)
                                 .await?
                             {
-                                if !tokio::fs::try_exists(&output).await? {
-                                    return Err(RavynError::Internal(format!(
-                                        "completed post-processing output is missing: {}",
-                                        output.display()
-                                    )));
-                                }
-                                if let Some(artifact) = self
-                                    .repository
-                                    .find_job_output_by_path(job.id, &output)
-                                    .await?
-                                {
-                                    current_output_id = artifact.id;
-                                }
-                                current = output;
-                                continue;
+                                current_output_id = artifact.id;
                             }
-                            let action_started = std::time::Instant::now();
-                            let action_result = postprocess::pipeline::run(
-                                self.config.clone(),
-                                current.clone(),
-                                std::slice::from_ref(action),
-                                token.child_token(),
-                            )
-                            .await;
-                            self.metrics.post_action_finished(
-                                post_action_name(action),
+                            current = output;
+                            continue;
+                        }
+                        let action_started = std::time::Instant::now();
+                        let action_result = postprocess::pipeline::run(
+                            self.config.clone(),
+                            current.clone(),
+                            std::slice::from_ref(action),
+                            token.child_token(),
+                        )
+                        .await;
+                        self.metrics.post_action_finished(
+                            post_action_name(action),
+                            action_result.is_ok(),
+                            action_started.elapsed(),
+                        );
+                        if let Some(tool) = match action {
+                            PostAction::Extract { .. } => Some("seven_zip"),
+                            PostAction::ConvertMedia { .. } => Some("ffmpeg"),
+                            _ => None,
+                        } {
+                            self.metrics.process_finished(
+                                tool,
                                 action_result.is_ok(),
                                 action_started.elapsed(),
                             );
-                            if let Some(tool) = match action {
-                                PostAction::Extract { .. } => Some("seven_zip"),
-                                PostAction::ConvertMedia { .. } => Some("ffmpeg"),
-                                _ => None,
-                            } {
-                                self.metrics.process_finished(
-                                    tool,
-                                    action_result.is_ok(),
-                                    action_started.elapsed(),
-                                );
-                            }
-                            match action_result {
-                                Ok(output) => {
-                                    self.repository
-                                        .finish_job_action(
-                                            job.id,
-                                            journal_index,
-                                            Ok(output.as_path()),
-                                        )
-                                        .await?;
-                                    match action {
-                                        PostAction::VerifySha256 { expected } => {
-                                            self.repository
-                                                .set_output_checksum(
-                                                    current_output_id,
-                                                    "sha256",
-                                                    expected,
-                                                )
-                                                .await?;
-                                        }
-                                        PostAction::Extract { delete_archive, .. } => {
-                                            let derived = self
-                                                .repository
-                                                .register_derived_output(
-                                                    &job,
-                                                    current_output_id,
-                                                    &output,
-                                                    OutputType::Directory,
-                                                    journal_index,
-                                                    serde_json::json!({
-                                                        "action": "extract",
-                                                        "source": current
-                                                    }),
-                                                )
-                                                .await?;
-                                            if *delete_archive {
-                                                self.repository
-                                                    .set_output_state(
-                                                        current_output_id,
-                                                        OutputState::Deleted,
-                                                    )
-                                                    .await?;
-                                            }
-                                            current_output_id = derived.id;
-                                        }
-                                        PostAction::ConvertMedia {
-                                            extension,
-                                            delete_original,
-                                            ..
-                                        } => {
-                                            let derived = self
-                                                .repository
-                                                .register_derived_output(
-                                                    &job,
-                                                    current_output_id,
-                                                    &output,
-                                                    OutputType::ConvertedFile,
-                                                    journal_index,
-                                                    serde_json::json!({
-                                                        "action": "convert_media",
-                                                        "extension": extension,
-                                                        "source": current
-                                                    }),
-                                                )
-                                                .await?;
-                                            if *delete_original {
-                                                self.repository
-                                                    .set_output_state(
-                                                        current_output_id,
-                                                        OutputState::Replaced,
-                                                    )
-                                                    .await?;
-                                            }
-                                            current_output_id = derived.id;
-                                        }
-                                        PostAction::Move { .. } => {
-                                            self.repository
-                                                .update_output_path(
-                                                    &job,
-                                                    current_output_id,
-                                                    &output,
-                                                    OutputState::Moved,
-                                                )
-                                                .await?;
-                                        }
-                                        PostAction::Open => {}
+                        }
+                        match action_result {
+                            Ok(output) => {
+                                self.repository
+                                    .finish_job_action(job.id, journal_index, Ok(output.as_path()))
+                                    .await?;
+                                match action {
+                                    PostAction::VerifySha256 { expected } => {
+                                        self.repository
+                                            .set_output_checksum(
+                                                current_output_id,
+                                                "sha256",
+                                                expected,
+                                            )
+                                            .await?;
                                     }
-                                    current = output;
+                                    PostAction::Extract { delete_archive, .. } => {
+                                        let derived = self
+                                            .repository
+                                            .register_derived_output(
+                                                &job,
+                                                current_output_id,
+                                                &output,
+                                                OutputType::Directory,
+                                                journal_index,
+                                                serde_json::json!({
+                                                    "action": "extract",
+                                                    "source": current
+                                                }),
+                                            )
+                                            .await?;
+                                        if *delete_archive {
+                                            self.repository
+                                                .set_output_state(
+                                                    current_output_id,
+                                                    OutputState::Deleted,
+                                                )
+                                                .await?;
+                                        }
+                                        current_output_id = derived.id;
+                                    }
+                                    PostAction::ConvertMedia {
+                                        extension,
+                                        delete_original,
+                                        ..
+                                    } => {
+                                        let derived = self
+                                            .repository
+                                            .register_derived_output(
+                                                &job,
+                                                current_output_id,
+                                                &output,
+                                                OutputType::ConvertedFile,
+                                                journal_index,
+                                                serde_json::json!({
+                                                    "action": "convert_media",
+                                                    "extension": extension,
+                                                    "source": current
+                                                }),
+                                            )
+                                            .await?;
+                                        if *delete_original {
+                                            self.repository
+                                                .set_output_state(
+                                                    current_output_id,
+                                                    OutputState::Replaced,
+                                                )
+                                                .await?;
+                                        }
+                                        current_output_id = derived.id;
+                                    }
+                                    PostAction::Move { .. } => {
+                                        self.repository
+                                            .update_output_path(
+                                                &job,
+                                                current_output_id,
+                                                &output,
+                                                OutputState::Moved,
+                                            )
+                                            .await?;
+                                    }
+                                    PostAction::Open => {}
                                 }
-                                Err(error) => {
-                                    let message = error.to_string();
-                                    self.repository
-                                        .finish_job_action(job.id, journal_index, Err(&message))
-                                        .await?;
-                                    return Err(error);
-                                }
+                                current = output;
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                self.repository
+                                    .finish_job_action(job.id, journal_index, Err(&message))
+                                    .await?;
+                                return Err(error);
                             }
                         }
                     }
-                    Ok(())
                 }
-                .await
+                Ok(())
             }
+            .await,
             Err(error) => Err(error),
         };
         let current = self

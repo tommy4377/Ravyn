@@ -57,6 +57,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
     ),
     op!(
         "post",
+        "/v1/jobs/metalink",
+        "createMetalinkJob",
+        "Jobs",
+        "Create an HTTP job from a bounded Metalink v4 document",
+        "201",
+        false,
+        true,
+        Some("Job")
+    ),
+    op!(
+        "post",
         "/v1/jobs/batch",
         "createJobBatch",
         "Jobs",

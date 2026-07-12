@@ -173,6 +173,28 @@ mod resume_identity_tests {
     }
 
     #[tokio::test]
+    async fn job_creation_rejects_speed_limits_outside_sqlite_range() {
+        let (_temp, repository) = repository().await;
+        let result = repository
+            .insert_job(
+                CreateJob {
+                    kind: JobKind::Http,
+                    source: "https://example.test/file.bin".into(),
+                    destination: Some(PathBuf::from("downloads")),
+                    filename: Some("file.bin".into()),
+                    priority: 0,
+                    speed_limit_bps: Some(u64::MAX),
+                    expected_sha256: None,
+                    duplicate_policy: DuplicatePolicy::Allow,
+                    options: DownloadOptions::default(),
+                },
+                PathBuf::from("downloads"),
+            )
+            .await;
+        assert!(matches!(result, Err(RavynError::Invalid(_))));
+    }
+
+    #[tokio::test]
     async fn job_pages_are_bounded_and_cursor_stable() {
         let (_temp, repository) = repository().await;
         for _ in 0..3 {
@@ -541,5 +563,73 @@ mod fault_injection_tests {
             "busy counter did not increase: {before} -> {after}"
         );
         write_lock.rollback().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use sqlx::{Connection, Row, migrate::Migrate};
+
+    #[tokio::test]
+    async fn populated_pre_observability_database_upgrades_without_data_loss() {
+        const OLD_VERSION: i64 = 9;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("upgrade.sqlite3");
+        let url = format!("sqlite://{}", path.display());
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        let migrator = sqlx::migrate!();
+        for migration in migrator.iter().filter(|item| item.version <= OLD_VERSION) {
+            connection.apply(migration).await.unwrap();
+        }
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO jobs(id,kind,source,destination,status,priority,options_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id.to_string())
+        .bind("http")
+        .bind("https://example.test/legacy.bin")
+        .bind("downloads")
+        .bind("queued")
+        .bind(7_i64)
+        .bind("{}")
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+
+        let repository = Repository::connect(&url).await.unwrap();
+        let upgraded = repository.get_job(id).await.unwrap();
+        assert_eq!(upgraded.source, "https://example.test/legacy.bin");
+        assert_eq!(upgraded.priority, 7);
+        assert_eq!(repository.integrity_check().await.unwrap(), "ok");
+
+        let versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_one(repository.pool())
+                .await
+                .unwrap();
+        assert_eq!(versions, migrator.iter().count() as i64);
+
+        let schedule_columns = sqlx::query("PRAGMA table_info(schedules)")
+            .fetch_all(repository.pool())
+            .await
+            .unwrap();
+        assert!(schedule_columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "timezone_name")
+        }));
     }
 }

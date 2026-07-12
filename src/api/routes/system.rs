@@ -403,8 +403,16 @@ pub(super) async fn system_capabilities(
             "scheduler_missed_run_policies",
             "fixed_offset_schedule_timezones",
             "live_global_bandwidth_limit",
+            "metalink_v4",
+            "piece_verified_mirror_failover",
+            "managed_engine_activation",
         ],
-        disabled_features: vec!["native_tls", "metalink", "http3"],
+        disabled_features: vec![
+            "native_tls",
+            "http3",
+            "speculative_http",
+            "concurrent_multi_source",
+        ],
         platform: std::env::consts::OS,
         authentication_modes,
     }))

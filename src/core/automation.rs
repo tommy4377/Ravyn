@@ -261,6 +261,9 @@ impl JobManager {
         }
         for action in actions {
             match action {
+                PostAction::VerifySha256 { expected } => {
+                    crate::services::checksum::validate_sha256(expected)?;
+                }
                 PostAction::Extract {
                     destination: Some(destination),
                     ..
