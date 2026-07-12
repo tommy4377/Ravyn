@@ -1,0 +1,5 @@
+- Persistent SQLite job lifecycle shared by HTTP, media (yt-dlp), and torrent (rqbit) jobs.
+- Axum routes live in `src/api/routes.rs`; orchestration in `src/core/manager.rs`; persistence in `src/storage/repository.rs` plus focused storage modules.
+- Ordered immutable migrations in `migrations/`; add new migrations rather than rewriting released ones.
+- Long-running work must be cancellation-aware and supervised; DB/file state must remain consistent and late completion must not overwrite paused/cancelled state.
+- Outputs and multi-file workflows are intended to converge on first-class persistent artifacts; post-actions use a durable journal.

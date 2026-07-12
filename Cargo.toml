@@ -1,0 +1,50 @@
+[package]
+name = "ravyn"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "High-performance download manager backend"
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json", "macros"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+hex = "0.4"
+keyring = "=3.6.3"
+percent-encoding = "2"
+regex = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "http2", "stream", "json", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }
+thiserror = "2"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "process", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["limit", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

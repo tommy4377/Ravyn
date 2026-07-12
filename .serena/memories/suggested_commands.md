@@ -1,0 +1,5 @@
+- Run: `cargo run --locked -- --data-dir ./ravyn-data --listen 127.0.0.1:47821`
+- Fast tests: `cargo test --locked --all-targets`
+- HTTP integration: `cargo test --locked --test http_integration`
+- Search: `rg <pattern> <path>`; enumerate: `rg --files`.
+- PowerShell file reads should use `Get-Content -Raw -LiteralPath <path>` for exact paths.

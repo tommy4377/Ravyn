@@ -1,0 +1,6 @@
+- Backend-only Rust download manager; no frontend or extensions in this repository.
+- Source domains: `src/core` lifecycle/events, `src/download` HTTP engine, `src/adapters` yt-dlp/rqbit, `src/postprocess`, `src/services` rules/schedules/security/imports, `src/storage` SQLite, `src/api` Axum.
+- Authoritative roadmap: `Ravyn-Project-Status-and-Roadmap.md`; remaining-work detail: `Ravyn-Backend-Remaining-Work-Roadmap.md`.
+- Security invariants: loopback binding by default, output-root confinement, private-network blocking, bounded inputs, least privilege.
+- Backend architecture and domain boundaries: `mem:backend/core`.
+- Stack and dependency pins: `mem:tech_stack`. Commands and completion gates: `mem:suggested_commands`, `mem:task_completion`.

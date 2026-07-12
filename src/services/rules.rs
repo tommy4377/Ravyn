@@ -1,0 +1,203 @@
+use crate::core::models::{CreateJob, PostAction};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use url::Url;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuleMatcher {
+    pub domains: Vec<String>,
+    pub extensions: Vec<String>,
+    pub mime_types: Vec<String>,
+    pub url_regex: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuleActions {
+    pub destination: Option<PathBuf>,
+    pub tags: Vec<String>,
+    pub speed_limit_bps: Option<u64>,
+    pub post_actions: Vec<PostAction>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rule {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub matcher: RuleMatcher,
+    pub actions: RuleActions,
+}
+
+impl Rule {
+    pub fn matches(&self, url: &str, mime: Option<&str>, extension: Option<&str>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let parsed = Url::parse(url).ok();
+        let host = parsed
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or_default();
+        let domains = self.matcher.domains.is_empty()
+            || self.matcher.domains.iter().any(|d| domain_matches(d, host));
+        let extensions = self.matcher.extensions.is_empty()
+            || extension.is_some_and(|e| {
+                self.matcher
+                    .extensions
+                    .iter()
+                    .any(|x| x.eq_ignore_ascii_case(e))
+            });
+        let mimes = self.matcher.mime_types.is_empty()
+            || mime.is_some_and(|m| self.matcher.mime_types.iter().any(|p| mime_matches(p, m)));
+        let regex = self
+            .matcher
+            .url_regex
+            .as_ref()
+            .is_none_or(|p| Regex::new(p).is_ok_and(|r| r.is_match(url)));
+        domains && extensions && mimes && regex
+    }
+    pub fn apply(&self, request: &mut CreateJob) {
+        if let Some(destination) = &self.actions.destination {
+            request.destination = Some(destination.clone());
+        }
+        request.options.tags.extend(self.actions.tags.clone());
+        if self.actions.speed_limit_bps.is_some() {
+            request.speed_limit_bps = self.actions.speed_limit_bps;
+        }
+        request
+            .options
+            .post_actions
+            .extend(self.actions.post_actions.clone());
+    }
+}
+fn domain_matches(pattern: &str, host: &str) -> bool {
+    pattern.strip_prefix("*.").map_or_else(
+        || pattern.eq_ignore_ascii_case(host),
+        |suffix| {
+            host.eq_ignore_ascii_case(suffix)
+                || host
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
+        },
+    )
+}
+fn mime_matches(pattern: &str, actual: &str) -> bool {
+    pattern.strip_suffix("/*").map_or_else(
+        || pattern.eq_ignore_ascii_case(actual),
+        |prefix| {
+            actual
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}/", prefix.to_ascii_lowercase()))
+        },
+    )
+}
+
+/// Applies matching rules in priority order. Scalar actions are first-wins; additive actions are merged.
+pub fn apply_matching(
+    rules: &[Rule],
+    request: &mut CreateJob,
+    mime: Option<&str>,
+    extension: Option<&str>,
+) {
+    let mut destination_set = request.destination.is_some();
+    let mut speed_set = request.speed_limit_bps.is_some();
+    for rule in rules {
+        if !rule.matches(&request.source, mime, extension) {
+            continue;
+        }
+        if !destination_set {
+            if let Some(destination) = &rule.actions.destination {
+                request.destination = Some(destination.clone());
+                destination_set = true;
+            }
+        }
+        if !speed_set {
+            if let Some(limit) = rule.actions.speed_limit_bps {
+                request.speed_limit_bps = Some(limit);
+                speed_set = true;
+            }
+        }
+        request
+            .options
+            .tags
+            .extend(rule.actions.tags.iter().cloned());
+        request
+            .options
+            .post_actions
+            .extend(rule.actions.post_actions.iter().cloned());
+    }
+    request.options.tags.sort();
+    request.options.tags.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(matcher: RuleMatcher) -> Rule {
+        Rule {
+            id: uuid::Uuid::nil(),
+            name: "test".into(),
+            enabled: true,
+            priority: 0,
+            matcher,
+            actions: RuleActions::default(),
+        }
+    }
+
+    #[test]
+    fn wildcard_domain_matches_subdomains_and_root() {
+        let rule = rule(RuleMatcher {
+            domains: vec!["*.example.com".into()],
+            ..Default::default()
+        });
+        assert!(rule.matches("https://example.com/file.zip", None, Some("zip")));
+        assert!(rule.matches("https://cdn.example.com/file.zip", None, Some("zip")));
+        assert!(!rule.matches("https://example.org/file.zip", None, Some("zip")));
+    }
+
+    #[test]
+    fn wildcard_mime_matches_category() {
+        let rule = rule(RuleMatcher {
+            mime_types: vec!["video/*".into()],
+            ..Default::default()
+        });
+        assert!(rule.matches("https://example.com/video", Some("video/mp4"), None));
+        assert!(!rule.matches("https://example.com/image", Some("image/png"), None));
+    }
+
+    #[test]
+    fn higher_priority_scalar_action_wins() {
+        let mut request = CreateJob {
+            kind: crate::core::models::JobKind::Http,
+            source: "https://example.com/file.bin".into(),
+            destination: None,
+            filename: None,
+            priority: 0,
+            speed_limit_bps: None,
+            expected_sha256: None,
+            duplicate_policy: Default::default(),
+            options: Default::default(),
+        };
+        let rules = vec![
+            Rule {
+                priority: 100,
+                actions: RuleActions {
+                    destination: Some("high".into()),
+                    ..Default::default()
+                },
+                ..rule(Default::default())
+            },
+            Rule {
+                priority: 1,
+                actions: RuleActions {
+                    destination: Some("low".into()),
+                    ..Default::default()
+                },
+                ..rule(Default::default())
+            },
+        ];
+        apply_matching(&rules, &mut request, None, Some("bin"));
+        assert_eq!(request.destination, Some(PathBuf::from("high")));
+    }
+}
