@@ -50,6 +50,12 @@ impl ProgressPublisher {
         self.metrics.event(name);
     }
 
+    /// Hands out the shared metrics registry for engine-level instrumentation
+    /// that outlives individual progress snapshots.
+    pub fn metrics(&self) -> Metrics {
+        self.metrics.clone()
+    }
+
     pub fn torrent_telemetry(&self, job_id: Uuid, download_bps: u64, upload_bps: u64, peers: u64) {
         self.metrics
             .torrent_telemetry(job_id, download_bps, upload_bps, peers);

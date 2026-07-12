@@ -82,7 +82,12 @@ impl HttpAdapter {
         let host = url
             .host_str()
             .ok_or_else(|| RavynError::Invalid("download URL has no host".into()))?;
-        let addresses = security::resolve_network_source(&self.config, source).await?;
+        let started = Instant::now();
+        let resolved = security::resolve_network_source(&self.config, source).await;
+        self.progress_publisher
+            .metrics()
+            .dns_resolved(resolved.is_ok(), started.elapsed());
+        let addresses = resolved?;
         build_client(
             &self.config,
             job.options_json.proxy.as_deref().map(str::trim),
@@ -438,6 +443,7 @@ impl HttpAdapter {
                     self.config.max_retries,
                     cancellation.child_token(),
                     progress.clone(),
+                    self.progress_publisher.metrics(),
                 )
                 .await;
                 match segmented_result {

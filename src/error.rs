@@ -59,7 +59,7 @@ pub enum RavynError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
-    Database(#[from] sqlx::Error),
+    Database(sqlx::Error),
     #[error(transparent)]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error(transparent)]
@@ -68,6 +68,13 @@ pub enum RavynError {
     Url(#[from] url::ParseError),
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl From<sqlx::Error> for RavynError {
+    fn from(error: sqlx::Error) -> Self {
+        crate::core::metrics::note_sqlite_error(&error);
+        Self::Database(error)
+    }
 }
 
 impl RavynError {

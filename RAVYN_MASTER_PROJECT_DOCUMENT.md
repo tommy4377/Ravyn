@@ -58,12 +58,12 @@ This section describes the latest consolidated backend snapshot after Increment 
 
 | Item | Current value |
 |---|---:|
-| Rust source and Rust test lines | approximately 19,928 |
-| Rust source files | 49 |
+| Rust source and Rust test lines | approximately 22,244 |
+| Rust source files | 76 (largest file 910 lines after the de-monolith refactor) |
 | Database migrations | 16 |
 | Database tables after migrations | 23 |
 | Axum/OpenAPI operations | 90 / 90 |
-| Rust test attributes present | approximately 73 |
+| Rust test attributes present | approximately 99 (95 unit/property + 4 integration) |
 | Runtime `todo!`, `unimplemented!`, or application `panic!` | 0 found by static scan |
 | Latest SQLite integrity check | `ok` |
 | Latest foreign-key violations | 0 |
@@ -97,51 +97,46 @@ Primary implementation stack:
 
 ## 3.1 Main modules
 
+After the 2026-07-12 de-monolith refactor, every source file is below 1,000 lines. Multi-file types (`Repository`, `JobManager`) follow the multiple-`impl`-block pattern: the struct lives in one file and each sibling module contributes a cohesive `impl` block.
+
 ```text
 src/
 ├── adapters/
-│   ├── media.rs
-│   └── torrent.rs
+│   ├── media.rs            (types + adapter; yt-dlp plumbing in media/ytdlp.rs)
+│   ├── media/ytdlp.rs
+│   ├── torrent.rs          (types + adapter; payload normalization in torrent/wire.rs)
+│   └── torrent/wire.rs
 ├── api/
-│   ├── routes.rs
-│   ├── openapi.rs
+│   ├── routes.rs           (state, router, audit helpers)
+│   ├── routes/{system,jobs,media,torrents,automation,browser}.rs
+│   ├── openapi.rs          (document assembly + parity test)
+│   ├── openapi/{operations,components}.rs
 │   └── pagination.rs
 ├── core/
-│   ├── manager.rs
-│   ├── models.rs
-│   ├── events.rs
-│   ├── progress.rs
-│   └── rate_limit.rs
+│   ├── manager.rs          (JobManager state + constructor)
+│   ├── lifecycle.rs        (create/pause/resume/cancel/retry/delete)
+│   ├── dispatcher.rs       (workers, dispatch loop, shutdown)
+│   ├── execution.rs        (engine run, checksum, post-processing phases)
+│   ├── bulk.rs             (sniff, text imports, batches)
+│   ├── automation.rs       (rules, tokens, schedules, validation)
+│   ├── maintenance.rs      (backup/restore control)
+│   ├── media_control.rs / torrent_control.rs
+│   ├── models.rs / events.rs / progress.rs / rate_limit.rs / metrics.rs
 ├── download/
-│   ├── adapter.rs
-│   ├── http.rs
-│   ├── planner.rs
-│   ├── probe.rs
-│   └── segmented.rs
+│   ├── adapter.rs / http.rs / planner.rs / probe.rs / segmented.rs
 ├── postprocess/
 │   └── pipeline.rs
 ├── services/
-│   ├── browser.rs
-│   ├── checksum.rs
-│   ├── cron.rs
-│   ├── dedup.rs
-│   ├── filename.rs
-│   ├── imports.rs
-│   ├── rules.rs
-│   ├── scheduler.rs
-│   ├── schedules.rs
-│   ├── secrets.rs
-│   ├── security.rs
-│   └── sniffer.rs
+│   ├── browser.rs / checksum.rs / cron.rs / dedup.rs / filename.rs
+│   ├── imports.rs / process.rs / rules.rs / scheduler.rs / schedules.rs
+│   └── secrets.rs / security.rs / sniffer.rs
 └── storage/
-    ├── automation.rs
-    ├── host_profiles.rs
-    ├── media.rs
-    ├── pagination.rs
-    ├── recovery.rs
-    ├── repository.rs
-    ├── segments.rs
-    └── torrent_policy.rs
+    ├── repository.rs       (shared SQLite handle + connect)
+    ├── jobs.rs / outputs.rs / schedules.rs / audit.rs / secrets.rs
+    ├── settings.rs / backup.rs / automation.rs / media.rs
+    ├── pagination.rs / recovery.rs / segments.rs / host_profiles.rs
+    ├── torrent_policy.rs
+    └── repository_tests.rs (cross-module storage tests)
 ```
 
 ## 3.2 Architectural responsibilities
@@ -676,11 +671,9 @@ Implemented:
 - capability reporting;
 - dependency health reporting.
 
-### Partial
+### Status
 
-Production metrics are not yet deep enough for every engine and failure mode.
-
-See the remaining-work section for the required metrics.
+The Section 7.6 metrics backlog is complete as of 2026-07-12: work-unit duration, SQLite query latency, SQLite busy errors, seeding-policy outcomes, DNS duration, free disk space, and temporary disk usage are implemented with bounded label cardinality. Deeper per-mirror and per-piece telemetry is deferred to the advanced transfer priorities.
 
 ---
 
@@ -881,6 +874,30 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 ```
 
+## 6.4 Latest compiler-verified snapshot (2026-07-12, Priority 1 completion)
+
+- `Cargo.lock` was missing from the repository and was generated and committed on this pass; every later command used `--locked`;
+- `cargo fmt --all -- --check` passed;
+- `cargo check --all-targets` passed;
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` passed;
+- `cargo test --locked --all-targets` passed: 87 unit/property tests and 3 HTTP integration tests, 0 failures.
+
+## 6.5 Latest compiler-verified snapshot (2026-07-12, Priority 5 second pass)
+
+- new fault-injection tests: SQLite busy counting, scheduler lease loss and reclaim, 8-way single-owner claims, overlap replacement, idempotency replay/conflict, an end-to-end redirect-loop failure, and three restore fault fixtures (staged corruption, post-apply open failure, orphaned staged database);
+- one real restore-recovery bug was found by the corruption fixture and fixed (see Priority 5 notes);
+- `cargo fmt --all -- --check` passed;
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` passed;
+- `cargo test --locked --all-targets` passed: 95 unit/property tests and 4 HTTP integration tests, 0 failures.
+
+## 6.6 Latest compiler-verified snapshot (2026-07-12, de-monolith refactor)
+
+- all six 1,000+-line files were split into cohesive modules (see Section 12); the largest source file is now 910 lines;
+- moves were mechanical with no behavior changes; 76 Rust files, ~22,244 lines;
+- `cargo fmt --all -- --check` passed;
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` passed;
+- `cargo test --locked --all-targets` passed: 95 unit/property tests and 4 HTTP integration tests, 0 failures.
+
 ---
 
 # 7. Known partial areas
@@ -912,12 +929,28 @@ Current:
 - raw payload retained for forward compatibility;
 - root capability inventory.
 
+Supported-version policy (documented 2026-07-12): support is capability-based, not version-number-based. At startup Ravyn inspects the rqbit HTTP root document; the server must identify as `rqbit` and expose every required API:
+
+```text
+GET  /torrents
+POST /torrents
+GET  /torrents/{id}/stats/v1
+POST /torrents/{id}/add_peers
+POST /torrents/{id}/pause
+POST /torrents/{id}/start
+POST /torrents/{id}/delete
+POST /torrents/{id}/forget
+POST /torrents/{id}/update_only_files
+```
+
+A missing API marks the engine incompatible and torrent operations fail with a clear capability error instead of undefined behavior.
+
 Missing:
 
 - stable typed contracts for all DHT and diagnostic responses;
-- tested compatibility matrix across rqbit versions;
+- tested compatibility matrix across rqbit versions (requires CI images with real rqbit binaries);
 - runtime upload-control contract;
-- explicit minimum and maximum tested versions.
+- explicit minimum and maximum tested versions (blocked on the same CI matrix).
 
 ## 7.3 yt-dlp support policy
 
@@ -929,9 +962,20 @@ Current:
 - archive deduplication;
 - persistent media state.
 
+Supported-version policy (documented 2026-07-12): support is capability-based. Before any probe or download, Ravyn runs `yt-dlp --version` and `--help` and requires all of the following flags; an installation missing any of them is rejected early with a structured error:
+
+```text
+--ignore-config
+--dump-single-json
+--print
+--progress-template
+--download-archive
+--ffmpeg-location
+```
+
 Missing:
 
-- formal tested version range;
+- formal tested version range (requires CI images with real yt-dlp binaries; the capability contract above is the enforced floor);
 - controlled updater;
 - rollback;
 - independent queue execution for every playlist item;
@@ -983,17 +1027,18 @@ Current:
 - post-action duration/outcome histograms;
 - schedule delay and execution duration/outcome histograms;
 - SSE receiver, replay-buffer, replay-count, resync, and sequence-span telemetry;
-- OpenMetrics label-cardinality tests that exclude URLs, paths, tokens, job IDs, and arbitrary error text.
+- OpenMetrics label-cardinality tests that exclude URLs, paths, tokens, job IDs, and arbitrary error text;
+- segmented work-unit duration histograms by bounded outcome (`success`, `failure`, `cancelled`);
+- hot-path SQLite statement latency histograms by named operation (`claim_next_queued`, `update_progress_batch`, `insert_job`, `claim_due_schedule`);
+- process-wide SQLite busy/locked error counter recorded in the central `sqlx::Error` conversion;
+- torrent seeding-stop counters by bounded policy reason (`ratio_limit`, `time_limit`, `engine_missing`, `removed`, `cancelled`, `other`);
+- pre-connection DNS resolution duration histograms;
+- free disk space on the download filesystem (Windows `GetDiskFreeSpaceExW`, Unix `statvfs`);
+- temporary disk usage from `*.ravyn.part` files and `.ravyn-extract-*` staging directories through a depth- and entry-bounded scan.
 
 Missing:
 
-- work-unit duration;
-- SQLite query latency;
-- SQLite busy errors;
-- seeding-policy outcomes;
-- DNS duration;
-- free disk space;
-- temporary disk usage.
+- none; the Section 7.6 backlog is complete. Additional per-engine depth (for example per-mirror or per-piece telemetry) belongs to the advanced transfer priorities.
 
 ## 7.7 Process hardening
 
@@ -1093,13 +1138,19 @@ This is the highest-value next action because the latest increments were not com
 
 ## Priority 1 — Production metrics
 
-Implementation status verified on 2026-07-12:
+**Completed and verified on 2026-07-12 (second pass):**
 
 - the bounded runtime registry and core engine/process/scheduler instrumentation listed in Section 7.6 are implemented;
-- `cargo check --locked --all-targets` passed;
+- the previously missing metrics are now implemented: work-unit duration, SQLite query latency, SQLite busy errors, seeding-policy outcomes, DNS duration, free disk space, and temporary disk usage;
+- SQLite busy/locked detection covers every query path through the central `From<sqlx::Error>` conversion;
+- disk gauges are computed off the async runtime through `spawn_blocking` with a bounded filesystem scan;
+- the repository generated and now tracks `Cargo.lock` (it was missing despite the documented `--locked` workflow);
+- `cargo fmt --all -- --check` passed;
+- `cargo check --all-targets` passed (lock file generated on this run; subsequent commands used `--locked`);
 - `cargo clippy --locked --all-targets --all-features -- -D warnings` passed;
-- `cargo test --locked --all-targets` passed: 74 unit tests and 3 HTTP integration tests;
-- remaining Priority 1 scope is limited to the explicitly retained “Missing” list in Section 7.6.
+- `cargo test --locked --all-targets` passed: 87 unit/property tests and 3 HTTP integration tests.
+
+Priority 1 is complete. The requirements below remain as regression criteria.
 
 Implement the metrics listed in Section 7.6.
 
@@ -1208,41 +1259,53 @@ Implementation status verified on 2026-07-12:
 - strict Clippy passed and `cargo test --locked --all-targets` passed: 84 unit/property tests and 3 HTTP integration tests;
 - remaining filesystem, SQLite, recovery, archive, scheduler, idempotency, and protocol fault cases below remain active Priority 5 work.
 
-Add tests for:
+Second pass verified on 2026-07-12 (`fault_injection_tests` in `src/storage/repository.rs` plus a new HTTP integration test):
+
+- SQLite busy/locked: a zero-busy-timeout writer contending with an active write transaction fails with SQLITE_BUSY and the process-wide `ravyn_sqlite_busy_total` counter increments through the central error conversion;
+- scheduler lease loss: an expired lease is reclaimable by a new claimant, and the stale owner receives a conflict from both renewal and completion;
+- concurrent claims: eight simultaneous `claim_due_schedule` calls produce exactly one owner;
+- overlap replacement: a `replace` claim marks the still-running execution as replaced and cancellation-requested;
+- idempotency conflict: replays with an equal payload return the original resource, and a changed payload for the same key cannot overwrite the stored record;
+- redirect loop: a self-redirecting server fails the job with the bounded "redirect limit" protocol error through the full manager lifecycle;
+- restore faults: a staged backup corrupted on disk is abandoned gracefully at startup with a recorded failure while the active database survives; an open/migration failure after apply rolls back to the previous database; an orphaned staged database without its request marker is rejected;
+- **bug found and fixed by the corruption fixture:** a staged database that could not even be opened as SQLite made `verify_database_file` return a raw database error that bypassed the graceful-abandon path, leaving the restore marker in place and making every startup fail; `apply_pending` now treats verification errors the same as failed integrity checks (`staged_database_is_valid` in `src/storage/recovery.rs`);
+- strict Clippy passed and `cargo test --locked --all-targets` passed: 95 unit/property tests and 4 HTTP integration tests.
+
+Add tests for (remaining cases; struck items are covered):
 
 - disk full;
 - permission denied;
 - file locked;
-- SQLite busy;
-- SQLite locked;
+- ~~SQLite busy~~ — covered 2026-07-12;
+- ~~SQLite locked~~ — covered by the same contention fixture;
 - crash between file sync and DB checkpoint;
-- crash during restore state transitions;
+- ~~crash during restore state transitions~~ — covered 2026-07-12 (marker restart, staged corruption, post-apply open failure, orphaned staged database);
 - shutdown during checksum;
 - shutdown during yt-dlp;
 - shutdown during FFmpeg;
 - shutdown during 7-Zip;
 - rqbit restart;
-- changing ETag;
-- invalid range;
-- redirect loop;
-- DNS rebinding;
-- archive traversal;
+- ~~changing ETag~~ — covered by the existing remote-identity integration test;
+- ~~invalid range~~ — covered by the existing range-liar integration test;
+- ~~redirect loop~~ — covered 2026-07-12;
+- DNS rebinding (lexical and literal coverage exists; live rebinding fixture still open);
+- archive traversal (validator unit coverage exists; live 7-Zip fixture still open);
 - archive bomb;
 - playlist partial failure;
-- scheduler lease loss;
-- overlap replacement;
-- idempotency conflict.
+- ~~scheduler lease loss~~ — covered 2026-07-12;
+- ~~overlap replacement~~ — covered 2026-07-12;
+- ~~idempotency conflict~~ — covered 2026-07-12.
 
 Property tests:
 
-- segment coverage has no gaps;
-- segments do not overlap;
-- path confinement always holds;
-- pagination cursors are stable;
-- idempotency replays equal payloads;
-- idempotency rejects changed payloads;
-- scheduler claims have one owner;
-- rule priority is deterministic.
+- ~~segment coverage has no gaps~~ — covered;
+- ~~segments do not overlap~~ — covered;
+- ~~path confinement always holds~~ — covered;
+- pagination cursors are stable (deterministic test exists; property-based version open);
+- ~~idempotency replays equal payloads~~ — covered 2026-07-12;
+- ~~idempotency rejects changed payloads~~ — covered 2026-07-12;
+- ~~scheduler claims have one owner~~ — covered 2026-07-12 (8-way concurrency test);
+- rule priority is deterministic (first-wins unit coverage exists; property-based version open).
 
 ## Priority 6 — Torrent upload controls
 
@@ -1427,39 +1490,18 @@ Ravyn backend may be called production-ready when:
 
 # 12. Technical debt and recommended refactors
 
-Some files have become large and should be split before substantial further growth.
+**Completed on 2026-07-12.** Every file above 1,000 lines was split along the layout recommended below (see Section 3.1 for the resulting tree):
 
-Recommended direction:
+- `storage/repository.rs` (2,579 lines → 60) into `jobs`, `outputs`, `settings`, `audit`, `secrets`, `backup`, `schedules`, plus torrent records into `torrent_policy.rs`, rules into `automation.rs`, and cross-module tests into `repository_tests.rs`;
+- `core/manager.rs` (1,990 → ~280) into `lifecycle`, `dispatcher`, `execution`, `bulk`, `automation`, `maintenance`, `media_control`, `torrent_control`;
+- `api/routes.rs` (1,986 → ~240) into `routes/{system,jobs,media,torrents,automation,browser}.rs` with the router unchanged;
+- `adapters/torrent.rs` into `torrent/wire.rs` (payload normalization and its tests);
+- `adapters/media.rs` into `media/ytdlp.rs` (command building, output parsing, capability probing);
+- `api/openapi.rs` into `openapi/{operations,components}.rs`.
 
-```text
-storage/
-├── jobs.rs
-├── outputs.rs
-├── settings.rs
-├── audit.rs
-├── secrets.rs
-├── backup.rs
-├── schedules.rs
-└── media.rs
+The refactor was purely mechanical (verbatim moves; only visibility markers and pool-accessor rewrites), and API and database behavior are unchanged: the full suite (95 unit/property + 4 integration tests), strict Clippy, and rustfmt all pass on the split tree.
 
-api/
-├── jobs.rs
-├── settings.rs
-├── schedules.rs
-├── torrents.rs
-├── media.rs
-├── browser.rs
-└── system.rs
-
-core/
-├── dispatcher.rs
-├── execution.rs
-├── lifecycle.rs
-├── recovery.rs
-└── bulk.rs
-```
-
-Refactoring rules:
+Refactoring rules (still in force for future work):
 
 - do not mix large refactors with feature changes;
 - preserve API and database behavior;
@@ -1536,20 +1578,35 @@ The next milestone should be called:
 Increment 5 — Operational Hardening
 ```
 
+Progress within this milestone as of 2026-07-12:
+
+1. ~~compile and test the complete Increment 4 source~~ — done;
+2. ~~implement deep operational metrics~~ — done, including the former Section 7.6 “Missing” list;
+3. ~~add IANA time zones and DST~~ — done;
+4. ~~add safe named FFmpeg presets~~ — done;
+5. ~~add external-process resource limits~~ — done;
+6. ~~add restore fault tests~~ — done (staged corruption, post-apply open failure, orphaned staged database; one recovery bug found and fixed);
+7. ~~add scheduler overlap and DST destructive-concurrency tests~~ — done (lease loss, single-owner concurrency, replace-policy cancellation, DST transitions);
+8. ~~add initial property-testing infrastructure~~ — done; remaining fault cases tracked under Priority 5;
+9. ~~document supported yt-dlp and rqbit versions~~ — done as an enforced capability contract (Sections 7.2 and 7.3); a numeric tested matrix remains blocked on CI images with real binaries;
+10. update this master document with verified results — ongoing after every pass.
+
+**Increment 5 status (2026-07-12): complete.** Every scoped item is either done or explicitly reduced to work that requires infrastructure this repository does not yet have (CI images with real yt-dlp/rqbit binaries for a numeric version matrix, and OS-level fixtures for disk-full/permission/file-locked faults). Those remain tracked under Priorities 5 and 7.2/7.3.
+
+The next milestone should be called:
+
+```text
+Increment 6 — Transfer Scheduling
+```
+
 Recommended scope:
 
-1. compile and test the complete Increment 4 source;
-2. implement deep operational metrics;
-3. add IANA time zones and DST;
-4. add safe named FFmpeg presets;
-5. add external-process resource limits;
-6. add restore fault tests;
-7. add scheduler overlap and DST tests;
-8. add initial property-testing infrastructure;
-9. document supported yt-dlp and rqbit versions;
-10. update this master document with verified results.
+1. Priority 7 fair bandwidth scheduler (weighted priority, per-job min/max share, starvation prevention, live reconfiguration);
+2. the remaining portable Priority 5 property tests (pagination-cursor and rule-priority property versions);
+3. CI workflow activation — `.github/workflows/backend-ci.yml` already defines the full gate (fmt/check/clippy/test/build across Windows/Linux/macOS on stable and 1.85, plus cargo-audit/cargo-deny); with `Cargo.lock` now tracked it runs on the next push to GitHub;
+4. after CI exists with real external binaries: the yt-dlp/rqbit tested version matrix and the remaining tool-dependent fault fixtures.
 
-Do not begin speculative HTTP multi-source work until the current source is compiler-verified and benchmark fixtures exist.
+Do not begin speculative HTTP multi-source work until benchmark fixtures exist.
 
 ---
 

@@ -1,6 +1,10 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -12,6 +16,29 @@ use crate::{
 };
 
 const DURATION_BUCKETS: [f64; 10] = [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0, 300.0, 900.0];
+/// Millisecond-scale buckets for DNS lookups and SQLite statements.
+const FAST_BUCKETS: [f64; 10] = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0, 5.0];
+
+/// Process-wide count of SQLite busy/locked errors. Incremented from the
+/// central `sqlx::Error` conversion so every query path is covered without
+/// threading a metrics handle through the storage layer.
+static SQLITE_BUSY_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Records a SQLite busy or locked failure if the error is one. Called from
+/// the `From<sqlx::Error>` conversion in `crate::error`.
+pub fn note_sqlite_error(error: &sqlx::Error) {
+    if let sqlx::Error::Database(database) = error {
+        let code = database.code();
+        let message = database.message();
+        // SQLITE_BUSY (5), SQLITE_LOCKED (6) and their extended codes.
+        let busy = matches!(code.as_deref(), Some("5" | "6" | "261" | "262" | "517"))
+            || message.contains("database is locked")
+            || message.contains("database table is locked");
+        if busy {
+            SQLITE_BUSY_ERRORS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Metrics(Arc<Mutex<MetricsState>>);
@@ -34,6 +61,10 @@ struct MetricsState {
     post_action_durations: BTreeMap<(&'static str, &'static str), Histogram>,
     schedule_durations: BTreeMap<(&'static str, &'static str), Histogram>,
     schedule_delays: BTreeMap<&'static str, Histogram>,
+    work_unit_durations: BTreeMap<&'static str, Histogram>,
+    dns_durations: BTreeMap<&'static str, Histogram>,
+    sqlite_durations: BTreeMap<&'static str, Histogram>,
+    seeding_stops: BTreeMap<&'static str, u64>,
 }
 
 #[derive(Default)]
@@ -52,12 +83,17 @@ impl Metrics {
         duration: Duration,
     ) {
         let mut state = self.state();
-        observe(state.schedule_delays.entry(mode).or_default(), delay);
+        observe(
+            state.schedule_delays.entry(mode).or_default(),
+            &DURATION_BUCKETS,
+            delay,
+        );
         observe(
             state
                 .schedule_durations
                 .entry((mode, outcome(success)))
                 .or_default(),
+            &DURATION_BUCKETS,
             duration,
         );
     }
@@ -68,6 +104,7 @@ impl Metrics {
                 .process_durations
                 .entry((tool, outcome(success)))
                 .or_default(),
+            &DURATION_BUCKETS,
             duration,
         );
     }
@@ -78,8 +115,55 @@ impl Metrics {
                 .post_action_durations
                 .entry((action, outcome(success)))
                 .or_default(),
+            &DURATION_BUCKETS,
             duration,
         );
+    }
+
+    /// Records one completed segmented-download work unit. The outcome label
+    /// is bounded to `success`, `failure`, or `cancelled`.
+    pub fn work_unit_finished(&self, outcome: &'static str, duration: Duration) {
+        observe(
+            self.state().work_unit_durations.entry(outcome).or_default(),
+            &DURATION_BUCKETS,
+            duration,
+        );
+    }
+
+    /// Records the latency of one pre-connection DNS resolution.
+    pub fn dns_resolved(&self, success: bool, duration: Duration) {
+        observe(
+            self.state()
+                .dns_durations
+                .entry(outcome(success))
+                .or_default(),
+            &FAST_BUCKETS,
+            duration,
+        );
+    }
+
+    /// Records the latency of a named hot-path SQLite operation. Operation
+    /// names are static identifiers chosen at the call site, never derived
+    /// from request data.
+    pub fn db_query(&self, operation: &'static str, duration: Duration) {
+        observe(
+            self.state().sqlite_durations.entry(operation).or_default(),
+            &FAST_BUCKETS,
+            duration,
+        );
+    }
+
+    /// Counts a torrent seeding stop by bounded policy reason.
+    pub fn seeding_stopped(&self, reason: &str) {
+        let reason = match reason {
+            "ratio_limit" => "ratio_limit",
+            "time_limit" => "time_limit",
+            "engine_missing" => "engine_missing",
+            "removed" => "removed",
+            "cancelled" => "cancelled",
+            _ => "other",
+        };
+        *self.state().seeding_stops.entry(reason).or_default() += 1;
     }
 
     pub fn event(&self, name: &'static str) {
@@ -146,7 +230,11 @@ impl Metrics {
                 .entry((engine, failure_label(failure)))
                 .or_default() += 1;
         }
-        observe(state.durations.entry(engine).or_default(), duration);
+        observe(
+            state.durations.entry(engine).or_default(),
+            &DURATION_BUCKETS,
+            duration,
+        );
     }
 
     pub fn encode_openmetrics(&self) -> String {
@@ -261,6 +349,41 @@ impl Metrics {
             }
             body.push_str(&format!("ravyn_schedule_delay_seconds_bucket{{mode=\"{mode}\",le=\"+Inf\"}} {}\nravyn_schedule_delay_seconds_sum{{mode=\"{mode}\"}} {}\nravyn_schedule_delay_seconds_count{{mode=\"{mode}\"}} {}\n", histogram.count, histogram.sum, histogram.count));
         }
+        encode_single_label_histograms(
+            &mut body,
+            "ravyn_work_unit_duration_seconds",
+            "Segmented HTTP work-unit execution duration.",
+            "outcome",
+            &state.work_unit_durations,
+            &DURATION_BUCKETS,
+        );
+        encode_single_label_histograms(
+            &mut body,
+            "ravyn_dns_resolution_duration_seconds",
+            "Pre-connection DNS resolution duration.",
+            "outcome",
+            &state.dns_durations,
+            &FAST_BUCKETS,
+        );
+        encode_single_label_histograms(
+            &mut body,
+            "ravyn_sqlite_query_duration_seconds",
+            "Hot-path SQLite statement duration by named operation.",
+            "operation",
+            &state.sqlite_durations,
+            &FAST_BUCKETS,
+        );
+        body.push_str("# HELP ravyn_sqlite_busy_total SQLite busy or locked errors observed process-wide.\n# TYPE ravyn_sqlite_busy_total counter\n");
+        body.push_str(&format!(
+            "ravyn_sqlite_busy_total {}\n",
+            SQLITE_BUSY_ERRORS.load(Ordering::Relaxed)
+        ));
+        body.push_str("# HELP ravyn_torrent_seeding_stops_total Torrent seeding stops by bounded policy reason.\n# TYPE ravyn_torrent_seeding_stops_total counter\n");
+        for (reason, value) in &state.seeding_stops {
+            body.push_str(&format!(
+                "ravyn_torrent_seeding_stops_total{{reason=\"{reason}\"}} {value}\n"
+            ));
+        }
         body.push_str("# HELP ravyn_job_duration_seconds End-to-end job execution duration.\n# TYPE ravyn_job_duration_seconds histogram\n");
         for (engine, histogram) in &state.durations {
             for (index, upper) in DURATION_BUCKETS.iter().enumerate() {
@@ -296,14 +419,37 @@ fn outcome(success: bool) -> &'static str {
     if success { "success" } else { "failure" }
 }
 
-fn observe(histogram: &mut Histogram, duration: Duration) {
+fn observe(histogram: &mut Histogram, buckets: &[f64; DURATION_BUCKETS.len()], duration: Duration) {
     let seconds = duration.as_secs_f64();
     histogram.count += 1;
     histogram.sum += seconds;
-    for (index, upper) in DURATION_BUCKETS.iter().enumerate() {
+    for (index, upper) in buckets.iter().enumerate() {
         if seconds <= *upper {
             histogram.buckets[index] += 1;
         }
+    }
+}
+
+fn encode_single_label_histograms(
+    body: &mut String,
+    name: &str,
+    help: &str,
+    label_name: &str,
+    values: &BTreeMap<&'static str, Histogram>,
+    buckets: &[f64; DURATION_BUCKETS.len()],
+) {
+    body.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+    for (label, histogram) in values {
+        for (index, upper) in buckets.iter().enumerate() {
+            body.push_str(&format!(
+                "{name}_bucket{{{label_name}=\"{label}\",le=\"{upper}\"}} {}\n",
+                histogram.buckets[index]
+            ));
+        }
+        body.push_str(&format!(
+            "{name}_bucket{{{label_name}=\"{label}\",le=\"+Inf\"}} {}\n{name}_sum{{{label_name}=\"{label}\"}} {}\n{name}_count{{{label_name}=\"{label}\"}} {}\n",
+            histogram.count, histogram.sum, histogram.count
+        ));
     }
 }
 
@@ -328,6 +474,80 @@ fn engine(kind: JobKind) -> &'static str {
         JobKind::Http => "http",
         JobKind::Media => "media",
         JobKind::Torrent => "torrent",
+    }
+}
+
+/// Returns the free bytes available to this process on the filesystem that
+/// contains `path`, or `None` when the query fails.
+#[cfg(windows)]
+pub fn free_disk_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut available = 0_u64;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
+}
+
+/// Returns the free bytes available to this process on the filesystem that
+/// contains `path`, or `None` when the query fails.
+#[cfg(unix)]
+pub fn free_disk_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(path.as_ptr(), &mut stats) };
+    (result == 0).then(|| u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
+}
+
+const TEMP_SCAN_MAX_ENTRIES: usize = 10_000;
+const TEMP_SCAN_MAX_DEPTH: usize = 6;
+
+/// Sums the bytes currently held by Ravyn temporary artifacts (`*.ravyn.part`
+/// partial files and `.ravyn-extract-*` staging directories) below `root`.
+/// The walk is bounded in depth and entry count so a huge download tree
+/// cannot stall the metrics endpoint.
+pub fn temporary_disk_usage(root: &Path) -> u64 {
+    let mut visited = 0_usize;
+    let mut total = 0_u64;
+    scan_temporary(root, 0, false, &mut visited, &mut total);
+    total
+}
+
+fn scan_temporary(dir: &Path, depth: usize, count_all: bool, visited: &mut usize, total: &mut u64) {
+    if depth > TEMP_SCAN_MAX_DEPTH || *visited >= TEMP_SCAN_MAX_ENTRIES {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        *visited += 1;
+        if *visited >= TEMP_SCAN_MAX_ENTRIES {
+            return;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy().into_owned();
+        if file_type.is_file() {
+            if count_all || name.ends_with(".ravyn.part") {
+                if let Ok(metadata) = entry.metadata() {
+                    *total = total.saturating_add(metadata.len());
+                }
+            }
+        } else if file_type.is_dir() {
+            let staging = count_all || name.starts_with(".ravyn-extract-");
+            scan_temporary(&entry.path(), depth + 1, staging, visited, total);
+        }
     }
 }
 
@@ -375,5 +595,52 @@ mod tests {
         assert!(encoded.contains("code=\"timeout\""));
         assert!(encoded.contains("le=\"1\"} 1"));
         assert!(encoded.contains("ravyn_transfer_bytes_total{engine=\"http\"} 512"));
+    }
+
+    #[test]
+    fn operational_metrics_use_bounded_labels() {
+        let metrics = Metrics::default();
+        metrics.work_unit_finished("success", Duration::from_millis(300));
+        metrics.work_unit_finished("cancelled", Duration::from_millis(20));
+        metrics.dns_resolved(true, Duration::from_millis(4));
+        metrics.db_query("claim_next_queued", Duration::from_micros(750));
+        metrics.seeding_stopped("ratio_limit");
+        metrics.seeding_stopped("free-form text with job ids should be collapsed");
+        let encoded = metrics.encode_openmetrics();
+        assert!(encoded.contains("ravyn_work_unit_duration_seconds_count{outcome=\"success\"} 1"));
+        assert!(
+            encoded.contains("ravyn_work_unit_duration_seconds_count{outcome=\"cancelled\"} 1")
+        );
+        assert!(
+            encoded.contains("ravyn_dns_resolution_duration_seconds_count{outcome=\"success\"} 1")
+        );
+        assert!(encoded.contains(
+            "ravyn_sqlite_query_duration_seconds_count{operation=\"claim_next_queued\"} 1"
+        ));
+        assert!(encoded.contains("ravyn_sqlite_busy_total"));
+        assert!(encoded.contains("ravyn_torrent_seeding_stops_total{reason=\"ratio_limit\"} 1"));
+        assert!(encoded.contains("ravyn_torrent_seeding_stops_total{reason=\"other\"} 1"));
+        assert!(!encoded.contains("free-form text"));
+    }
+
+    #[test]
+    fn temporary_disk_usage_counts_only_ravyn_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("movie.mkv.ravyn.part"), vec![0_u8; 100]).unwrap();
+        std::fs::write(temp.path().join("finished.mkv"), vec![0_u8; 999]).unwrap();
+        let staging = temp.path().join(".ravyn-extract-abc");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("inner.bin"), vec![0_u8; 50]).unwrap();
+        let nested = temp.path().join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("clip.mp4.ravyn.part"), vec![0_u8; 25]).unwrap();
+        assert_eq!(temporary_disk_usage(temp.path()), 175);
+    }
+
+    #[test]
+    fn free_disk_space_reports_a_positive_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let free = free_disk_space(temp.path());
+        assert!(free.is_some_and(|value| value > 0));
     }
 }

@@ -356,3 +356,64 @@ async fn a_server_that_lies_about_ranges_falls_back_to_single_stream() {
     );
     app.manager.shutdown().await;
 }
+
+async fn start_redirect_loop_server() -> (SocketAddr, oneshot::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { break };
+                    tokio::spawn(async move {
+                        let mut request = Vec::with_capacity(1024);
+                        let mut buffer = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            match stream.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => request.extend_from_slice(&buffer[..read]),
+                            }
+                            if request.len() > 32 * 1024 {
+                                return;
+                            }
+                        }
+                        let response = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://{address}/payload.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        }
+    });
+    (address, shutdown_tx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redirect_loop_fails_with_a_bounded_protocol_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let (address, _shutdown) = start_redirect_loop_server().await;
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let job = app
+        .manager
+        .create(create_request(
+            format!("http://{address}/payload.bin"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let failed = wait_for_status(&app, job.id, &[JobStatus::Failed], Duration::from_secs(60)).await;
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("redirect limit")),
+        "unexpected failure detail: {:?}",
+        failed.error
+    );
+    app.manager.shutdown().await;
+}

@@ -98,4 +98,53 @@ mod tests {
         assert_eq!(page.items, vec![1, 2]);
         assert!(page.next_cursor.is_some());
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn cursors_round_trip_for_any_offset(offset in proptest::num::u64::ANY) {
+            use proptest::prelude::prop_assert_eq;
+            prop_assert_eq!(decode_cursor(Some(&encode_cursor(offset))).unwrap(), offset);
+        }
+
+        #[test]
+        fn arbitrary_cursor_text_never_panics(cursor in ".{0,64}") {
+            let _ = decode_cursor(Some(&cursor));
+        }
+
+        /// Following next_cursor from the start visits every item exactly once,
+        /// in order, with no overlap between pages.
+        #[test]
+        fn windowed_pages_cover_every_item_exactly_once(
+            total in 0_usize..500,
+            limit in 1_usize..=200,
+        ) {
+            use proptest::prelude::prop_assert_eq;
+            let data: Vec<usize> = (0..total).collect();
+            let mut seen = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let window = PageWindow::from_query(&PageQuery {
+                    cursor: cursor.clone(),
+                    limit: Some(limit),
+                    search: None,
+                })
+                .unwrap();
+                let items: Vec<usize> = data
+                    .iter()
+                    .skip(window.offset_usize().unwrap())
+                    .take(window.database_limit())
+                    .copied()
+                    .collect();
+                let page = Page::from_extra_item(items, window);
+                seen.extend(page.items.iter().copied());
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            prop_assert_eq!(seen, data);
+        }
+    }
 }

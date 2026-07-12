@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    core::rate_limit::RateLimiters,
+    core::{metrics::Metrics, rate_limit::RateLimiters},
     error::{RavynError, Result},
     storage::{
         Repository,
@@ -137,6 +137,7 @@ struct CommonArgs {
     max_retries: u32,
     cancellation: CancellationToken,
     progress: Arc<AtomicU64>,
+    metrics: Metrics,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,6 +156,7 @@ pub async fn download(
     max_retries: u32,
     cancellation: CancellationToken,
     progress: Arc<AtomicU64>,
+    metrics: Metrics,
 ) -> Result<()> {
     let records = ensure_layout(&repository, job_id, &path, total, worker_count).await?;
     progress.store(
@@ -182,6 +184,7 @@ pub async fn download(
         max_retries,
         cancellation: cancellation.clone(),
         progress,
+        metrics,
     };
 
     let mut tasks = JoinSet::new();
@@ -192,7 +195,15 @@ pub async fn download(
             loop {
                 let record = queue.lock().await.pop_front();
                 let Some(record) = record else { return Ok(()) };
-                download_segment(args.clone(), record).await?;
+                let started = std::time::Instant::now();
+                let result = download_segment(args.clone(), record).await;
+                let outcome = match &result {
+                    Ok(()) => "success",
+                    Err(RavynError::Cancelled) => "cancelled",
+                    Err(_) => "failure",
+                };
+                args.metrics.work_unit_finished(outcome, started.elapsed());
+                result?;
             }
         });
     }
