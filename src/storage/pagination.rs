@@ -100,13 +100,13 @@ impl Repository {
     ) -> Result<Vec<AuditRecord>> {
         let pattern = search_pattern(search);
         if let Some(pattern) = pattern {
-            sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json FROM audit_log WHERE action LIKE ? OR resource_type LIKE ? OR COALESCE(resource_id,'') LIKE ? ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
+            sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json,previous_hash,entry_hash FROM audit_log WHERE action LIKE ? OR resource_type LIKE ? OR COALESCE(resource_id,'') LIKE ? ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(&pattern).bind(&pattern).bind(&pattern)
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
                 .map(super::audit::row_to_audit).collect()
         } else {
-            sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json FROM audit_log ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
+            sqlx::query("SELECT id,timestamp,action,resource_type,resource_id,outcome,metadata_json,previous_hash,entry_hash FROM audit_log ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(limit_i64(limit)?).bind(offset_i64(offset)?)
                 .fetch_all(self.pool()).await?.into_iter()
                 .map(super::audit::row_to_audit).collect()

@@ -33,6 +33,12 @@ impl Repository {
             .execute(&mut *tx)
             .await?
             .rows_affected();
+        sqlx::query(
+            "UPDATE audit_chain_head SET anchor_hash = COALESCE((SELECT entry_hash FROM audit_log WHERE timestamp < ? AND entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1), anchor_hash) WHERE id = 1",
+        )
+        .bind(older_than)
+        .execute(&mut *tx)
+        .await?;
         let audit = sqlx::query("DELETE FROM audit_log WHERE timestamp < ?")
             .bind(older_than)
             .execute(&mut *tx)

@@ -312,6 +312,123 @@ impl Config {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BandwidthWindow {
+    /// ISO weekday numbers: Monday = 1, Sunday = 7.
+    pub weekdays: Vec<u8>,
+    /// Inclusive local minute from midnight.
+    pub start_minute: u16,
+    /// Exclusive local minute from midnight. Values lower than start wrap overnight.
+    pub end_minute: u16,
+    /// Zero means unlimited, matching the global limiter contract.
+    pub limit_bps: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BandwidthSchedule {
+    pub timezone: String,
+    #[serde(default)]
+    pub windows: Vec<BandwidthWindow>,
+}
+
+impl Default for BandwidthSchedule {
+    fn default() -> Self {
+        Self {
+            timezone: "UTC".into(),
+            windows: Vec::new(),
+        }
+    }
+}
+
+impl BandwidthSchedule {
+    pub fn validate(&self) -> Result<()> {
+        let _: chrono_tz::Tz = self.timezone.parse().map_err(|_| {
+            crate::error::RavynError::Invalid(
+                "bandwidth schedule timezone must be a valid IANA name".into(),
+            )
+        })?;
+        if self.windows.len() > 32 {
+            return Err(crate::error::RavynError::Invalid(
+                "bandwidth schedule may contain at most 32 windows".into(),
+            ));
+        }
+        let mut occupied = [false; 7 * 24 * 60];
+        for window in &self.windows {
+            if window.weekdays.is_empty()
+                || window.weekdays.len() > 7
+                || window
+                    .weekdays
+                    .iter()
+                    .any(|weekday| !(1..=7).contains(weekday))
+                || window.start_minute >= 24 * 60
+                || window.end_minute >= 24 * 60
+                || window.start_minute == window.end_minute
+            {
+                return Err(crate::error::RavynError::Invalid(
+                    "bandwidth schedule window has invalid weekdays or minute bounds".into(),
+                ));
+            }
+            for &weekday in &window.weekdays {
+                let day = usize::from(weekday - 1);
+                let mut minute = usize::from(window.start_minute);
+                loop {
+                    let target_day = if minute < 24 * 60 { day } else { (day + 1) % 7 };
+                    let target_minute = minute % (24 * 60);
+                    let index = target_day * 24 * 60 + target_minute;
+                    if std::mem::replace(&mut occupied[index], true) {
+                        return Err(crate::error::RavynError::Invalid(
+                            "bandwidth schedule windows may not overlap".into(),
+                        ));
+                    }
+                    minute += 1;
+                    if target_day
+                        == if window.end_minute <= window.start_minute {
+                            (day + 1) % 7
+                        } else {
+                            day
+                        }
+                        && target_minute == usize::from(window.end_minute).saturating_sub(1)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn effective_limit_at(
+        &self,
+        base_limit_bps: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        use chrono::{Datelike, Timelike};
+        let timezone: chrono_tz::Tz = self.timezone.parse().map_err(|_| {
+            crate::error::RavynError::Invalid(
+                "bandwidth schedule timezone must be a valid IANA name".into(),
+            )
+        })?;
+        let local = now.with_timezone(&timezone);
+        let weekday = local.weekday().number_from_monday() as u8;
+        let minute = (local.hour() * 60 + local.minute()) as u16;
+        for window in &self.windows {
+            let active = if window.start_minute < window.end_minute {
+                window.weekdays.contains(&weekday)
+                    && minute >= window.start_minute
+                    && minute < window.end_minute
+            } else {
+                (window.weekdays.contains(&weekday) && minute >= window.start_minute)
+                    || (window.weekdays.iter().any(|day| day % 7 + 1 == weekday)
+                        && minute < window.end_minute)
+            };
+            if active {
+                return Ok(window.limit_bps);
+            }
+        }
+        Ok(base_limit_bps)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentSettings {
     pub download_dir: Option<PathBuf>,
@@ -320,6 +437,8 @@ pub struct PersistentSettings {
     pub segment_threshold_mib: u64,
     pub max_connections_per_host: usize,
     pub global_speed_limit_bps: u64,
+    #[serde(default)]
+    pub bandwidth_schedule: BandwidthSchedule,
     pub ytdlp: PathBuf,
     pub ffmpeg: PathBuf,
     pub rqbit_api: String,
@@ -443,6 +562,7 @@ pub struct PersistentSettingsPatch {
     pub segment_threshold_mib: Option<u64>,
     pub max_connections_per_host: Option<usize>,
     pub global_speed_limit_bps: Option<u64>,
+    pub bandwidth_schedule: Option<BandwidthSchedule>,
     pub ytdlp: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
     pub rqbit_api: Option<String>,
@@ -484,6 +604,7 @@ impl PersistentSettings {
             segment_threshold_mib: config.segment_threshold_mib,
             max_connections_per_host: config.max_connections_per_host,
             global_speed_limit_bps: config.global_speed_limit_bps,
+            bandwidth_schedule: BandwidthSchedule::default(),
             ytdlp: config.ytdlp.clone(),
             ffmpeg: config.ffmpeg.clone(),
             rqbit_api: config.rqbit_api.clone(),
@@ -518,6 +639,7 @@ impl PersistentSettings {
     }
 
     pub fn apply_to(&self, config: &mut Config) -> Result<()> {
+        self.bandwidth_schedule.validate()?;
         config.download_dir = self.download_dir.clone();
         config.max_active = self.max_active;
         config.max_segments = self.max_segments;
@@ -575,6 +697,9 @@ impl PersistentSettings {
         }
         if let Some(value) = patch.global_speed_limit_bps {
             self.global_speed_limit_bps = value;
+        }
+        if let Some(value) = patch.bandwidth_schedule {
+            self.bandwidth_schedule = value;
         }
         if let Some(value) = patch.ytdlp {
             self.ytdlp = value;
@@ -700,5 +825,79 @@ mod tests {
         assert_eq!(settings.api_max_concurrent_requests, 128);
         assert_eq!(settings.api_rate_limit_per_minute, 1_200);
         assert_eq!(settings.api_rate_limit_burst, 200);
+    }
+
+    #[test]
+    fn bandwidth_schedule_applies_named_timezone_windows_and_overnight_wraps() {
+        use chrono::TimeZone;
+
+        let schedule = BandwidthSchedule {
+            timezone: "Europe/Rome".into(),
+            windows: vec![BandwidthWindow {
+                weekdays: vec![1],
+                start_minute: 23 * 60,
+                end_minute: 60,
+                limit_bps: 42,
+            }],
+        };
+        schedule.validate().unwrap();
+
+        let monday_late_utc = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 13, 21, 30, 0)
+            .single()
+            .unwrap();
+        let tuesday_early_utc = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 13, 22, 30, 0)
+            .single()
+            .unwrap();
+        let tuesday_after_utc = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 13, 23, 30, 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            schedule.effective_limit_at(1000, monday_late_utc).unwrap(),
+            42
+        );
+        assert_eq!(
+            schedule
+                .effective_limit_at(1000, tuesday_early_utc)
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            schedule
+                .effective_limit_at(1000, tuesday_after_utc)
+                .unwrap(),
+            1000
+        );
+    }
+
+    #[test]
+    fn bandwidth_schedule_rejects_overlap_and_invalid_timezones() {
+        let overlapping = BandwidthSchedule {
+            timezone: "UTC".into(),
+            windows: vec![
+                BandwidthWindow {
+                    weekdays: vec![1],
+                    start_minute: 60,
+                    end_minute: 180,
+                    limit_bps: 1,
+                },
+                BandwidthWindow {
+                    weekdays: vec![1],
+                    start_minute: 120,
+                    end_minute: 240,
+                    limit_bps: 2,
+                },
+            ],
+        };
+        assert!(overlapping.validate().is_err());
+
+        let invalid = BandwidthSchedule {
+            timezone: "Not/A_Zone".into(),
+            windows: Vec::new(),
+        };
+        assert!(invalid.validate().is_err());
     }
 }

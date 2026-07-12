@@ -53,6 +53,31 @@ impl JobManager {
         })
         .await?;
 
+        let repository = self.repository.clone();
+        let manager = self.clone();
+        let cancel = self.shutdown.child_token();
+        self.spawn_tracked("bandwidth-schedule", async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        match repository.load_persistent_settings().await {
+                            Ok(Some(settings)) => {
+                                if let Err(error) = manager.apply_live_settings(&settings) {
+                                    tracing::error!(%error, "bandwidth schedule is invalid");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => tracing::error!(%error, "failed to load bandwidth schedule"),
+                        }
+                    }
+                }
+            }
+        })
+        .await?;
+
         let torrent = self.torrent.clone();
         let cancel = self.shutdown.child_token();
         self.spawn_tracked("torrent-monitor", async move {

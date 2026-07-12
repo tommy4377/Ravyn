@@ -14,18 +14,14 @@
 //! 4. if the floors alone exceed the capacity they are scaled down
 //!    proportionally.
 //!
-//! Rates are recomputed whenever a flow registers, unregisters, is
-//! reconfigured, or the global capacity changes, so the policy supports live
-//! reconfiguration. Between recomputations each flow is limited by its own
-//! token bucket; the sum of the buckets never exceeds the global capacity.
-//!
-//! Not yet implemented (tracked in the master document): time-scheduled
-//! profiles and work-conserving redistribution of budget a flow leaves idle
-//! between recomputations.
+//! Demand callbacks also recompute rates. A flow that has not asked for tokens
+//! recently yields its allocation; its next request rejoins the weighted
+//! allocation synchronously before consuming.
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use uuid::Uuid;
@@ -36,6 +32,7 @@ use crate::core::rate_limit::RateLimiter;
 /// as a divisor of the per-flow equal share. With 8 flows and a 10 MB/s
 /// budget each unconfigured flow is still guaranteed ~78 KB/s.
 const DEFAULT_FLOOR_DIVISOR: u64 = 16;
+const DEMAND_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowClass {
@@ -77,6 +74,7 @@ impl Default for FlowConfig {
 struct FlowState {
     config: FlowConfig,
     limiter: Arc<RateLimiter>,
+    last_demand: Instant,
 }
 
 #[derive(Clone, Default)]
@@ -133,13 +131,26 @@ impl FairBandwidthScheduler {
     /// limiter stays valid after unregistration (it simply keeps the last
     /// assigned rate), so a finishing transfer never blocks on a gone flow.
     pub fn register(&self, id: Uuid, config: FlowConfig) -> Arc<RateLimiter> {
-        let limiter = Arc::new(RateLimiter::new(0));
+        let weak = Arc::downgrade(&self.inner);
+        let limiter = Arc::new(RateLimiter::with_activity_hook(
+            0,
+            Some(Arc::new(move || {
+                if let Some(inner) = weak.upgrade() {
+                    let mut state = inner.lock().unwrap_or_else(|error| error.into_inner());
+                    if let Some(flow) = state.flows.get_mut(&id) {
+                        flow.last_demand = Instant::now();
+                        recompute(&mut state);
+                    }
+                }
+            })),
+        ));
         let mut state = self.lock();
         state.flows.insert(
             id,
             FlowState {
                 config,
                 limiter: limiter.clone(),
+                last_demand: Instant::now(),
             },
         );
         recompute(&mut state);
@@ -202,7 +213,19 @@ fn recompute(state: &mut SchedulerState) {
         return;
     }
 
-    let flow_count = state.flows.len() as u64;
+    let now = Instant::now();
+    let active_count = state
+        .flows
+        .values()
+        .filter(|flow| now.saturating_duration_since(flow.last_demand) <= DEMAND_TTL)
+        .count();
+    if active_count == 0 {
+        for flow in state.flows.values() {
+            flow.limiter.set_bytes_per_second(1);
+        }
+        return;
+    }
+    let flow_count = active_count as u64;
     let default_floor = (capacity / (flow_count * DEFAULT_FLOOR_DIVISOR)).max(1);
 
     struct Entry {
@@ -214,6 +237,7 @@ fn recompute(state: &mut SchedulerState) {
     let mut entries: Vec<Entry> = state
         .flows
         .iter()
+        .filter(|(_, flow)| now.saturating_duration_since(flow.last_demand) <= DEMAND_TTL)
         .map(|(id, flow)| {
             let cap = flow.config.max_bps.unwrap_or(u64::MAX).max(1);
             let floor = flow.config.min_bps.unwrap_or(default_floor).min(cap);
@@ -227,8 +251,6 @@ fn recompute(state: &mut SchedulerState) {
         })
         .collect();
 
-    // If the guaranteed floors alone exceed the budget, scale them down
-    // proportionally so the sum of assignments never exceeds the capacity.
     let floor_sum: u128 = entries.iter().map(|entry| u128::from(entry.floor)).sum();
     if floor_sum > u128::from(capacity) {
         for entry in &mut entries {
@@ -237,9 +259,6 @@ fn recompute(state: &mut SchedulerState) {
         }
     }
 
-    // Weighted water-filling: repeatedly hand every unresolved flow its
-    // weight-proportional share of the remaining budget, pinning flows that
-    // hit their cap or floor, until the assignment is stable.
     let mut assigned: HashMap<Uuid, u64> = HashMap::new();
     let mut remaining = capacity;
     let mut open: Vec<usize> = (0..entries.len()).collect();
@@ -280,7 +299,7 @@ fn recompute(state: &mut SchedulerState) {
     }
 
     for (id, flow) in &state.flows {
-        let rate = assigned.get(id).copied().unwrap_or(default_floor);
+        let rate = assigned.get(id).copied().unwrap_or(1);
         flow.limiter.set_bytes_per_second(rate);
     }
 }
@@ -470,5 +489,25 @@ mod tests {
         }
         assert_eq!(scheduler.flow_count(), 1);
         assert_eq!(scheduler.assigned_bps(persistent), Some(CAPACITY));
+    }
+
+    #[tokio::test]
+    async fn idle_flows_yield_capacity_and_rejoin_before_consuming() {
+        let scheduler = FairBandwidthScheduler::new(1_000);
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let first = scheduler.register(first_id, flow(1, FlowClass::Foreground));
+        let second = scheduler.register(second_id, flow(1, FlowClass::Foreground));
+        assert_eq!(scheduler.assigned_bps(first_id), Some(500));
+        assert_eq!(scheduler.assigned_bps(second_id), Some(500));
+
+        tokio::time::sleep(DEMAND_TTL + Duration::from_millis(50)).await;
+        first.consume(1).await;
+        assert_eq!(scheduler.assigned_bps(first_id), Some(1_000));
+        assert_eq!(scheduler.assigned_bps(second_id), Some(1));
+
+        second.consume(1).await;
+        assert_eq!(scheduler.assigned_bps(first_id), Some(500));
+        assert_eq!(scheduler.assigned_bps(second_id), Some(500));
     }
 }

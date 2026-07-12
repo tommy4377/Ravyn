@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 pub struct RateLimiter {
     bytes_per_second: AtomicU64,
     state: Mutex<State>,
+    on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 struct State {
@@ -20,12 +21,20 @@ struct State {
 
 impl RateLimiter {
     pub fn new(bytes_per_second: u64) -> Self {
+        Self::with_activity_hook(bytes_per_second, None)
+    }
+
+    pub(crate) fn with_activity_hook(
+        bytes_per_second: u64,
+        on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         Self {
             bytes_per_second: AtomicU64::new(bytes_per_second),
             state: Mutex::new(State {
                 available: bytes_per_second as f64,
                 updated_at: Instant::now(),
             }),
+            on_activity,
         }
     }
 
@@ -44,6 +53,9 @@ impl RateLimiter {
         }
         let mut remaining = bytes as f64;
         while remaining > 0.0 {
+            if let Some(on_activity) = &self.on_activity {
+                on_activity();
+            }
             let configured = self.bytes_per_second();
             if configured == 0 {
                 return;

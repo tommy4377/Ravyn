@@ -14,7 +14,7 @@ mod secrets;
 mod settings;
 mod torrent_policy;
 
-pub use audit::{AuditRecord, JobLogRecord};
+pub use audit::{AuditChainStatus, AuditRecord, JobLogRecord};
 pub use automation::{PageRecord, PageResourceRecord, RuleInput, TagRecord};
 pub use jobs::{JobActionRecord, JobListFilter};
 pub use media::{

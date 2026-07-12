@@ -250,6 +250,12 @@ pub(super) async fn list_audit(
     Ok(Json(Page::from_extra_item(items, window)))
 }
 
+pub(super) async fn verify_audit_chain(
+    State(s): State<ApiState>,
+) -> Result<Json<AuditChainStatus>> {
+    Ok(Json(s.repository.verify_audit_chain().await?))
+}
+
 #[derive(Deserialize)]
 pub(super) struct PutSecretRequest {
     name: String,
@@ -437,6 +443,7 @@ pub(super) fn settings_response(
         "segment_threshold_mib",
         "max_connections_per_host",
         "global_speed_limit_bps",
+        "bandwidth_schedule",
         "ytdlp",
         "ffmpeg",
         "rqbit_api",
@@ -470,7 +477,7 @@ pub(super) fn settings_response(
     ] {
         application.insert(
             key,
-            if key == "global_speed_limit_bps" {
+            if matches!(key, "global_speed_limit_bps" | "bandwidth_schedule") {
                 "live"
             } else {
                 "backend_restart"
@@ -546,7 +553,7 @@ pub(super) async fn patch_settings(
         let mut candidate = (*s.manager.config()).clone();
         values.apply_to(&mut candidate)?;
         s.repository.save_persistent_settings(&values).await?;
-        s.manager.apply_live_settings(&values);
+        s.manager.apply_live_settings(&values)?;
         Ok(settings_response(values, restart_required))
     }
     .await;
@@ -566,7 +573,7 @@ pub(super) async fn reset_settings(State(s): State<ApiState>) -> Result<Json<Set
     let result: Result<SettingsResponse> = async {
         s.repository.reset_persistent_settings().await?;
         let values = PersistentSettings::from_config(&s.base_config);
-        s.manager.apply_live_settings(&values);
+        s.manager.apply_live_settings(&values)?;
         Ok(settings_response(values, true))
     }
     .await;

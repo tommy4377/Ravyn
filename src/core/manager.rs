@@ -238,9 +238,12 @@ impl JobManager {
         self.config.clone()
     }
 
-    pub fn apply_live_settings(&self, settings: &PersistentSettings) {
-        self.http
-            .set_global_speed_limit(settings.global_speed_limit_bps);
+    pub fn apply_live_settings(&self, settings: &PersistentSettings) -> Result<()> {
+        let effective = settings
+            .bandwidth_schedule
+            .effective_limit_at(settings.global_speed_limit_bps, chrono::Utc::now())?;
+        self.http.set_global_speed_limit(effective);
+        Ok(())
     }
 
     pub async fn active_job_count(&self) -> usize {

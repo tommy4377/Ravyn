@@ -173,6 +173,77 @@ mod resume_identity_tests {
     }
 
     #[tokio::test]
+    async fn audit_hash_chain_detects_tampering() {
+        let (_temp, repository) = repository().await;
+        repository
+            .append_audit("job.create", "job", Some("one"), "success")
+            .await
+            .unwrap();
+        repository
+            .append_audit_with_metadata(
+                "job.cancel",
+                "job",
+                Some("one"),
+                "failure",
+                serde_json::json!({"reason": "test"}),
+            )
+            .await
+            .unwrap();
+
+        let status = repository.verify_audit_chain().await.unwrap();
+        assert!(status.valid);
+        assert_eq!(status.chained_entries, 2);
+        assert!(status.head.is_some());
+
+        sqlx::query("UPDATE audit_log SET metadata_json = '{\"tampered\":true}' WHERE id = 1")
+            .execute(repository.pool())
+            .await
+            .unwrap();
+        assert!(!repository.verify_audit_chain().await.unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn audit_retention_preserves_a_verifiable_chain_anchor() {
+        let (_temp, repository) = repository().await;
+        repository
+            .append_audit("first", "test", None, "success")
+            .await
+            .unwrap();
+        let cutoff = chrono::Utc::now();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        repository
+            .append_audit("second", "test", None, "success")
+            .await
+            .unwrap();
+
+        repository.run_retention(cutoff).await.unwrap();
+        let status = repository.verify_audit_chain().await.unwrap();
+        assert!(status.valid);
+        assert_eq!(status.chained_entries, 1);
+        assert!(status.head.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_audit_appends_form_one_chain() {
+        let (_temp, repository) = repository().await;
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..16 {
+            let repository = repository.clone();
+            tasks.spawn(async move {
+                repository
+                    .append_audit("concurrent", "test", Some(&index.to_string()), "success")
+                    .await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let status = repository.verify_audit_chain().await.unwrap();
+        assert!(status.valid);
+        assert_eq!(status.chained_entries, 16);
+    }
+
+    #[tokio::test]
     async fn job_creation_rejects_speed_limits_outside_sqlite_range() {
         let (_temp, repository) = repository().await;
         let result = repository
