@@ -477,7 +477,16 @@ pub(super) fn settings_response(
     ] {
         application.insert(
             key,
-            if matches!(key, "global_speed_limit_bps" | "bandwidth_schedule") {
+            if matches!(
+                key,
+                "max_active"
+                    | "global_speed_limit_bps"
+                    | "bandwidth_schedule"
+                    | "api_request_timeout_secs"
+                    | "api_max_concurrent_requests"
+                    | "api_rate_limit_per_minute"
+                    | "api_rate_limit_burst"
+            ) {
                 "live"
             } else {
                 "backend_restart"
@@ -502,7 +511,6 @@ pub(super) async fn get_settings(State(s): State<ApiState>) -> Result<Json<Setti
 
 pub(super) fn settings_patch_requires_restart(patch: &PersistentSettingsPatch) -> bool {
     patch.download_dir.is_some()
-        || patch.max_active.is_some()
         || patch.max_segments.is_some()
         || patch.segment_threshold_mib.is_some()
         || patch.max_connections_per_host.is_some()
@@ -532,10 +540,6 @@ pub(super) fn settings_patch_requires_restart(patch: &PersistentSettingsPatch) -
         || patch.image_converter.is_some()
         || patch.avif_quality.is_some()
         || patch.cookie_dir.is_some()
-        || patch.api_request_timeout_secs.is_some()
-        || patch.api_max_concurrent_requests.is_some()
-        || patch.api_rate_limit_per_minute.is_some()
-        || patch.api_rate_limit_burst.is_some()
 }
 
 pub(super) async fn patch_settings(
@@ -554,6 +558,14 @@ pub(super) async fn patch_settings(
         values.apply_to(&mut candidate)?;
         s.repository.save_persistent_settings(&values).await?;
         s.manager.apply_live_settings(&values)?;
+        s.protection
+            .reconfigure(
+                values.api_max_concurrent_requests,
+                values.api_rate_limit_per_minute,
+                values.api_rate_limit_burst,
+                Duration::from_secs(values.api_request_timeout_secs),
+            )
+            .await;
         Ok(settings_response(values, restart_required))
     }
     .await;
@@ -574,6 +586,14 @@ pub(super) async fn reset_settings(State(s): State<ApiState>) -> Result<Json<Set
         s.repository.reset_persistent_settings().await?;
         let values = PersistentSettings::from_config(&s.base_config);
         s.manager.apply_live_settings(&values)?;
+        s.protection
+            .reconfigure(
+                values.api_max_concurrent_requests,
+                values.api_rate_limit_per_minute,
+                values.api_rate_limit_burst,
+                Duration::from_secs(values.api_request_timeout_secs),
+            )
+            .await;
         Ok(settings_response(values, true))
     }
     .await;

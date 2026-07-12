@@ -653,6 +653,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         true,
         None
     ),
+    op!(
+        "post",
+        "/v1/rules/preview",
+        "previewRules",
+        "Rules",
+        "Preview rule application and scalar conflicts",
+        "200",
+        false,
+        true,
+        None
+    ),
     op!("get", "/v1/rules/{id}", "getRule", "Rules", "Get a rule"),
     op!(
         "put",

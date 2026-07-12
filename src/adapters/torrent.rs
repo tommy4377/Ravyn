@@ -325,6 +325,20 @@ pub struct TorrentAdapter {
     basic_auth: Option<(String, String)>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TorrentDhtStats {
+    pub id: String,
+    pub outstanding_requests: u64,
+    pub routing_table_size: u64,
+    pub routing_table_size_v6: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TorrentDhtTable {
+    pub v4: Value,
+    pub v6: Value,
+}
+
 /// Runs arbitrary JSON through every rqbit normalization entry point. It is
 /// used by cargo-fuzz to keep compatibility fallbacks panic-free.
 pub fn normalize_rqbit_payload_for_fuzzing(bytes: &[u8]) {
@@ -477,12 +491,20 @@ impl TorrentAdapter {
         Ok(global_stats_from_value(raw))
     }
 
-    pub async fn dht_stats(&self) -> Result<Value> {
-        self.get_json("dht/stats", "DHT statistics").await
+    pub async fn dht_stats(&self) -> Result<TorrentDhtStats> {
+        let value = self
+            .get_json("dht/stats", "DHT statistics")
+            .await
+            .map_err(dht_capability_error)?;
+        wire::dht_stats_from_value(value)
     }
 
-    pub async fn dht_table(&self) -> Result<Value> {
-        self.get_json("dht/table", "DHT routing table").await
+    pub async fn dht_table(&self) -> Result<TorrentDhtTable> {
+        let value = self
+            .get_json("dht/table", "DHT routing table")
+            .await
+            .map_err(dht_capability_error)?;
+        wire::dht_table_from_value(value)
     }
 
     pub async fn details(&self, torrent_id: &str) -> Result<TorrentDetails> {
@@ -878,6 +900,15 @@ impl TorrentAdapter {
         } else {
             request
         }
+    }
+}
+
+fn dht_capability_error(error: RavynError) -> RavynError {
+    match error {
+        RavynError::NotFound(message) => RavynError::Unavailable(format!(
+            "rqbit DHT capability is disabled or unsupported: {message}"
+        )),
+        other => other,
     }
 }
 

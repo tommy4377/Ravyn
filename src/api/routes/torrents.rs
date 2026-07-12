@@ -37,11 +37,15 @@ pub(super) async fn torrent_engine_stats(
     Ok(Json(s.manager.torrent_engine_stats().await?))
 }
 
-pub(super) async fn torrent_dht_stats(State(s): State<ApiState>) -> Result<Json<Value>> {
+pub(super) async fn torrent_dht_stats(
+    State(s): State<ApiState>,
+) -> Result<Json<crate::adapters::torrent::TorrentDhtStats>> {
     Ok(Json(s.manager.torrent_dht_stats().await?))
 }
 
-pub(super) async fn torrent_dht_table(State(s): State<ApiState>) -> Result<Json<Value>> {
+pub(super) async fn torrent_dht_table(
+    State(s): State<ApiState>,
+) -> Result<Json<crate::adapters::torrent::TorrentDhtTable>> {
     Ok(Json(s.manager.torrent_dht_table().await?))
 }
 

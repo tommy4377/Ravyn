@@ -28,6 +28,23 @@ pub struct Rule {
     pub actions: RuleActions,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulePreviewMatch {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub priority: i32,
+    pub destination_selected: bool,
+    pub destination_shadowed: bool,
+    pub speed_limit_selected: bool,
+    pub speed_limit_shadowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulePreview {
+    pub result: CreateJob,
+    pub matches: Vec<RulePreviewMatch>,
+}
+
 impl Rule {
     pub fn matches(&self, url: &str, mime: Option<&str>, extension: Option<&str>) -> bool {
         if !self.enabled {
@@ -130,6 +147,56 @@ pub fn apply_matching(
     request.options.tags.dedup();
 }
 
+/// Explains rule selection while producing the same result as `apply_matching`.
+pub fn preview_matching(
+    rules: &[Rule],
+    request: &CreateJob,
+    mime: Option<&str>,
+    extension: Option<&str>,
+) -> RulePreview {
+    let mut result = request.clone();
+    let mut destination_set = result.destination.is_some();
+    let mut speed_set = result.speed_limit_bps.is_some();
+    let mut matches = Vec::new();
+    for rule in rules {
+        if !rule.matches(&result.source, mime, extension) {
+            continue;
+        }
+        let destination_selected = !destination_set && rule.actions.destination.is_some();
+        let destination_shadowed = destination_set && rule.actions.destination.is_some();
+        let speed_limit_selected = !speed_set && rule.actions.speed_limit_bps.is_some();
+        let speed_limit_shadowed = speed_set && rule.actions.speed_limit_bps.is_some();
+        matches.push(RulePreviewMatch {
+            id: rule.id,
+            name: rule.name.clone(),
+            priority: rule.priority,
+            destination_selected,
+            destination_shadowed,
+            speed_limit_selected,
+            speed_limit_shadowed,
+        });
+        if destination_selected {
+            result.destination = rule.actions.destination.clone();
+            destination_set = true;
+        }
+        if speed_limit_selected {
+            result.speed_limit_bps = rule.actions.speed_limit_bps;
+            speed_set = true;
+        }
+        result
+            .options
+            .tags
+            .extend(rule.actions.tags.iter().cloned());
+        result
+            .options
+            .post_actions
+            .extend(rule.actions.post_actions.iter().cloned());
+    }
+    result.options.tags.sort();
+    result.options.tags.dedup();
+    RulePreview { result, matches }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +266,32 @@ mod tests {
         ];
         apply_matching(&rules, &mut request, None, Some("bin"));
         assert_eq!(request.destination, Some(PathBuf::from("high")));
+    }
+
+    #[test]
+    fn preview_matches_application_and_explains_shadowed_scalars() {
+        let mut high = rule(Default::default());
+        high.name = "high".into();
+        high.priority = 100;
+        high.actions.destination = Some("high".into());
+        high.actions.speed_limit_bps = Some(10);
+        let mut low = rule(Default::default());
+        low.name = "low".into();
+        low.priority = 1;
+        low.actions.destination = Some("low".into());
+        low.actions.speed_limit_bps = Some(20);
+        let rules = vec![high, low];
+        let request = base_request();
+        let preview = preview_matching(&rules, &request, None, Some("bin"));
+        let mut applied = request;
+        apply_matching(&rules, &mut applied, None, Some("bin"));
+
+        assert_eq!(preview.result.destination, applied.destination);
+        assert_eq!(preview.result.speed_limit_bps, applied.speed_limit_bps);
+        assert!(preview.matches[0].destination_selected);
+        assert!(preview.matches[0].speed_limit_selected);
+        assert!(preview.matches[1].destination_shadowed);
+        assert!(preview.matches[1].speed_limit_shadowed);
     }
 
     fn base_request() -> CreateJob {

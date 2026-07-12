@@ -175,9 +175,9 @@ impl JobManager {
             tokio::select! {
                 _ = self.shutdown.cancelled() => break,
                 _ = ticker.tick() => {
-                    let permit = match self.semaphore.clone().try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => continue,
+                    let permit = match self.semaphore.try_acquire() {
+                        Some(permit) => permit,
+                        None => continue,
                     };
                     let job = match self.repository.claim_next_queued().await {
                         Ok(Some(job)) => job,
@@ -202,7 +202,7 @@ impl JobManager {
     async fn spawn_job(
         self: Arc<Self>,
         job: Job,
-        permit: tokio::sync::OwnedSemaphorePermit,
+        permit: super::manager::ConcurrencyPermit,
     ) -> Result<()> {
         if !self.accepting_tasks.load(Ordering::Acquire) {
             self.repository

@@ -7,11 +7,11 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tokio::{
-    sync::{Mutex, Semaphore},
+    sync::Mutex,
     task::{AbortHandle, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
@@ -42,6 +42,50 @@ pub(crate) struct ActiveJob {
     pub(crate) abort: Option<AbortHandle>,
 }
 
+pub(crate) struct ConcurrencyGate {
+    limit: AtomicUsize,
+    in_use: AtomicUsize,
+}
+
+impl ConcurrencyGate {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit: AtomicUsize::new(limit.max(1)),
+            in_use: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn set_limit(&self, limit: usize) {
+        self.limit.store(limit.max(1), Ordering::Release);
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<ConcurrencyPermit> {
+        let mut current = self.in_use.load(Ordering::Acquire);
+        loop {
+            if current >= self.limit.load(Ordering::Acquire) {
+                return None;
+            }
+            match self.in_use.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(ConcurrencyPermit(self.clone())),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+pub(crate) struct ConcurrencyPermit(Arc<ConcurrencyGate>);
+
+impl Drop for ConcurrencyPermit {
+    fn drop(&mut self) {
+        self.0.in_use.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct JobManager {
     pub(crate) config: Arc<Config>,
     pub(crate) repository: Repository,
@@ -51,7 +95,7 @@ pub struct JobManager {
     pub(crate) media: Arc<MediaAdapter>,
     pub(crate) torrent: Arc<TorrentAdapter>,
     pub(crate) sniffer: Arc<SnifferService>,
-    pub(crate) semaphore: Arc<Semaphore>,
+    pub(crate) semaphore: Arc<ConcurrencyGate>,
     pub(crate) active: Mutex<HashMap<Uuid, ActiveJob>>,
     pub(crate) idempotency: Mutex<()>,
     pub(crate) tasks: Mutex<Vec<TrackedTask>>,
@@ -214,7 +258,7 @@ impl JobManager {
                 .await?,
             ),
             sniffer: Arc::new(SnifferService::new(config.clone(), repository.clone())?),
-            semaphore: Arc::new(Semaphore::new(config.max_active.max(1))),
+            semaphore: Arc::new(ConcurrencyGate::new(config.max_active)),
             active: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
@@ -243,6 +287,7 @@ impl JobManager {
             .bandwidth_schedule
             .effective_limit_at(settings.global_speed_limit_bps, chrono::Utc::now())?;
         self.http.set_global_speed_limit(effective);
+        self.semaphore.set_limit(settings.max_active);
         Ok(())
     }
 
@@ -260,5 +305,27 @@ impl JobManager {
             .await
             .iter()
             .any(|task| task.name == "progress-writer" && !task.handle.is_finished())
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    #[test]
+    fn limit_changes_are_atomic_and_do_not_preempt_active_work() {
+        let gate = Arc::new(ConcurrencyGate::new(2));
+        let first = gate.try_acquire().unwrap();
+        let second = gate.try_acquire().unwrap();
+        assert!(gate.try_acquire().is_none());
+        gate.set_limit(1);
+        drop(first);
+        assert!(gate.try_acquire().is_none());
+        drop(second);
+        let only = gate.try_acquire().unwrap();
+        assert!(gate.try_acquire().is_none());
+        gate.set_limit(3);
+        assert!(gate.try_acquire().is_some());
+        drop(only);
     }
 }

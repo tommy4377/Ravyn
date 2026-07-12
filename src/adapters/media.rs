@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader},
     process::Command,
 };
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,47 @@ const FILE_PREFIX: &str = "ravyn-file:";
 const ITEM_SEEN_PREFIX: &str = "ravyn-item-seen:";
 const ITEM_START_PREFIX: &str = "ravyn-item-start:";
 const ITEM_DONE_PREFIX: &str = "ravyn-item-done:";
+const MAX_YTDLP_LINE_BYTES: usize = 1024 * 1024;
+
+struct EphemeralFile(PathBuf);
+
+impl Drop for EphemeralFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn next_bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if line.len().saturating_add(take) > MAX_YTDLP_LINE_BYTES {
+            return Err(RavynError::Process(format!(
+                "yt-dlp output line exceeds {MAX_YTDLP_LINE_BYTES} bytes"
+            )));
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
+}
 
 /// Exercises the yt-dlp machine-progress parser without starting a process.
 /// This is intentionally small and public for the cargo-fuzz target.
@@ -342,6 +383,7 @@ impl DownloadAdapter for MediaAdapter {
             .join("media-archives")
             .join(format!("{}.txt", job.id));
         self.repository.export_media_archive(&archive_path).await?;
+        let _archive_guard = EphemeralFile(archive_path.clone());
 
         let mut command = Command::new(&self.config.ytdlp);
         command
@@ -404,7 +446,7 @@ impl DownloadAdapter for MediaAdapter {
             .ok_or_else(|| RavynError::Process("yt-dlp stderr was unavailable".into()))?;
 
         let stderr_task = tokio::spawn(collect_stderr(stderr));
-        let mut lines = BufReader::new(stdout).lines();
+        let mut stdout = BufReader::new(stdout);
         let mut files = Vec::new();
         let mut artifacts = Vec::new();
         let started = Instant::now();
@@ -429,7 +471,7 @@ impl DownloadAdapter for MediaAdapter {
                     let _ = self.repository.mark_unfinished_media_items_failed(job.id, message).await;
                     return Err(RavynError::Process(message.into()));
                 }
-                line = lines.next_line() => {
+                line = next_bounded_line(&mut stdout) => {
                     match line? {
                         Some(line) => {
                             if let Some(payload) = line.strip_prefix(ITEM_SEEN_PREFIX) {
@@ -547,6 +589,41 @@ impl DownloadAdapter for MediaAdapter {
             terminal_status: process_message.as_ref().map(|_| JobStatus::Partial),
             terminal_message: process_message,
         })
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn machine_output_lines_are_bounded_and_normalized() {
+        let input = b"first\r\nsecond\n".as_slice();
+        let mut reader = BufReader::new(input);
+        assert_eq!(
+            next_bounded_line(&mut reader).await.unwrap().as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            next_bounded_line(&mut reader).await.unwrap().as_deref(),
+            Some("second")
+        );
+        assert!(next_bounded_line(&mut reader).await.unwrap().is_none());
+
+        let oversized = vec![b'x'; MAX_YTDLP_LINE_BYTES + 1];
+        let mut reader = BufReader::new(oversized.as_slice());
+        assert!(matches!(
+            next_bounded_line(&mut reader).await,
+            Err(RavynError::Process(_))
+        ));
+    }
+
+    #[test]
+    fn ephemeral_file_is_removed_on_every_exit_path() {
+        let path = std::env::temp_dir().join(format!("ravyn-media-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"archive").unwrap();
+        drop(EphemeralFile(path.clone()));
+        assert!(!path.exists());
     }
 }
 
