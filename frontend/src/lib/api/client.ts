@@ -2,38 +2,36 @@
  * Typed HTTP client for the embedded Ravyn backend.
  *
  * Errors are normalized to `ApiError` carrying the backend's stable error
- * code; network failures map to code `NETWORK_UNAVAILABLE`.
+ * code; network failures map to code `NETWORK_UNAVAILABLE`. Transport
+ * mechanics (fetch, timeout, abort, JSON) live in `transport.ts`.
  */
 
+import { httpRequest } from "./transport";
 import type {
+  BulkJobAction,
+  BulkJobActionResult,
   ComponentId,
   ComponentOverview,
-  ApiErrorBody,
+  CreateJob,
   FeatureSelection,
+  ImportResult,
+  ImportTextRequest,
+  Job,
+  JobActionRecord,
+  JobListParams,
+  JobLogRecord,
+  JobOutput,
+  JobPage,
+  Page,
+  PageQueryParams,
   PrepareLibraryResult,
+  SegmentRecord,
   SetupProfile,
   SetupState,
+  UpdateJob,
 } from "./types";
 
-export class ApiError extends Error {
-  readonly code: string;
-  readonly status: number;
-  readonly requestId: string | undefined;
-  readonly retryable: boolean;
-  readonly details: unknown;
-
-  constructor(status: number, body: ApiErrorBody) {
-    super(body.message);
-    this.name = "ApiError";
-    this.code = body.code;
-    this.status = status;
-    this.requestId = body.request_id;
-    this.retryable = body.retryable ?? false;
-    this.details = body.details;
-  }
-}
-
-const DEFAULT_TIMEOUT_MS = 30_000;
+export { ApiError } from "./errors";
 
 export class RavynClient {
   constructor(
@@ -41,58 +39,19 @@ export class RavynClient {
     private readonly apiToken: string,
   ) {}
 
-  private async request<T>(
+  private request<T>(
     method: string,
     path: string,
     body?: unknown,
     signal?: AbortSignal,
+    query?: Record<string, string | number | boolean | undefined>,
+    headers?: Record<string, string>,
   ): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-    signal?.addEventListener("abort", () => controller.abort(), {
-      once: true,
+    return httpRequest<T>(this.baseUrl, this.apiToken, method, path, body, {
+      signal,
+      query,
+      headers,
     });
-
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-          authorization: `Bearer ${this.apiToken}`,
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      throw new ApiError(0, {
-        code: "NETWORK_UNAVAILABLE",
-        message:
-          error instanceof Error ? error.message : "the backend is unreachable",
-        retryable: true,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
-      let parsed: ApiErrorBody;
-      try {
-        parsed = (await response.json()) as ApiErrorBody;
-      } catch {
-        parsed = {
-          code: `HTTP_${response.status}`,
-          message: response.statusText || "request failed",
-          retryable: response.status >= 500,
-        };
-      }
-      throw new ApiError(response.status, parsed);
-    }
-
-    if (response.status === 204 || response.status === 202) {
-      return undefined as T;
-    }
-    return (await response.json()) as T;
   }
 
   // --- Setup ---
@@ -126,18 +85,101 @@ export class RavynClient {
   }
 
   installComponent(id: ComponentId, force = false): Promise<void> {
-    return this.request("POST", `/v1/components/${wireId(id)}/install`, {
+    return this.request("POST", `/v1/components/${wireComponentId(id)}/install`, {
       force,
     });
   }
 
   cancelComponentInstallation(id: ComponentId): Promise<void> {
-    return this.request("POST", `/v1/components/${wireId(id)}/cancel`);
+    return this.request("POST", `/v1/components/${wireComponentId(id)}/cancel`);
+  }
+
+  // --- Jobs ---
+
+  listJobs(params?: JobListParams, signal?: AbortSignal): Promise<JobPage> {
+    return this.request("GET", "/v1/jobs", undefined, signal, { ...params });
+  }
+
+  getJob(id: string, signal?: AbortSignal): Promise<Job> {
+    return this.request("GET", `/v1/jobs/${id}`, undefined, signal);
+  }
+
+  createJob(job: CreateJob, idempotencyKey?: string): Promise<Job> {
+    return this.request(
+      "POST",
+      "/v1/jobs",
+      job,
+      undefined,
+      undefined,
+      idempotencyKey ? { "idempotency-key": idempotencyKey } : undefined,
+    );
+  }
+
+  createMetalinkJob(request: {
+    document: string;
+    destination?: string | null;
+    priority?: number;
+    speed_limit_bps?: number | null;
+    overwrite?: boolean;
+  }): Promise<Job> {
+    return this.request("POST", "/v1/jobs/metalink", request);
+  }
+
+  createBatchJobs(jobs: CreateJob[]): Promise<ImportResult> {
+    return this.request("POST", "/v1/jobs/batch", jobs);
+  }
+
+  importJobsText(request: ImportTextRequest): Promise<ImportResult> {
+    return this.request("POST", "/v1/jobs/import-text", request);
+  }
+
+  updateJob(id: string, request: UpdateJob): Promise<Job> {
+    return this.request("PATCH", `/v1/jobs/${id}`, request);
+  }
+
+  deleteJob(id: string): Promise<void> {
+    return this.request("DELETE", `/v1/jobs/${id}`);
+  }
+
+  pauseJob(id: string): Promise<void> {
+    return this.request("POST", `/v1/jobs/${id}/pause`);
+  }
+
+  resumeJob(id: string): Promise<void> {
+    return this.request("POST", `/v1/jobs/${id}/resume`);
+  }
+
+  cancelJob(id: string): Promise<void> {
+    return this.request("POST", `/v1/jobs/${id}/cancel`);
+  }
+
+  retryJob(id: string): Promise<void> {
+    return this.request("POST", `/v1/jobs/${id}/retry`);
+  }
+
+  applyJobAction(action: BulkJobAction, ids: string[]): Promise<BulkJobActionResult[]> {
+    return this.request("POST", "/v1/jobs/actions", { action, ids });
+  }
+
+  listJobOutputs(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<JobOutput>> {
+    return this.request("GET", `/v1/jobs/${id}/outputs`, undefined, signal, { ...params });
+  }
+
+  listJobSegments(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<SegmentRecord>> {
+    return this.request("GET", `/v1/jobs/${id}/segments`, undefined, signal, { ...params });
+  }
+
+  listJobActions(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<JobActionRecord>> {
+    return this.request("GET", `/v1/jobs/${id}/actions`, undefined, signal, { ...params });
+  }
+
+  listJobLogs(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<JobLogRecord>> {
+    return this.request("GET", `/v1/jobs/${id}/logs`, undefined, signal, { ...params });
   }
 }
 
 /** Route path segment for a component id (differs from the JSON enum). */
-function wireId(id: ComponentId): string {
+function wireComponentId(id: ComponentId): string {
   switch (id) {
     case "ytdlp":
       return "yt-dlp";
