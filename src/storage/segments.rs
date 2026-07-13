@@ -86,6 +86,42 @@ fn row_to_segment(row: sqlx::sqlite::SqliteRow) -> Result<SegmentRecord> {
     })
 }
 
+/// Shrinks an active segment to `new_end` and inserts the freed tail as a new
+/// record in one transaction, clamping the shrunk segment's persisted
+/// progress to its new length.
+pub async fn split(
+    pool: &SqlitePool,
+    job_id: Uuid,
+    index: usize,
+    new_end: u64,
+    tail: &SegmentRecord,
+) -> Result<()> {
+    let new_end = sqlite_i64(new_end, "segment end")?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE job_segments SET end_byte=?, downloaded_bytes=MIN(downloaded_bytes, ? - start_byte + 1), updated_at=? WHERE job_id=? AND segment_index=?",
+    )
+    .bind(new_end)
+    .bind(new_end)
+    .bind(Utc::now())
+    .bind(job_id.to_string())
+    .bind(usize_i64(index, "segment index")?)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO job_segments(job_id,segment_index,start_byte,end_byte,downloaded_bytes,completed,updated_at) VALUES(?,?,?,?,?,?,?)")
+        .bind(job_id.to_string())
+        .bind(usize_i64(tail.index, "segment index")?)
+        .bind(sqlite_i64(tail.start, "segment start")?)
+        .bind(sqlite_i64(tail.end, "segment end")?)
+        .bind(sqlite_i64(tail.downloaded, "downloaded bytes")?)
+        .bind(if tail.completed { 1_i64 } else { 0_i64 })
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn update(
     pool: &SqlitePool,
     job_id: Uuid,

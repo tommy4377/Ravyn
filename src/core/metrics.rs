@@ -301,6 +301,18 @@ impl Metrics {
                 "http_redirects",
                 "Validated HTTP redirects followed while probing.",
             ),
+            (
+                "http_range_splits",
+                "Active segmented ranges split into new work units by idle workers.",
+            ),
+            (
+                "http_speculation_wins",
+                "Speculative duplicate range requests that completed a slow work unit.",
+            ),
+            (
+                "http_speculation_losses",
+                "Speculative duplicate range requests that lost the race or failed.",
+            ),
         ] {
             body.push_str(&format!("# HELP ravyn_{event}_total {help}\n# TYPE ravyn_{event}_total counter\nravyn_{event}_total {}\n", state.events.get(event).copied().unwrap_or_default()));
         }

@@ -11,6 +11,12 @@ permissions:
   attestations: write
   artifact-metadata: write
 
+# Reproducibility: dependency versions are pinned by Cargo.lock (--locked),
+# timestamps are pinned to the tagged commit, and absolute build paths are
+# remapped so archives built from the same tag are byte-comparable.
+env:
+  RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/ravyn"
+
 jobs:
   windows:
     runs-on: windows-2025
@@ -92,6 +98,33 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate updater metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo '{'
+            echo "  \"schema\": 1,"
+            echo "  \"channel\": \"stable\","
+            echo "  \"version\": \"${version}\","
+            echo "  \"published_at\": \"${published_at}\","
+            echo "  \"source_commit\": \"${GITHUB_SHA}\","
+            echo '  "artifacts": ['
+            first=1
+            for checksum in dist/*.sha256; do
+              hash="$(awk '{print $1}' "$checksum")"
+              file="$(basename "$checksum" .sha256)"
+              [ "$first" -eq 1 ] || echo ','
+              first=0
+              printf '    {"name": "%s", "sha256": "%s"}' "$file" "$hash"
+            done
+            echo ''
+            echo '  ]'
+            echo '}'
+          } > dist/ravyn-release.json
+          cat dist/ravyn-release.json
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

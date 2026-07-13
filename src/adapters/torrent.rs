@@ -1008,3 +1008,196 @@ impl DownloadAdapter for TorrentAdapter {
 mod wire;
 
 use self::wire::*;
+
+#[cfg(test)]
+mod restart_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::*;
+    use crate::{
+        core::models::{CreateJob, DownloadOptions, DuplicatePolicy, JobKind},
+        core::progress,
+    };
+
+    /// A minimal rqbit stand-in. The second through fourth statistics polls
+    /// drop the connection without a response, simulating an engine restart;
+    /// afterwards the torrent reports finished.
+    async fn start_flaky_rqbit(outage_polls: usize) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let stats_polls = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let stats_polls = stats_polls.clone();
+                tokio::spawn(async move {
+                    let _ = serve_rqbit(stream, &stats_polls, outage_polls).await;
+                });
+            }
+        });
+        address
+    }
+
+    async fn serve_rqbit(
+        mut stream: TcpStream,
+        stats_polls: &AtomicUsize,
+        outage_polls: usize,
+    ) -> std::io::Result<()> {
+        let mut request = Vec::with_capacity(2048);
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                return Ok(());
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.len() > 32 * 1024 {
+                return Ok(());
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_owned();
+
+        let body = if path.ends_with("/stats/v1") {
+            let poll = stats_polls.fetch_add(1, Ordering::AcqRel) + 1;
+            if poll > 1 && poll <= 1 + outage_polls {
+                // Engine restart: the connection dies without a response.
+                return Ok(());
+            }
+            let finished = poll > 1 + outage_polls;
+            serde_json::json!({
+                "state": if finished { "paused" } else { "live" },
+                "finished": finished,
+                "progress_bytes": if finished { 1024 } else { 0 },
+                "total_bytes": 1024,
+                "download_speed": { "mbps": 0.0 },
+                "upload_speed": { "mbps": 0.0 },
+            })
+            .to_string()
+        } else if path.ends_with("/t-restart") {
+            // Torrent details.
+            serde_json::json!({ "files": [] }).to_string()
+        } else {
+            // start / pause / forget and anything else administrative.
+            serde_json::json!({}).to_string()
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_rqbit_restart_during_polling_is_tolerated_and_the_job_completes() {
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let address = start_flaky_rqbit(3).await;
+        let url = format!("sqlite://{}", temp.path().join("test.sqlite3").display());
+        let repository = Repository::connect(&url).await.unwrap();
+        let job = repository
+            .insert_job(
+                CreateJob {
+                    kind: JobKind::Torrent,
+                    source: format!("magnet:?xt=urn:btih:{}", "a".repeat(40)),
+                    destination: None,
+                    filename: None,
+                    priority: 0,
+                    speed_limit_bps: None,
+                    expected_sha256: None,
+                    duplicate_policy: DuplicatePolicy::Allow,
+                    options: DownloadOptions {
+                        torrent: Some(crate::core::models::TorrentOptions {
+                            seed_after_download: false,
+                            keep_managed: false,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+                temp.path().join("downloads"),
+            )
+            .await
+            .unwrap();
+        let snapshot = TorrentSnapshot {
+            torrent_id: "t-restart".into(),
+            info_hash: None,
+            name: None,
+            state: "live".into(),
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+            total_bytes: Some(1024),
+            download_speed_bps: 0,
+            upload_speed_bps: 0,
+            peers_connected: 0,
+            seeders: 0,
+            leechers: 0,
+            finished: false,
+            progress: Some(0.0),
+            raw: serde_json::json!({}),
+        };
+        repository
+            .upsert_torrent_record(job.id, &snapshot)
+            .await
+            .unwrap();
+
+        use clap::Parser as _;
+        let mut config = crate::config::Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            temp.path().join("data").to_str().unwrap(),
+            "--download-dir",
+            temp.path().join("downloads").to_str().unwrap(),
+        ])
+        .unwrap();
+        config.rqbit_api = format!("http://{address}/");
+        config.rqbit_timeout_secs = 2;
+        config.rqbit_stats_timeout_secs = 1;
+
+        let events = EventBus::new(16);
+        let (publisher, _receiver) = progress::channel(
+            64,
+            repository.clone(),
+            events.clone(),
+            crate::core::metrics::Metrics::default(),
+        );
+        let adapter = TorrentAdapter::new(Arc::new(config), repository.clone(), publisher, events)
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            adapter.run(&job, CancellationToken::new()),
+        )
+        .await
+        .expect("torrent run did not finish after the simulated restart")
+        .expect("torrent run failed despite the engine coming back");
+
+        assert_eq!(outcome.terminal_status, Some(JobStatus::Completed));
+        assert!(
+            repository
+                .get_torrent_record(job.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "an unmanaged completed torrent should have been forgotten"
+        );
+    }
+}

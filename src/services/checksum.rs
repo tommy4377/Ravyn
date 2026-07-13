@@ -177,6 +177,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_during_checksum_stops_promptly_and_leaves_the_file_alone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("large.bin");
+        let body = vec![0x3c_u8; 4 * 1024 * 1024];
+        tokio::fs::write(&output, &body).await.unwrap();
+        let expected = hex::encode(Sha256::digest(&body));
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let result = verify(&output, &expected, &cancellation).await;
+
+        assert!(matches!(result, Err(RavynError::Cancelled)));
+        assert_eq!(
+            tokio::fs::metadata(&output).await.unwrap().len(),
+            body.len() as u64
+        );
+    }
+
+    #[tokio::test]
     async fn verifies_ordered_piece_hashes_and_detects_corruption() {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("pieces.bin");

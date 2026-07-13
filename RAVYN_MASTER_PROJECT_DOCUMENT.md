@@ -1084,8 +1084,8 @@ Current:
 
 Missing:
 
-- speculative duplication for unverified or non-Metalink ranges;
-- splitting of an already active slow range;
+- ~~speculative duplication for unverified or non-Metalink ranges~~ — implemented 2026-07-13 (bounded, identity-anchored hedge with slow-tail detection and loser cleanup);
+- ~~splitting of an already active slow range~~ — implemented 2026-07-13 (idle-worker splits with resume-safe retiled layouts);
 - incremental whole-file SHA-256 for non-piece segmented transfers is implemented by an ordered hasher that waits for durable contiguous range completion and hashes each range exactly once;
 - explicit Happy Eyeballs;
 - HTTP/3 experiments;
@@ -1305,17 +1305,17 @@ Second pass verified on 2026-07-12 (`fault_injection_tests` in `src/storage/repo
 Add tests for (remaining cases; struck items are covered):
 
 - disk full;
-- permission denied;
-- file locked;
+- ~~permission denied~~ — covered 2026-07-13 (read-only partial file);
+- ~~file locked~~ — covered 2026-07-13 (Windows share-mode lock fixture);
 - ~~SQLite busy~~ — covered 2026-07-12;
 - ~~SQLite locked~~ — covered by the same contention fixture;
-- crash between file sync and DB checkpoint;
+- ~~crash between file sync and DB checkpoint~~ — covered 2026-07-13 (DB-behind-file state recovers by re-downloading);
 - ~~crash during restore state transitions~~ — covered 2026-07-12 (marker restart, staged corruption, post-apply open failure, orphaned staged database);
-- shutdown during checksum;
+- ~~shutdown during checksum~~ — covered 2026-07-13 (prompt cancellation, file untouched);
 - shutdown during yt-dlp;
 - shutdown during FFmpeg;
 - shutdown during 7-Zip;
-- rqbit restart;
+- ~~rqbit restart~~ — covered 2026-07-13 (mock-engine outage absorbed by the poll-failure budget);
 - ~~changing ETag~~ — covered by the existing remote-identity integration test;
 - ~~invalid range~~ — covered by the existing range-liar integration test;
 - ~~redirect loop~~ — covered 2026-07-12;
@@ -1332,11 +1332,11 @@ Property tests:
 - ~~segment coverage has no gaps~~ — covered;
 - ~~segments do not overlap~~ — covered;
 - ~~path confinement always holds~~ — covered;
-- pagination cursors are stable (deterministic test exists; property-based version open);
+- ~~pagination cursors are stable~~ — property-based version added 2026-07-12;
 - ~~idempotency replays equal payloads~~ — covered 2026-07-12;
 - ~~idempotency rejects changed payloads~~ — covered 2026-07-12;
 - ~~scheduler claims have one owner~~ — covered 2026-07-12 (8-way concurrency test);
-- rule priority is deterministic (first-wins unit coverage exists; property-based version open).
+- ~~rule priority is deterministic~~ — property-based version added 2026-07-12.
 
 ## Priority 6 — Torrent upload controls
 
@@ -1786,3 +1786,68 @@ This document is the canonical reference for project status and future backend w
 - External-process stderr is redacted before becoming durable media failure text: authorization/cookie/password/API-key lines are removed and URL userinfo is replaced. Process output-size checks no longer contain a guarded runtime `expect`. Deterministic tests cover redaction plus existing bounded-drain, timeout, and process-tree cancellation invariants.
 - Exact checkpoint verification on 2026-07-13: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, strict all-feature/all-target Clippy, `cargo test --locked --all-targets` (142 unit/property tests plus 9 HTTP integration tests and Criterion targets in test mode), the dedicated 9-test HTTP integration command, all 11 fuzz binaries, and `cargo build --locked --release` all passed. The release build completed in 2m24s.
 - Typed DHT table normalization, remaining runtime reconfiguration, media lifecycle, process admission/sandbox work, transfer-tail experiments, and remaining destructive fixtures are still being reconciled and must not be represented as complete.
+
+## 2026-07-13 roadmap-completion pass
+
+Priority 8 is now implemented for plain (non-Metalink) transfers, closing the
+last open Increment 6 implementation items that were locally actionable:
+
+- idle workers split the un-downloaded tail of the largest active range (at
+  least 16 MiB remaining) into new durable work units inside one SQLite
+  transaction (`segments::split`); the resume compatibility check accepts any
+  exact tiling of the object (`layout_tiles_exactly`), so split layouts
+  survive restart, including the crash window where a fully downloaded record
+  has not yet been flagged complete;
+- one bounded speculative duplicate per work unit: admitted only with an
+  identity anchor (whole-file SHA-256 or a source validator), buffered into
+  isolated memory capped at 64 MiB, connection-guarded by `try_acquire` so
+  speculation never queues for a permit, gated by slow-tail detection over a
+  500 ms observation window (stalled, or projected completion above 5 s while
+  under half the job's aggregate pace), committed under the unit registry
+  lock with durable sync before the segment checkpoint, and with the losing
+  stream always cancelled; failed hedges penalize the host profile;
+- the ordered whole-file hasher was generalized to a byte-range durable
+  coverage structure, keeping exactly-once hashing correct under runtime
+  splits and hedges;
+- new bounded counters `ravyn_http_range_splits_total`,
+  `ravyn_http_speculation_wins_total`, and
+  `ravyn_http_speculation_losses_total`;
+- deterministic in-crate fixtures cover: a stalled tail completed by one
+  hedge, a wide stalled unit split into new work units, coverage merging,
+  retiled-layout resume acceptance, and gap/overlap/underfull rejection.
+
+Remaining portable Priority 5 fault fixtures were added: permission denied
+(read-only partial file), Windows share-mode file lock, crash between file
+sync and DB checkpoint (recovers by re-downloading and passes whole-file
+verification), shutdown during checksum, and an rqbit restart mid-transfer
+(three dropped statistics polls against a mock engine are absorbed by the
+poll-failure budget and the job completes). The still-open Priority 5 cases —
+disk full, archive bomb/traversal with real 7-Zip, playlist partial failure,
+live DNS rebinding, and per-tool shutdown fixtures — require CI images with
+real binaries or disposable OS fixtures and are tracked in `report.md`.
+
+Priority 10 artifacts: `SECURITY.md`, `COMPATIBILITY.md`, an expanded
+`RELEASE.md` (checklist, rollback, reproducibility), release-workflow
+`ravyn-release.json` updater metadata with per-artifact SHA-256, and
+`--remap-path-prefix` for binary reproducibility. In-place self-update
+remains intentionally deferred; protected branches/environments remain
+repository-host settings.
+
+Runtime settings: `POST /v1/settings/validate` returns a per-field validation
+report (isolated blame, `(combination)` fallback) without persisting, and is
+registered in OpenAPI. The capabilities endpoint now reports
+`concurrent_multi_source`, `speculative_http`, and `active_range_splitting`
+as available instead of disabled. The `new_jobs_only` classification still
+requires the config-snapshot refactor described in `report.md` and stays
+honestly classified as `backend_restart`.
+
+Review findings fixed during the same pass: the hedge heuristic could
+duplicate a healthy large tail (now requires stall or relative slowness), and
+the resume check would have reset all progress for the crash window between a
+split's clamp and the owner's completion checkpoint.
+
+Exact verification on 2026-07-13 (post-pass): `cargo fmt --all -- --check`,
+`cargo check --locked --all-targets`, strict all-feature/all-target Clippy,
+`cargo test --locked --all-targets` (152 unit/property tests plus 9 HTTP
+integration tests and Criterion targets in test mode), the fuzz manifest
+check for all 11 binaries, and `cargo build --locked --release` all passed.
