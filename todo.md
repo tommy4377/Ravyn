@@ -112,24 +112,17 @@ Converted call sites: `EngineManifest::artifact()` (platform unsupported), `Sign
 * antivirus/quarantine detection (no OS-level signal is currently probed);
 * invalid custom path and failed app install are desktop/Tauri-layer concerns (`src-tauri/`), not yet wired to this backend error type.
 
-### 24. End-to-end provisioning tests are missing
+### 🔶 24. End-to-end provisioning tests: some added, the HTTP-mock-server ones are blocked by design
 
-`tests/http_integration.rs` (795 lines) covers HTTP download scenarios with a mock server. Unit tests exist for engines, components, and storage.
+`tests/http_integration.rs` (795 lines) covers HTTP download scenarios with a mock server, but for the *main* download engine, not managed-engine provisioning. Newly added this pass:
+* `provisioning_limiter_caps_simultaneous_installations_at_two` / `provisioning_limiter_acquire_is_cancellable_while_queued` (`src/services/components.rs`) — the concurrency-limiting semaphore (item 13's global limit) had **zero** test coverage before this; now both the cap and cancel-while-queued behavior are verified;
+* `artifact_validation_rejects_unsafe_urls_and_archive_members` (`src/services/engines.rs`) — plain-HTTP URLs, embedded credentials, URL fragments, and unsafe (`..`/absolute) `archive_member` paths are all confirmed rejected, and a valid archive-member artifact is confirmed accepted;
+* `installs_the_verified_member_of_an_archive_artifact` / `rejects_an_archive_member_whose_content_fails_checksum_verification` / `cleanup_keeps_only_the_active_and_previous_versions` (added alongside items 1/15) exercise install → extract → activate → cleanup end to end;
+* `installation_report_round_trips_independently_of_completion` (added alongside item 18) exercises the setup-completion/installation-report interaction end to end.
 
-**Still missing:**
-* simulated HTTP manifest with mock server;
-* real download from mock server;
-* incorrect checksum;
-* insecure redirect;
-* cancellation at every stage;
-* simultaneous installation;
-* restart and activation of the new engine;
-* update and rollback;
-* rqbit spawn/readiness/crash;
-* application installation;
-* copy failure;
-* launch of the installed copy;
-* uninstall.
+**Investigated and deliberately not built:** a mock-HTTP-server test of `EngineManager::download_and_install()` itself (real download, incorrect checksum, insecure redirect, cancellation-at-every-stage, restart/activation via the network path). `EngineArtifact::validate()` unconditionally requires `https://` — this is intentional defense-in-depth for automatically-downloaded engine binaries (stricter than the main download engine, which only gates private-network access behind `--allow-private-network`) — and `download_and_install()` builds its own internal `reqwest::Client` with no way to inject a trusted root CA for a self-signed test server. Testing the real network path honestly would require either weakening that HTTPS invariant (rejected — it's a real security boundary, not test friction) or adding TLS test-certificate infrastructure (a new dependency and non-trivial harness) to exercise it against a local HTTPS mock. Left for a follow-up that explicitly decides to take on that infrastructure.
+
+**Still out of backend scope** (desktop/Tauri, `src-tauri/`): application installation, copy failure, launch of the installed copy, uninstall, rqbit spawn/readiness/crash under real OS process supervision.
 
 ---
 
@@ -233,7 +226,7 @@ The correct order now is:
 9. ~~Correct version comparison, detected version, and capability checks.~~ ✅
 10. ~~Add global limit, cleanup, and close cancellation race conditions.~~ ✅ (partial for cleanup)
 11. **Build the desktop in CI and publish it in the release.**
-12. **Add end-to-end tests on Windows.**
+12. 🔶 Add end-to-end tests on Windows. (Backend-testable provisioning gaps closed — concurrency limiter, archive-member/URL validation, install/rollback/cleanup, setup-installation report — the mock-HTTPS-server download path is a deliberate follow-up; desktop-side install/uninstall/launch tests remain.)
 13. ~~Apply per-process authentication and restrict Tauri commands.~~ ✅ (partial for command restriction)
 14. **Update documentation and capability matrix.**
 

@@ -1043,6 +1043,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_validation_rejects_unsafe_urls_and_archive_members() {
+        let bytes = b"test executable";
+        assert!(artifact(bytes).validate().is_ok());
+
+        let mut insecure = artifact(bytes);
+        insecure.url = "http://downloads.example.test/ffmpeg.exe".into();
+        assert!(
+            insecure.validate().is_err(),
+            "a plain-HTTP artifact URL must never validate, even for a mock test server"
+        );
+
+        let mut with_credentials = artifact(bytes);
+        with_credentials.url = "https://user:pass@downloads.example.test/ffmpeg.exe".into();
+        assert!(with_credentials.validate().is_err());
+
+        let mut with_fragment = artifact(bytes);
+        with_fragment.url = "https://downloads.example.test/ffmpeg.exe#frag".into();
+        assert!(with_fragment.validate().is_err());
+
+        let mut traversal_member = artifact(bytes);
+        traversal_member.archive_member = Some("../bin/ffmpeg.exe".into());
+        traversal_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(traversal_member.validate().is_err());
+
+        let mut absolute_member = artifact(bytes);
+        absolute_member.archive_member = Some("/bin/ffmpeg.exe".into());
+        absolute_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(absolute_member.validate().is_err());
+
+        let mut missing_member_sha = artifact(bytes);
+        missing_member_sha.archive_member = Some("bin/ffmpeg.exe".into());
+        assert!(missing_member_sha.validate().is_err());
+
+        let mut orphaned_member_sha = artifact(bytes);
+        orphaned_member_sha.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(orphaned_member_sha.validate().is_err());
+
+        let mut valid_member = artifact(bytes);
+        valid_member.archive_member = Some("bin/ffmpeg.exe".into());
+        valid_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(valid_member.validate().is_ok());
+    }
+
     #[tokio::test]
     async fn activation_can_roll_back_without_trusting_stale_metadata() {
         let temp = tempfile::tempdir().unwrap();

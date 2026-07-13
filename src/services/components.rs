@@ -1730,6 +1730,51 @@ mod tests {
         assert!(registry.begin(ComponentId::Ytdlp).is_ok());
     }
 
+    #[tokio::test]
+    async fn provisioning_limiter_caps_simultaneous_installations_at_two() {
+        let registry = ProvisioningCancellation::new();
+        let cancellation = CancellationToken::new();
+        let first = registry.acquire(&cancellation).await.unwrap();
+        let second = registry.acquire(&cancellation).await.unwrap();
+
+        // A third simultaneous installation must queue, not proceed.
+        let third = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            registry.acquire(&cancellation),
+        )
+        .await;
+        assert!(
+            third.is_err(),
+            "a third concurrent install must block while two permits are held"
+        );
+
+        // Releasing one permit must unblock exactly one queued acquire.
+        drop(first);
+        let unblocked = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            registry.acquire(&cancellation),
+        )
+        .await;
+        assert!(unblocked.is_ok(), "releasing a permit must unblock a queued install");
+        drop(second);
+        drop(unblocked);
+    }
+
+    #[tokio::test]
+    async fn provisioning_limiter_acquire_is_cancellable_while_queued() {
+        let registry = ProvisioningCancellation::new();
+        let holder_cancellation = CancellationToken::new();
+        let _first = registry.acquire(&holder_cancellation).await.unwrap();
+        let _second = registry.acquire(&holder_cancellation).await.unwrap();
+
+        let queued_cancellation = CancellationToken::new();
+        queued_cancellation.cancel();
+        assert!(matches!(
+            registry.acquire(&queued_cancellation).await,
+            Err(RavynError::Cancelled)
+        ));
+    }
+
     #[test]
     fn current_target_is_non_empty() {
         assert!(!current_target().is_empty());
