@@ -1,0 +1,30 @@
+[package]
+name = "ravyn-desktop"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Ravyn desktop shell: setup and main application windows"
+
+[lib]
+name = "ravyn_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+ravyn = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# Debug-only automation bridge used by the tauri-mcp test tooling.
+tauri-plugin-mcp-bridge = "0.12"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

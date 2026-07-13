@@ -28,6 +28,15 @@ use tower_http::{
 };
 
 pub async fn serve(app: Ravyn) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(app.config.listen).await?;
+    serve_with_listener(app, listener).await
+}
+
+/// Serve the API on an already-bound listener.
+///
+/// Used by the desktop shell to bind an ephemeral loopback port and learn the
+/// effective address before the server starts.
+pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) -> Result<()> {
     if !app.config.listen.ip().is_loopback()
         && (!app.config.allow_remote_api
             || !app.config.remote_api_behind_tls_proxy
@@ -66,11 +75,14 @@ pub async fn serve(app: Ravyn) -> Result<()> {
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(protection, protect_api))
         .layer(middleware::from_fn_with_state(auth, require_token))
+        .layer(middleware::from_fn(app_webview_cors))
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
-    let listener = tokio::net::TcpListener::bind(app.config.listen).await?;
-    tracing::info!(address=%app.config.listen,"Ravyn backend listening");
+    let bound = listener
+        .local_addr()
+        .map_err(|e| crate::error::RavynError::Internal(e.to_string()))?;
+    tracing::info!(address=%bound,"Ravyn backend listening");
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
@@ -448,6 +460,59 @@ async fn require_token(
             return browser_cors_response(response, &origin);
         }
     }
+    response
+}
+
+/// Origins of the trusted Ravyn desktop webview (Tauri production schemes and
+/// the fixed Vite dev-server port). The API stays loopback-bound; this only
+/// lets the app's own webview call it cross-origin.
+const APP_WEBVIEW_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+];
+
+async fn app_webview_cors(request: Request<axum::body::Body>, next: Next) -> Response {
+    let origin = request
+        .headers()
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let allowed = origin
+        .as_deref()
+        .is_some_and(|value| APP_WEBVIEW_ORIGINS.contains(&value));
+
+    if allowed && request.method() == Method::OPTIONS {
+        let response = StatusCode::NO_CONTENT.into_response();
+        return app_cors_response(response, origin.as_deref().unwrap_or_default());
+    }
+
+    let response = next.run(request).await;
+    if allowed {
+        return app_cors_response(response, origin.as_deref().unwrap_or_default());
+    }
+    response
+}
+
+fn app_cors_response(mut response: Response, origin: &str) -> Response {
+    if let Ok(origin) = HeaderValue::from_str(origin) {
+        response
+            .headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("authorization, content-type, last-event-id"),
+    );
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PATCH, PUT, DELETE, OPTIONS"),
+    );
+    response
+        .headers_mut()
+        .insert(VARY, HeaderValue::from_static("origin"));
     response
 }
 

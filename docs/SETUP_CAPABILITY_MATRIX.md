@@ -76,7 +76,18 @@ HTTP error body: `{code, message, request_id, retryable, details}`.
 | Installation & provisioning | `POST /v1/components/{id}/install`, `/cancel`, Tauri `apply_windows_integration` | `component` | `provisioningService` | `provisioningStore` | `ProvisioningStage`, `ComponentProgressRow`, `ProgressBar` |
 | Completion & handoff | `POST /v1/setup/complete`, Tauri `finish_setup_handoff` | — | `setupService` | `setupStore` | `CompletionStage` |
 
-## 6. Known gaps / follow-ups
+## 6. Smoke-test status (2026-07-13)
+
+Verified end-to-end on Windows via the real desktop app (`ravyn-desktop.exe`,
+debug build, scratch `RAVYN_DATA_DIR`): welcome detection (portable/dev),
+setup type, feature selection persisted through `POST /v1/components/features`,
+library preparation through `POST /v1/setup/library` (layout created on disk),
+Windows integration (Installed Apps registration applied; app copy honestly
+skipped in dev), component provisioning with real failure states from the
+empty built-in manifest (per-row Retry offered), setup completion via
+`POST /v1/setup/complete`, and the setup → main window handoff.
+
+## 7. Known gaps / follow-ups
 
 - `GET /v1/settings` preference subset not yet surfaced in Preferences stage (theme is frontend + Windows; close behavior belongs to main app).
 - Built-in engine manifest is empty until release artifact data is populated; components report `unsupported` in dev unless a manifest file is provided under `RAVYN_DATA_DIR/engines/manifest.json`.

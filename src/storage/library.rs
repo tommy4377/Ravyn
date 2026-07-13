@@ -183,14 +183,12 @@ impl Repository {
             "SELECT * FROM library_entries WHERE path=? AND state!='trashed' \
              ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,updated_at DESC LIMIT 1",
         )
-            .bind(path.to_string_lossy().to_string())
-            .fetch_optional(self.pool())
-            .await?
-            .map(row_to_library_entry)
-            .transpose()?
-            .ok_or_else(|| {
-                RavynError::NotFound(format!("library entry for {}", path.display()))
-            })
+        .bind(path.to_string_lossy().to_string())
+        .fetch_optional(self.pool())
+        .await?
+        .map(row_to_library_entry)
+        .transpose()?
+        .ok_or_else(|| RavynError::NotFound(format!("library entry for {}", path.display())))
     }
 
     /// Returns whether another live or missing entry reserves a logical destination path.
@@ -256,10 +254,14 @@ impl Repository {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            query.push(" AND mime_type=").push_bind(mime_type.to_ascii_lowercase());
+            query
+                .push(" AND mime_type=")
+                .push_bind(mime_type.to_ascii_lowercase());
         }
         if let Some(downloaded_from) = filter.downloaded_from {
-            query.push(" AND downloaded_at>=").push_bind(downloaded_from);
+            query
+                .push(" AND downloaded_at>=")
+                .push_bind(downloaded_from);
         }
         if let Some(downloaded_to) = filter.downloaded_to {
             query.push(" AND downloaded_at<=").push_bind(downloaded_to);
@@ -302,9 +304,8 @@ impl Repository {
             .map_err(|_| RavynError::Invalid("duplicate size exceeds SQLite range".into()))?;
         let limit = i64::try_from(limit.clamp(1, 100))
             .map_err(|_| RavynError::Invalid("duplicate search limit is invalid".into()))?;
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT * FROM library_entries WHERE state='active' AND (",
-        );
+        let mut query =
+            QueryBuilder::<Sqlite>::new("SELECT * FROM library_entries WHERE state='active' AND (");
         let mut has_clause = false;
         if let Some(sha256) = sha256 {
             query.push("sha256=").push_bind(sha256.to_ascii_lowercase());
@@ -321,9 +322,7 @@ impl Repository {
             if has_clause {
                 query.push(" OR ");
             }
-            query
-                .push("filename COLLATE NOCASE=")
-                .push_bind(filename);
+            query.push("filename COLLATE NOCASE=").push_bind(filename);
         }
         query
             .push(") ORDER BY downloaded_at DESC,id DESC LIMIT ")
@@ -399,15 +398,14 @@ impl Repository {
         job_id: Uuid,
         trust: &T,
     ) -> Result<u64> {
-        let changed = sqlx::query(
-            "UPDATE library_entries SET trust_json=?,updated_at=? WHERE job_id=?",
-        )
-        .bind(serde_json::to_string(trust)?)
-        .bind(Utc::now())
-        .bind(job_id.to_string())
-        .execute(self.pool())
-        .await?
-        .rows_affected();
+        let changed =
+            sqlx::query("UPDATE library_entries SET trust_json=?,updated_at=? WHERE job_id=?")
+                .bind(serde_json::to_string(trust)?)
+                .bind(Utc::now())
+                .bind(job_id.to_string())
+                .execute(self.pool())
+                .await?
+                .rows_affected();
         Ok(changed)
     }
 
@@ -465,12 +463,10 @@ pub(crate) fn row_to_library_entry(row: SqliteRow) -> Result<LibraryEntry> {
         filename: row.try_get("filename")?,
         category: LibraryCategory::from_str(&row.try_get::<String, _>("category")?)?,
         mime_type: row.try_get("mime_type")?,
-        media_metadata: serde_json::from_str(&row.try_get::<String, _>(
-            "media_metadata_json",
-        )?)?,
-        torrent_metadata: serde_json::from_str(&row.try_get::<String, _>(
-            "torrent_metadata_json",
-        )?)?,
+        media_metadata: serde_json::from_str(&row.try_get::<String, _>("media_metadata_json")?)?,
+        torrent_metadata: serde_json::from_str(
+            &row.try_get::<String, _>("torrent_metadata_json")?,
+        )?,
         tags: serde_json::from_str(&row.try_get::<String, _>("tags_json")?)?,
         trust: row
             .try_get::<Option<String>, _>("trust_json")?
@@ -488,9 +484,7 @@ pub(crate) fn row_to_library_entry(row: SqliteRow) -> Result<LibraryEntry> {
 }
 
 impl Repository {
-    pub async fn load_cleanup_policies(
-        &self,
-    ) -> Result<crate::services::library::CleanupPolicies> {
+    pub async fn load_cleanup_policies(&self) -> Result<crate::services::library::CleanupPolicies> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT cleanup_json FROM library_settings WHERE id=1")
                 .fetch_optional(self.pool())
@@ -554,10 +548,9 @@ impl Repository {
                 "trashed" => trashed_storage_bytes = trashed_storage_bytes.saturating_add(bytes),
                 _ => {}
             }
-            let entry = categories.entry(category).or_insert(CategoryStatistics {
-                files: 0,
-                bytes: 0,
-            });
+            let entry = categories
+                .entry(category)
+                .or_insert(CategoryStatistics { files: 0, bytes: 0 });
             entry.files = entry.files.saturating_add(files);
             entry.bytes = entry.bytes.saturating_add(bytes);
         }
@@ -588,7 +581,12 @@ impl Repository {
             .fetch_all(self.pool())
             .await?
             .into_iter()
-            .map(|row| Ok((row.try_get::<String, _>("key")?, row.try_get::<i64, _>("value")?)))
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("key")?,
+                    row.try_get::<i64, _>("value")?,
+                ))
+            })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
 
         Ok(PersonalStatistics {
@@ -625,7 +623,8 @@ async fn activity_buckets(
     rows.into_iter()
         .map(|row| {
             Ok(ActivityBucket {
-                period: row.try_get::<Option<String>, _>("period")?
+                period: row
+                    .try_get::<Option<String>, _>("period")?
                     .unwrap_or_default(),
                 files: u64::try_from(row.try_get::<i64, _>("files")?)
                     .map_err(|_| RavynError::Internal("negative activity count".into()))?,
@@ -641,14 +640,16 @@ fn counter(values: &std::collections::HashMap<String, i64>, key: &str) -> Result
         .map_err(|_| RavynError::Internal(format!("stat counter {key} is negative")))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     async fn repository() -> (tempfile::TempDir, Repository) {
         let temporary = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}", temporary.path().join("test.sqlite3").display());
+        let url = format!(
+            "sqlite://{}",
+            temporary.path().join("test.sqlite3").display()
+        );
         let repository = Repository::connect(&url).await.unwrap();
         (temporary, repository)
     }
@@ -727,10 +728,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matches.len(), 1);
-        assert!(repository
-            .find_library_duplicate_candidates(None, None, None, 10)
-            .await
-            .is_err());
+        assert!(
+            repository
+                .find_library_duplicate_candidates(None, None, None, 10)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -752,7 +755,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.state, LibraryEntryState::Trashed);
-        assert_eq!(repository.increment_stat_counter("saved_bytes", 7).await.unwrap(), 7);
-        assert_eq!(repository.increment_stat_counter("saved_bytes", 5).await.unwrap(), 12);
+        assert_eq!(
+            repository
+                .increment_stat_counter("saved_bytes", 7)
+                .await
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            repository
+                .increment_stat_counter("saved_bytes", 5)
+                .await
+                .unwrap(),
+            12
+        );
     }
 }

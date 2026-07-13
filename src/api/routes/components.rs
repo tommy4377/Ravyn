@@ -144,7 +144,7 @@ pub(super) async fn install_component(
     }
 
     // Check for user-provided custom path.
-    let default = std::path::Path::new(component.engine_name());
+    let default = std::path::Path::new(component.default_command());
     let config_path = match component {
         ComponentId::Ytdlp => &s.base_config.ytdlp,
         ComponentId::Ffmpeg => &s.base_config.ffmpeg,

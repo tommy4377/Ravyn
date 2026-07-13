@@ -148,7 +148,7 @@ async fn ensure_provisioned_components(
     );
 
     for component in required {
-        let default = std::path::Path::new(component.engine_name());
+        let default = std::path::Path::new(component.default_command());
         let config_path = match component {
             ComponentId::Ytdlp => &config.ytdlp,
             ComponentId::Ffmpeg => &config.ffmpeg,

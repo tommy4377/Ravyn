@@ -122,6 +122,19 @@ impl ComponentId {
         }
     }
 
+    /// Built-in command-name default of the matching config path field.
+    ///
+    /// A config value equal to this default means "no custom path". Note that
+    /// 7-Zip's command default (`7z`) differs from its engine name (`7zip`).
+    pub fn default_command(self) -> &'static str {
+        match self {
+            Self::Ytdlp => "yt-dlp",
+            Self::Ffmpeg => "ffmpeg",
+            Self::Rqbit => "rqbit",
+            Self::SevenZip => "7z",
+        }
+    }
+
     /// Human-readable label.
     pub fn label(self) -> &'static str {
         match self {
@@ -236,7 +249,8 @@ impl ComponentState {
 pub enum SetupProfile {
     /// Only standard HTTP downloads; no external engines.
     Minimal,
-    /// Standard downloads + yt-dlp for video extraction.
+    /// Standard downloads, video extraction, media processing, and archive
+    /// extraction (the plan's Recommended preset; torrents stay opt-in).
     Recommended,
     /// All features enabled; all engines installed.
     Full,
@@ -265,6 +279,8 @@ impl SetupProfile {
                 let mut set = BTreeSet::new();
                 set.insert(FeatureId::StandardDownloads);
                 set.insert(FeatureId::VideoExtraction);
+                set.insert(FeatureId::MediaMerging);
+                set.insert(FeatureId::ArchiveExtraction);
                 set
             }
             Self::Full => FeatureId::ALL.iter().copied().collect(),
@@ -496,7 +512,7 @@ impl ComponentManager {
         config: &crate::config::Config,
         records: &BTreeMap<ComponentId, PersistedComponent>,
     ) -> ComponentState {
-        let default = std::path::Path::new(component.engine_name());
+        let default = std::path::Path::new(component.default_command());
         let config_path = match component {
             ComponentId::Ytdlp => &config.ytdlp,
             ComponentId::Ffmpeg => &config.ffmpeg,
@@ -549,7 +565,7 @@ impl ComponentManager {
         config: &crate::config::Config,
         records: &BTreeMap<ComponentId, PersistedComponent>,
     ) -> Option<PathBuf> {
-        let default = std::path::Path::new(component.engine_name());
+        let default = std::path::Path::new(component.default_command());
         let config_path = match component {
             ComponentId::Ytdlp => &config.ytdlp,
             ComponentId::Ffmpeg => &config.ffmpeg,
@@ -744,6 +760,25 @@ pub fn effective_feature_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_commands_match_config_defaults() {
+        // 7-Zip's command default differs from its engine directory name; a
+        // config left at the default must never be treated as a custom path.
+        assert_eq!(ComponentId::SevenZip.default_command(), "7z");
+        assert_eq!(ComponentId::SevenZip.engine_name(), "7zip");
+        assert_eq!(ComponentId::Ytdlp.default_command(), "yt-dlp");
+    }
+
+    #[test]
+    fn recommended_profile_matches_the_design_plan() {
+        let features = SetupProfile::Recommended.default_features();
+        assert!(features.contains(&FeatureId::StandardDownloads));
+        assert!(features.contains(&FeatureId::VideoExtraction));
+        assert!(features.contains(&FeatureId::MediaMerging));
+        assert!(features.contains(&FeatureId::ArchiveExtraction));
+        assert!(!features.contains(&FeatureId::TorrentSupport));
+    }
 
     #[test]
     fn feature_to_component_mapping() {

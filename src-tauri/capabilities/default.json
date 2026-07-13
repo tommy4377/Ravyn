@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the Ravyn setup and main windows",
+  "windows": ["setup", "main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "mcp-bridge:default"
+  ]
+}

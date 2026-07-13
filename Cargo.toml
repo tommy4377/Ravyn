@@ -55,3 +55,7 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[workspace]
+members = ["src-tauri"]
+exclude = ["fuzz"]
