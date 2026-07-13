@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
-    error::{RavynError, Result},
+    error::{ProvisioningErrorCode, RavynError, Result},
     services::security,
 };
 
@@ -122,9 +122,12 @@ impl EngineManifest {
             .iter()
             .find(|artifact| artifact.engine == engine && artifact.target == target)
             .ok_or_else(|| {
-                RavynError::Unavailable(format!(
-                    "no managed {engine} artifact is available for {target}"
-                ))
+                RavynError::provisioning(
+                    ProvisioningErrorCode::PlatformUnsupported,
+                    format!("no managed {engine} artifact is available for {target}"),
+                )
+                .with_component(engine)
+                .with_target(target)
             })
     }
 }
@@ -143,7 +146,10 @@ impl SignedEngineManifest {
             .map_err(|_| RavynError::Invalid("engine manifest public key is invalid".into()))?;
         let payload = serde_json::to_vec(&self.manifest)?;
         key.verify_strict(&payload, &signature).map_err(|_| {
-            RavynError::Protocol("engine manifest signature verification failed".into())
+            RavynError::provisioning(
+                ProvisioningErrorCode::InvalidManifestSignature,
+                "engine manifest signature verification failed",
+            )
         })?;
         self.manifest.validate()?;
         Ok(&self.manifest)
@@ -210,17 +216,25 @@ impl EngineManager {
     ) -> Result<PathBuf> {
         artifact.validate()?;
         if bytes.len() as u64 != artifact.size_bytes {
-            return Err(RavynError::Protocol(format!(
-                "managed engine size mismatch: expected {}, received {}",
-                artifact.size_bytes,
-                bytes.len()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::DownloadInterrupted,
+                format!(
+                    "managed engine size mismatch: expected {}, received {}",
+                    artifact.size_bytes,
+                    bytes.len()
+                ),
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version));
         }
         let actual = hex::encode(Sha256::digest(bytes));
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
-            return Err(RavynError::Protocol(
-                "managed engine checksum verification failed".into(),
-            ));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::ChecksumMismatch,
+                "managed engine checksum verification failed",
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version));
         }
 
         let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
@@ -363,10 +377,24 @@ impl EngineManager {
                 report(EngineInstallStage::Verifying);
             }
             let actual = hex::encode(hasher.finalize());
-            if received != artifact.size_bytes || !actual.eq_ignore_ascii_case(&artifact.sha256) {
-                return Err(RavynError::Protocol(
-                    "engine download failed size or checksum verification".into(),
-                ));
+            if received != artifact.size_bytes {
+                return Err(RavynError::provisioning(
+                    ProvisioningErrorCode::DownloadInterrupted,
+                    format!(
+                        "engine download ended after {received} of {} expected bytes",
+                        artifact.size_bytes
+                    ),
+                )
+                .with_component(&artifact.engine)
+                .with_expected_version(&artifact.version));
+            }
+            if !actual.eq_ignore_ascii_case(&artifact.sha256) {
+                return Err(RavynError::provisioning(
+                    ProvisioningErrorCode::ChecksumMismatch,
+                    "engine download failed checksum verification",
+                )
+                .with_component(&artifact.engine)
+                .with_expected_version(&artifact.version));
             }
             if let Some(report) = stage {
                 report(EngineInstallStage::Installing);

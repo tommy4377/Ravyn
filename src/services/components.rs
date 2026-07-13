@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{RavynError, Result};
+use crate::error::{ProvisioningErrorCode, RavynError, Result};
 
 // ---------------------------------------------------------------------------
 // Feature and component identifiers
@@ -549,9 +549,9 @@ impl ManifestProvider for FileManifestProvider {
             )));
         }
         let public_key = self.public_key.ok_or_else(|| {
-            RavynError::Unavailable(
-                "signed engine-manifest refresh is disabled because this build has no release public key"
-                    .into(),
+            RavynError::provisioning(
+                ProvisioningErrorCode::ManifestUnavailable,
+                "signed engine-manifest refresh is disabled because this build has no release public key",
             )
         })?;
         let bytes = std::fs::read(&self.path)?;
@@ -895,11 +895,16 @@ impl ComponentManager {
         stage: Option<&(dyn Fn(ComponentState) + Send + Sync)>,
     ) -> Result<InstalledComponent> {
         let artifact = self.manifest_artifact(component)?.ok_or_else(|| {
-            RavynError::Unavailable(format!(
-                "no managed {} artifact is available for {}",
-                component.engine_name(),
-                self.target
-            ))
+            RavynError::provisioning(
+                ProvisioningErrorCode::PlatformUnsupported,
+                format!(
+                    "no managed {} artifact is available for {}",
+                    component.engine_name(),
+                    self.target
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_target(self.target)
         })?;
         let stage_adapter = |engine_stage: crate::services::engines::EngineInstallStage| {
             if let Some(report) = stage {
@@ -952,27 +957,46 @@ impl ComponentManager {
                     "failed to deactivate an unhealthy managed component"
                 );
             }
-            return Err(RavynError::Unavailable(format!(
-                "managed {} failed its post-install health check: {health_error}",
-                component.engine_name()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} failed its post-install health check: {health_error}",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version));
         }
         let detected_version = health.version.ok_or_else(|| {
-            RavynError::Unavailable(format!(
-                "managed {} did not report a version during its health check",
-                component.engine_name()
-            ))
+            RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} did not report a version during its health check",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version)
         })?;
         if !detected_version
             .to_ascii_lowercase()
             .contains(&artifact.version.to_ascii_lowercase())
         {
             let _ = self.engine_manager.deactivate(component.engine_name()).await;
-            return Err(RavynError::Unavailable(format!(
-                "managed {} reported version {detected_version:?}, expected {}",
-                component.engine_name(),
-                artifact.version
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} reported version {detected_version:?}, expected {}",
+                    component.engine_name(),
+                    artifact.version
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version)
+            .with_detected_version(&detected_version));
         }
         Ok(InstalledComponent {
             path,
@@ -1101,10 +1125,16 @@ impl ComponentManager {
                     "failed to deactivate a managed component after a failed rollback health check"
                 );
             }
-            return Err(RavynError::Unavailable(format!(
-                "rolled-back {} failed its post-rollback health check: {health_error}",
-                component.engine_name()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::RollbackFailed,
+                format!(
+                    "rolled-back {} failed its post-rollback health check: {health_error}",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("rollback")
+            .with_path(path.display().to_string()));
         }
         Ok(InstalledComponent {
             path,

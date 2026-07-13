@@ -105,13 +105,16 @@ Atomic replacement and rollback are fully implemented. `previous.json` is mainta
 * no automatic data move to `%LOCALAPPDATA%`;
 * updater compatible with portable mode.
 
-### 22. Provisioning errors are still too generic
+### 🔶 22. Provisioning errors are now structured, most call sites converted
 
-`RavynError` (`src/error.rs:42-71`) has variants (`Invalid`, `NotFound`, `Conflict`, `Unavailable`, `Protocol`, etc.) and `api_code()` maps to codes like `INVALID_REQUEST`, `TEMPORARILY_UNAVAILABLE`, etc.
+`RavynError::Provisioning { code, message, details, retryable }` (`src/error.rs`) carries a `ProvisioningErrorCode` (`MANIFEST_UNAVAILABLE`, `PLATFORM_UNSUPPORTED`, `INVALID_MANIFEST_SIGNATURE`, `CHECKSUM_MISMATCH`, `INSUFFICIENT_SPACE`, `DOWNLOAD_INTERRUPTED`, `QUARANTINED`, `HEALTH_CHECK_FAILED`, `ROLLBACK_FAILED`, `INVALID_CUSTOM_PATH`, `APP_INSTALL_FAILED` — each with its own `api_code()`, HTTP status, `FailureClass`, and default `retryable`) plus a `ProvisioningErrorDetails` struct (`component`, `stage`, `expected_version`, `detected_version`, `path`, `target`) that is now serialized into the API error response's `details` field (previously always `{}`). Built with a fluent `RavynError::provisioning(code, message).with_component(...).with_stage(...)` builder.
+
+Converted call sites: `EngineManifest::artifact()` (platform unsupported), `SignedEngineManifest::verify()` (invalid signature), `EngineManager::install_verified()`/`download_and_install()` (checksum mismatch vs. download interrupted, now distinguished), `FileManifestProvider::load()` (manifest unavailable), `ComponentManager::install_component_with_progress()` and `rollback_component()` (health check / rollback failed, with component + stage + expected/detected version attached).
 
 **Still missing:**
-* distinct codes for manifest unavailable, platform unsupported, invalid manifest signature, checksum mismatch, insufficient space, download interrupted, antivirus/quarantine, failed health check, failed rollback, invalid custom path, failed app install;
-* structured `details` field with component, stage, expected/detected version, path, target, retryable flag.
+* insufficient space is only reachable indirectly via the existing OS `ENOSPC` → `FailureClass::DiskFull` IO-error path, not a proactive free-space precheck before download;
+* antivirus/quarantine detection (no OS-level signal is currently probed);
+* invalid custom path and failed app install are desktop/Tauri-layer concerns (`src-tauri/`), not yet wired to this backend error type.
 
 ### 24. End-to-end provisioning tests are missing
 
