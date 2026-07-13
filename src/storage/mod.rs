@@ -1,10 +1,14 @@
 mod audit;
+mod basket;
 mod automation;
 mod backup;
 mod jobs;
+mod library;
 mod media;
 mod outputs;
 mod pagination;
+mod presets;
+mod profiles;
 pub mod recovery;
 mod repository;
 #[cfg(test)]
@@ -14,9 +18,15 @@ mod secrets;
 mod settings;
 mod torrent_policy;
 
+pub use basket::{BasketItem, PutBasketItem};
+pub use presets::{DownloadPreset, DownloadPresetPayload, PutDownloadPreset};
+pub use profiles::{PutUserProfile, UserProfile};
 pub use audit::{AuditChainStatus, AuditRecord, JobLogRecord};
 pub use automation::{PageRecord, PageResourceRecord, RuleInput, TagRecord};
 pub use jobs::{JobActionRecord, JobListFilter};
+pub use library::{
+    LibraryEntry, LibraryEntryState, LibraryListFilter, NewLibraryEntry,
+};
 pub use media::{
     MediaArchiveRecord, MediaItemDescriptor, MediaItemOutputRecord, MediaItemRecord,
     MediaItemSummary,

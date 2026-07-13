@@ -195,6 +195,7 @@ impl HttpAdapter {
         let default_destination = self.config.effective_download_dir();
         let current_destination = PathBuf::from(&job.destination);
         let mut request = CreateJob {
+            preset_id: None,
             kind: JobKind::Http,
             source: job.source.clone(),
             destination: (current_destination != default_destination)

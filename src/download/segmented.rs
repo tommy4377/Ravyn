@@ -1632,6 +1632,7 @@ mod tests {
             let job = repository
                 .insert_job(
                     CreateJob {
+                        preset_id: None,
                         kind: JobKind::Http,
                         source: source_url.to_owned(),
                         destination: None,

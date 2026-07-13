@@ -78,6 +78,57 @@ impl JobManager {
         })
         .await?;
 
+        let repository = self.repository.clone();
+        let config = self.config.clone();
+        let cancel = self.shutdown.child_token();
+        self.spawn_tracked("library-cleanup", async move {
+            let start = tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+            let mut interval = tokio::time::interval_at(start, Duration::from_secs(24 * 60 * 60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        match repository.load_cleanup_policies().await {
+                            Ok(policies) => {
+                                if let Err(error) = crate::services::library::run_cleanup(
+                                    &config,
+                                    &repository,
+                                    &policies,
+                                )
+                                .await
+                                {
+                                    tracing::error!(%error, "scheduled library cleanup failed");
+                                }
+                                match crate::services::library::verify_entries(&repository).await {
+                                    Ok(report) if report.missing > 0 => {
+                                        if let Err(error) = crate::services::library::repair_relocations(
+                                            &config,
+                                            &repository,
+                                            crate::services::library::RelocationRequest::default(),
+                                            &cancel,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(%error, "scheduled library relocation repair failed");
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        tracing::error!(%error, "scheduled library verification failed");
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "failed to load library cleanup policies");
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await?;
+
         let torrent = self.torrent.clone();
         let cancel = self.shutdown.child_token();
         self.spawn_tracked("torrent-monitor", async move {

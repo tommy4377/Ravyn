@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod adapters;
 pub mod api;
 pub mod config;
@@ -30,7 +32,7 @@ impl Ravyn {
     pub async fn bootstrap(mut config: Config) -> Result<Self> {
         install_tls_provider()?;
         config.validate()?;
-        config.prepare_directories().await?;
+        config.prepare_bootstrap_directories().await?;
         let applied_restore = storage::recovery::apply_pending(&config.data_dir).await?;
         let repository = match Repository::connect(&config.database_url()).await {
             Ok(repository) => {
@@ -56,8 +58,8 @@ impl Ravyn {
         let base_config = Arc::new(config.clone());
         if let Some(settings) = repository.load_persistent_settings().await? {
             settings.apply_to(&mut config)?;
-            config.prepare_directories().await?;
         }
+        config.prepare_directories().await?;
         apply_managed_engine_paths(&mut config).await?;
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);

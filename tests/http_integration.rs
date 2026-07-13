@@ -16,6 +16,7 @@ use ravyn::{
     core::models::{
         CreateJob, DownloadOptions, DuplicatePolicy, JobKind, JobStatus, MetalinkMetadata,
     },
+    services::library::LibraryCategory,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -191,6 +192,30 @@ fn test_config(root: &Path) -> Config {
         "--download-dir",
         root.join("downloads").to_str().unwrap(),
         "--allow-private-network",
+        "--library-auto-organize",
+        "false",
+        "--max-active",
+        "1",
+        "--max-segments",
+        "4",
+        "--segment-threshold-mib",
+        "1",
+        "--max-retries",
+        "1",
+    ])
+    .unwrap()
+}
+
+fn organized_test_config(root: &Path) -> Config {
+    Config::try_parse_from([
+        "ravyn",
+        "--data-dir",
+        root.join("data").to_str().unwrap(),
+        "--download-dir",
+        root.join("downloads").to_str().unwrap(),
+        "--library-root",
+        root.join("Ravyn").to_str().unwrap(),
+        "--allow-private-network",
         "--max-active",
         "1",
         "--max-segments",
@@ -205,6 +230,7 @@ fn test_config(root: &Path) -> Config {
 
 fn create_request(url: String, expected_sha256: Option<String>) -> CreateJob {
     CreateJob {
+        preset_id: None,
         kind: JobKind::Http,
         source: url,
         destination: None,
@@ -245,6 +271,52 @@ async fn wait_for_status(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_library_organization_uses_detected_file_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut body = b"%PDF-1.7\n".to_vec();
+    body.resize(128 * 1024, 0x20);
+    let server = TestServer::start(body.clone(), "\"pdf-v1\"", Duration::ZERO).await;
+    let app = Ravyn::bootstrap(organized_test_config(temp.path()))
+        .await
+        .unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let job = app
+        .manager
+        .create(create_request(server.url(), None))
+        .await
+        .unwrap();
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(20),
+    )
+    .await;
+
+    assert_eq!(completed.status, JobStatus::Completed, "{:?}", completed.error);
+    let organized = temp.path().join("Ravyn/Documents/payload.bin");
+    assert_eq!(tokio::fs::read(&organized).await.unwrap(), body);
+    assert!(
+        !tokio::fs::try_exists(temp.path().join("Ravyn/Downloads/payload.bin"))
+            .await
+            .unwrap()
+    );
+    let outputs = app.repository.list_job_outputs(job.id).await.unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].current_path, organized);
+    let library = app
+        .repository
+        .list_library_entries(&ravyn::storage::LibraryListFilter::default(), 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(library.len(), 1);
+    assert_eq!(library[0].category, LibraryCategory::Documents);
+    assert_eq!(library[0].path, outputs[0].current_path);
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn checksum_and_post_transfer_lifecycle_use_an_uncancelled_job_token() {
     let temp = tempfile::tempdir().unwrap();
     let body = vec![0x5a; 4 * 1024 * 1024];
@@ -277,6 +349,60 @@ async fn checksum_and_post_transfer_lifecycle_use_an_uncancelled_job_token() {
             .unwrap(),
         body
     );
+    let library = app
+        .repository
+        .list_library_entries(
+            &ravyn::storage::LibraryListFilter::default(),
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(library.len(), 1);
+    assert_eq!(library[0].job_id, Some(job.id));
+    assert_eq!(library[0].sha256.as_deref(), completed.expected_sha256.as_deref());
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verified_library_cache_reuse_completes_without_a_second_transfer() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = vec![0x6b; 2 * 1024 * 1024];
+    let expected = hex::encode(Sha256::digest(&body));
+    let first_server = TestServer::start(body.clone(), "\"v1\"", Duration::ZERO).await;
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let first = app
+        .manager
+        .create(create_request(first_server.url(), Some(expected.clone())))
+        .await
+        .unwrap();
+    let completed = wait_for_status(
+        &app,
+        first.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(completed.status, JobStatus::Completed, "{:?}", completed.error);
+
+    let second_server = TestServer::start(body.clone(), "\"v2\"", Duration::ZERO).await;
+    let mut request = create_request(second_server.url(), Some(expected));
+    request.filename = Some("cached-copy.bin".into());
+    request.duplicate_policy = DuplicatePolicy::ReuseExisting;
+    let reused = app.manager.create(request).await.unwrap();
+    assert_eq!(reused.status, JobStatus::Completed);
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/cached-copy.bin"))
+            .await
+            .unwrap(),
+        body
+    );
+    let statistics = app.repository.personal_statistics().await.unwrap();
+    assert_eq!(statistics.duplicate_avoidance_count, 1);
+    assert_eq!(statistics.saved_bandwidth_bytes, body.len() as u64);
+    assert_eq!(second_server.range_requests(), 0);
     app.manager.shutdown().await;
 }
 

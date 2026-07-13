@@ -57,6 +57,9 @@ pub async fn serve(app: Ravyn) -> Result<()> {
         manager: app.manager.clone(),
         base_config: app.base_config.clone(),
         protection: protection.clone(),
+        library_import_status: std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::services::library::LibraryImportStatus::default(),
+        )),
     };
     let router = routes::router(state)
         .layer(DefaultBodyLimit::max(body_limit))

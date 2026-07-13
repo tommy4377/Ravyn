@@ -28,11 +28,13 @@ pub enum JobStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicatePolicy {
     Reject,
     ReuseExisting,
+    Skip,
+    Overwrite,
     #[default]
     Allow,
 }
@@ -169,6 +171,9 @@ pub struct DownloadOptions {
     pub referer: Option<String>,
     pub segments: Option<usize>,
     pub overwrite: bool,
+    /// Internal marker set when Ravyn selected the destination from the library layout.
+    /// Client-provided values are ignored during job creation.
+    pub library_auto_destination: bool,
     pub tags: Vec<String>,
     pub post_actions: Vec<PostAction>,
     pub media: Option<MediaOptions>,
@@ -238,6 +243,8 @@ pub enum FfmpegPreset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateJob {
+    #[serde(default)]
+    pub preset_id: Option<Uuid>,
     pub kind: JobKind,
     pub source: String,
     pub destination: Option<PathBuf>,
@@ -250,6 +257,13 @@ pub struct CreateJob {
     pub duplicate_policy: DuplicatePolicy,
     #[serde(default)]
     pub options: DownloadOptions,
+}
+
+impl CreateJob {
+    pub fn redacted(mut self) -> Self {
+        self.options.redact_sensitive();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

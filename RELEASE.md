@@ -9,7 +9,9 @@ service, certificate profile, or cloud signing secret is required.
 2. Update `RAVYN_MASTER_PROJECT_DOCUMENT.md` with the milestone evidence.
 3. Run the complete local gate documented in `AGENTS.md`:
    fmt, locked check, strict clippy, all tests, HTTP integration tests,
-   fuzz-target build, and the locked release build.
+   fuzz-target build, and the locked release build. For releases containing
+   the library feature set, also verify all 20 migrations on a fresh database
+   and exercise trash/restore, import/relocation, and cache reuse.
 4. Review `cargo audit` / `cargo deny` results from the latest CI run.
 5. Push an annotated `v<version>` tag.
 6. Let `.github/workflows/release.yml` build the Windows, Linux, and macOS
