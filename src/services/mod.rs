@@ -6,6 +6,7 @@ pub mod dedup;
 pub mod engines;
 pub mod filename;
 pub mod rules;
+pub mod rqbit_process;
 pub mod scheduler;
 pub mod secrets;
 pub mod security;

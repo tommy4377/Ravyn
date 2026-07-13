@@ -112,8 +112,8 @@ export class SetupController {
         setupInstallationInfo(),
       ]);
       this.installation = installation;
-      this.client = new RavynClient(backend.base_url);
-      this.events = new RavynEventClient(backend.base_url);
+      this.client = new RavynClient(backend.base_url, backend.api_token);
+      this.events = new RavynEventClient(backend.base_url, backend.api_token);
       this.events.connect();
       this.events.subscribe((event) => this.onEvent(event));
 
@@ -410,9 +410,9 @@ export class SetupController {
   async openRavyn(): Promise<void> {
     this.stepError = null;
     try {
-      await finishSetupHandoff();
-      // The setup window is closed by the shell once the main window
-      // reports readiness; nothing else to do here.
+      await finishSetupHandoff(this.integrationReport?.installed_exe ?? undefined);
+      // Installed mode exits this portable/setup process after launching the
+      // installed copy. Portable mode creates the current-process main window.
     } catch (error) {
       this.stepError = describeError(error);
     }

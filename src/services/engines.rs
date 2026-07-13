@@ -54,6 +54,23 @@ struct ActiveEngine {
     sha256: String,
 }
 
+/// Public, checksum-verified metadata for an active managed engine.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveEngineInfo {
+    pub version: String,
+    pub filename: String,
+    pub sha256: String,
+    pub path: PathBuf,
+}
+
+/// Lifecycle stage reported while activating a managed engine artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineInstallStage {
+    Downloading,
+    Verifying,
+    Installing,
+}
+
 impl ActiveEngine {
     fn validate(&self) -> Result<()> {
         validate_token(&self.version, "version")?;
@@ -86,8 +103,15 @@ impl EngineManifest {
                 "engine manifest contains too many artifacts".into(),
             ));
         }
+        let mut identities = std::collections::BTreeSet::new();
         for artifact in &self.artifacts {
             artifact.validate()?;
+            if !identities.insert((&artifact.engine, &artifact.target)) {
+                return Err(RavynError::Invalid(format!(
+                    "engine manifest contains duplicate {} artifact for {}",
+                    artifact.engine, artifact.target
+                )));
+            }
         }
         Ok(())
     }
@@ -230,12 +254,21 @@ impl EngineManager {
         artifact: &EngineArtifact,
         cancellation: &CancellationToken,
         progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+        stage: Option<&(dyn Fn(EngineInstallStage) + Send + Sync)>,
     ) -> Result<PathBuf> {
         artifact.validate()?;
+        if let Some(report) = stage {
+            report(EngineInstallStage::Downloading);
+        }
         let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
         tokio::fs::create_dir_all(&version_dir).await?;
         let temporary = version_dir.join(format!(".{}.download", artifact.filename));
         let destination = version_dir.join(&artifact.filename);
+        match tokio::fs::remove_file(&temporary).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let mut current = url::Url::parse(&artifact.url)?;
         let mut visited = std::collections::BTreeSet::new();
         let mut redirects = 0_u8;
@@ -326,13 +359,25 @@ impl EngineManager {
             }
             file.sync_all().await?;
             drop(file);
+            if let Some(report) = stage {
+                report(EngineInstallStage::Verifying);
+            }
             let actual = hex::encode(hasher.finalize());
             if received != artifact.size_bytes || !actual.eq_ignore_ascii_case(&artifact.sha256) {
                 return Err(RavynError::Protocol(
                     "engine download failed size or checksum verification".into(),
                 ));
             }
+            if let Some(report) = stage {
+                report(EngineInstallStage::Installing);
+            }
+            if cancellation.is_cancelled() {
+                return Err(RavynError::Cancelled);
+            }
             set_executable(&temporary).await?;
+            if cancellation.is_cancelled() {
+                return Err(RavynError::Cancelled);
+            }
             atomic_replace(&temporary, &destination).await?;
             Ok(())
         }
@@ -340,6 +385,19 @@ impl EngineManager {
         if let Err(error) = download_result {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(error);
+        }
+        if cancellation.is_cancelled() {
+            // Keep an already-active version intact when a forced reinstall
+            // races with cancellation; otherwise this newly activated-but-not-
+            // published file is safe to discard.
+            if self
+                .active_path(&artifact.engine)
+                .await?
+                .is_none_or(|active| active != destination)
+            {
+                let _ = tokio::fs::remove_file(&destination).await;
+            }
+            return Err(RavynError::Cancelled);
         }
         self.write_active(
             &artifact.engine,
@@ -353,20 +411,21 @@ impl EngineManager {
         Ok(destination)
     }
 
-    pub async fn active_path(&self, engine: &str) -> Result<Option<PathBuf>> {
+    /// Return checksum-verified metadata for the active engine version.
+    pub async fn active_info(&self, engine: &str) -> Result<Option<ActiveEngineInfo>> {
         validate_token(engine, "engine")?;
-        let path = self.root.join(engine).join("active.json");
-        if !tokio::fs::try_exists(&path).await? {
+        let metadata_path = self.root.join(engine).join("active.json");
+        if !tokio::fs::try_exists(&metadata_path).await? {
             return Ok(None);
         }
-        let bytes = read_engine_metadata(&path).await?;
+        let bytes = read_engine_metadata(&metadata_path).await?;
         let active: ActiveEngine = serde_json::from_slice(&bytes)?;
         active.validate()?;
         let executable = self
             .root
             .join(engine)
-            .join(active.version)
-            .join(active.filename);
+            .join(&active.version)
+            .join(&active.filename);
         if !tokio::fs::try_exists(&executable).await? {
             return Err(RavynError::Unavailable(format!(
                 "active managed {engine} executable is missing"
@@ -378,7 +437,33 @@ impl EngineManager {
                 "active managed {engine} executable failed checksum verification"
             )));
         }
-        Ok(Some(executable))
+        Ok(Some(ActiveEngineInfo {
+            version: active.version,
+            filename: active.filename,
+            sha256: active.sha256,
+            path: executable,
+        }))
+    }
+
+    pub async fn active_path(&self, engine: &str) -> Result<Option<PathBuf>> {
+        Ok(self.active_info(engine).await?.map(|info| info.path))
+    }
+
+    /// Remove active activation metadata after a failed first-time health check.
+    /// Versioned files remain available for diagnostics and later cleanup, but
+    /// no managed executable is considered active.
+    pub async fn deactivate(&self, engine: &str) -> Result<()> {
+        validate_token(engine, "engine")?;
+        let engine_dir = self.root.join(engine);
+        for name in ["active.json", ".active.json.tmp"] {
+            let path = engine_dir.join(name);
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     /// Atomically returns to the previously active, checksum-verified version.
@@ -696,6 +781,17 @@ mod tests {
         file.set_len(MAX_ENGINE_METADATA_BYTES + 1).await.unwrap();
 
         assert!(manager.active_path("ffmpeg").await.is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_engine_targets() {
+        let item = artifact(b"duplicate engine");
+        let manifest = EngineManifest {
+            schema_version: MANIFEST_SCHEMA,
+            channel: "stable".into(),
+            artifacts: vec![item.clone(), item],
+        };
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

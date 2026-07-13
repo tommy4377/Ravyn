@@ -8,6 +8,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 export interface BackendInfo {
   base_url: string;
+  api_token: string;
   data_dir: string;
   setup_completed: boolean;
 }
@@ -58,8 +59,8 @@ export function applyWindowsIntegration(
   return invoke<IntegrationReport>("apply_windows_integration", { request });
 }
 
-export function finishSetupHandoff(): Promise<void> {
-  return invoke("finish_setup_handoff");
+export function finishSetupHandoff(installedExe?: string): Promise<void> {
+  return invoke("finish_setup_handoff", { installedExe: installedExe ?? null });
 }
 
 export function mainWindowReady(): Promise<void> {

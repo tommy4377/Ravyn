@@ -11,6 +11,7 @@ use tokio::sync::watch;
 #[derive(Debug, Clone, Serialize)]
 pub struct BackendInfo {
     pub base_url: String,
+    pub api_token: String,
     pub data_dir: String,
     pub setup_completed: bool,
 }
@@ -95,6 +96,9 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
 
     let data_dir = resolve_data_dir();
     let data_dir_str = data_dir.display().to_string();
+    // This token is process-local and is passed only through the Tauri IPC
+    // response to Ravyn's own webview. It is never written to settings or disk.
+    let api_token = uuid::Uuid::new_v4().to_string();
 
     // Managed component installation is driven explicitly by the setup flow,
     // so startup auto-provisioning stays off in the desktop shell.
@@ -104,6 +108,8 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
         &data_dir_str,
         "--listen",
         "127.0.0.1:0",
+        "--api-token",
+        &api_token,
         "--auto-provision",
         "false",
     ])
@@ -132,9 +138,11 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
 
     let _ = sender.send(Some(BackendInfo {
         base_url: format!("http://{bound}"),
+        api_token,
         data_dir: data_dir_str,
         setup_completed,
     }));
+    crate::integration::confirm_installed_copy_ready();
 
     ravyn::api::serve_with_listener(app, listener)
         .await

@@ -65,6 +65,8 @@ pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) 
         repository: app.repository.clone(),
         manager: app.manager.clone(),
         base_config: app.base_config.clone(),
+        configured_config: app.configured_config.clone(),
+        component_manifest: app.component_manifest.clone(),
         protection: protection.clone(),
         library_import_status: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::services::library::LibraryImportStatus::default(),
@@ -372,13 +374,26 @@ async fn require_token(
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            (path == "/v1/events")
+                .then(|| request.uri().query())
+                .flatten()
+                .and_then(|query| {
+                    url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| {
+                        (name == "access_token").then(|| value.into_owned())
+                    })
+                })
+        });
     let global_valid = state.global_token.as_deref().is_some_and(|expected| {
-        bearer.is_some_and(|value| constant_time_eq(value.as_bytes(), expected.as_bytes()))
+        bearer
+            .as_deref()
+            .is_some_and(|value| constant_time_eq(value.as_bytes(), expected.as_bytes()))
     });
 
     let browser_valid = if browser_scoped && !global_valid {
-        match (bearer, origin.as_deref()) {
+        match (bearer.as_deref(), origin.as_deref()) {
             (Some(token), Some(origin)) => state
                 .repository
                 .verify_browser_token(&crate::services::browser::hash_token(token), origin)
@@ -408,12 +423,12 @@ async fn require_token(
     let identity = if global_valid {
         format!(
             "global:{}",
-            crate::services::browser::hash_token(bearer.unwrap_or_default())
+            crate::services::browser::hash_token(bearer.as_deref().unwrap_or_default())
         )
     } else if browser_valid {
         format!(
             "browser:{}",
-            crate::services::browser::hash_token(bearer.unwrap_or_default())
+            crate::services::browser::hash_token(bearer.as_deref().unwrap_or_default())
         )
     } else {
         request

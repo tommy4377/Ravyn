@@ -6,6 +6,7 @@
 mod backend;
 mod installation;
 mod integration;
+mod uninstall;
 
 use tauri::Manager;
 
@@ -38,16 +39,51 @@ async fn apply_windows_integration(
         .map_err(|e| e.to_string())
 }
 
-/// Begin the deterministic setup-to-main handoff: create the main window
-/// hidden. The main window calls `main_window_ready` once its frontend has a
-/// live backend connection, which shows it and closes the setup window.
+/// Complete setup by launching the verified installed copy when one was
+/// created. The installed process boots a fresh backend before it opens its
+/// main window, so newly provisioned engine paths and library settings are
+/// deterministically applied.
 #[tauri::command]
-async fn finish_setup_handoff(app: tauri::AppHandle) -> Result<(), String> {
+async fn finish_setup_handoff(
+    app: tauri::AppHandle,
+    installed_exe: Option<String>,
+) -> Result<(), String> {
+    if let Some(installed_exe) = installed_exe {
+        let expected = installation::default_install_dir()
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "installed-copy handoff is only supported on Windows".to_owned())?
+            .join("Ravyn.exe");
+        let supplied = std::path::PathBuf::from(installed_exe);
+        if !same_path(&expected, &supplied) || !expected.is_file() {
+            return Err("the setup handoff target is not the verified installed Ravyn executable".into());
+        }
+        let working_directory = expected
+            .parent()
+            .ok_or_else(|| "installed executable has no parent directory".to_owned())?;
+        std::process::Command::new(&expected)
+            .current_dir(working_directory)
+            .spawn()
+            .map_err(|error| format!("failed to launch the installed Ravyn copy: {error}"))?;
+        app.exit(0);
+        return Ok(());
+    }
+
+    // Portable/development mode remains in the current process.
     if app.get_webview_window("main").is_some() {
         return Ok(());
     }
     create_main_window(&app, false).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left
+            .to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\")),
+    }
 }
 
 /// Called by the main window frontend once it has verified the backend
@@ -90,6 +126,9 @@ fn create_main_window(
 }
 
 pub fn run() {
+    if uninstall::try_handle_command_line() {
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

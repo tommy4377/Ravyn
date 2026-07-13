@@ -465,17 +465,21 @@ pub(super) fn schemas() -> Value {
         },
         "ComponentStatus": {
             "type": "object",
-            "required": ["component", "state", "enabled"],
+            "required": ["component", "state", "enabled", "rollback_available"],
             "properties": {
                 "component": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]},
-                "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "custom_path"]},
+                "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "cancelled", "custom_path", "custom_path_invalid"]},
                 "enabled": {"type": "boolean"},
                 "managed_version": {"type": ["string", "null"]},
+                "detected_version": {"type": ["string", "null"]},
                 "managed_path": {"type": ["string", "null"]},
                 "custom_path": {"type": ["string", "null"]},
                 "effective_path": {"type": ["string", "null"]},
+                "available_version": {"type": ["string", "null"]},
+                "rollback_available": {"type": "boolean"},
                 "error_message": {"type": ["string", "null"]},
                 "last_checked_at": {"type": ["string", "null"], "format": "date-time"},
+                "verified_at": {"type": ["string", "null"], "format": "date-time"},
                 "install_started_at": {"type": ["string", "null"], "format": "date-time"},
                 "install_completed_at": {"type": ["string", "null"], "format": "date-time"}
             }
@@ -498,9 +502,12 @@ pub(super) fn schemas() -> Value {
         },
         "SetupState": {
             "type": "object",
-            "required": ["completed", "app_version", "platform", "features_selected", "library_prepared", "data_dir"],
+            "required": ["completed", "lifecycle", "ready_to_complete", "restart_required", "app_version", "platform", "features_selected", "library_prepared", "data_dir"],
             "properties": {
                 "completed": {"type": "boolean"},
+                "lifecycle": {"type": "string", "enum": ["not_started", "in_progress", "restart_required", "ready_to_complete", "completed"]},
+                "ready_to_complete": {"type": "boolean"},
+                "restart_required": {"type": "boolean"},
                 "completed_at": {"type": ["string", "null"], "format": "date-time"},
                 "completed_app_version": {"type": ["string", "null"]},
                 "app_version": {"type": "string"},
@@ -527,6 +534,17 @@ pub(super) fn schemas() -> Value {
             "type": "object",
             "properties": {
                 "force": {"type": "boolean", "default": false}
+            }
+        },
+        "ComponentHealth": {
+            "type": "object",
+            "required": ["component", "healthy"],
+            "properties": {
+                "component": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]},
+                "healthy": {"type": "boolean"},
+                "path": {"type": ["string", "null"]},
+                "version": {"type": ["string", "null"]},
+                "message": {"type": ["string", "null"]}
             }
         }
     })

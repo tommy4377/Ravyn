@@ -51,6 +51,8 @@ pub struct ApiState {
     pub repository: Repository,
     pub manager: Arc<JobManager>,
     pub base_config: Arc<crate::config::Config>,
+    pub configured_config: Arc<crate::config::Config>,
+    pub component_manifest: Arc<dyn crate::services::components::ManifestProvider>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
     pub provisioning_cancellation: crate::services::components::ProvisioningCancellation,
@@ -281,6 +283,8 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::delete(remove_component),
         )
         .route("/v1/components/{id}/install", post(install_component))
+        .route("/v1/components/{id}/update", post(update_component))
+        .route("/v1/components/{id}/verify", post(verify_component))
         .route("/v1/components/{id}/rollback", post(rollback_component))
         .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/setup", get(get_setup_state))
