@@ -113,17 +113,18 @@ pub fn classify_name_with_overrides(
         return Some(*category);
     }
     let category = match extension.as_str() {
-        "mp4" | "mkv" | "webm" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpeg"
-        | "mpg" | "ts" => LibraryCategory::Videos,
-        "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wav" | "wma" | "aiff"
-        | "alac" => LibraryCategory::Music,
-        "pdf" | "txt" | "md" | "rtf" | "doc" | "docx" | "odt" | "xls" | "xlsx"
-        | "ods" | "ppt" | "pptx" | "odp" | "epub" | "mobi" | "csv" | "json"
-        | "xml" => LibraryCategory::Documents,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "tiff" | "tif"
-        | "svg" | "heic" | "heif" | "ico" => LibraryCategory::Images,
-        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso"
-        | "cab" | "dmg" => LibraryCategory::Archives,
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "wmv" | "flv" | "m4v" | "mpeg" | "mpg" | "ts" => {
+            LibraryCategory::Videos
+        }
+        "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wav" | "wma" | "aiff" | "alac" => {
+            LibraryCategory::Music
+        }
+        "pdf" | "txt" | "md" | "rtf" | "doc" | "docx" | "odt" | "xls" | "xlsx" | "ods" | "ppt"
+        | "pptx" | "odp" | "epub" | "mobi" | "csv" | "json" | "xml" => LibraryCategory::Documents,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "tiff" | "tif" | "svg"
+        | "heic" | "heif" | "ico" => LibraryCategory::Images,
+        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" | "cab"
+        | "dmg" => LibraryCategory::Archives,
         "torrent" => LibraryCategory::Torrents,
         "m3u" | "m3u8" | "pls" | "xspf" => LibraryCategory::Playlists,
         "part" | "crdownload" | "tmp" | "download" => LibraryCategory::Temporary,
@@ -133,9 +134,7 @@ pub fn classify_name_with_overrides(
 }
 
 /// Validates extension override keys before they are persisted or applied.
-pub fn validate_category_overrides(
-    overrides: &BTreeMap<String, LibraryCategory>,
-) -> Result<()> {
+pub fn validate_category_overrides(overrides: &BTreeMap<String, LibraryCategory>) -> Result<()> {
     if overrides.len() > 512 {
         return Err(crate::error::RavynError::Invalid(
             "library category overrides may contain at most 512 extensions".into(),
@@ -245,8 +244,14 @@ mod tests {
 
     #[test]
     fn extension_has_stable_category_mapping() {
-        assert_eq!(classify_name(Path::new("movie.MKV")), Some(LibraryCategory::Videos));
-        assert_eq!(classify_name(Path::new("manual.pdf")), Some(LibraryCategory::Documents));
+        assert_eq!(
+            classify_name(Path::new("movie.MKV")),
+            Some(LibraryCategory::Videos)
+        );
+        assert_eq!(
+            classify_name(Path::new("manual.pdf")),
+            Some(LibraryCategory::Documents)
+        );
         assert_eq!(classify_name(Path::new("payload.unknown")), None);
     }
 

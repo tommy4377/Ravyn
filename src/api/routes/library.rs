@@ -95,12 +95,17 @@ pub(super) async fn find_library_duplicates(
             }) {
                 matches.push("sha256");
             }
-            if query.size_bytes.is_some_and(|size| entry.size_bytes == Some(size)) {
+            if query
+                .size_bytes
+                .is_some_and(|size| entry.size_bytes == Some(size))
+            {
                 matches.push("size_bytes");
             }
-            if query.filename.as_deref().is_some_and(|filename| {
-                entry.filename.eq_ignore_ascii_case(filename)
-            }) {
+            if query
+                .filename
+                .as_deref()
+                .is_some_and(|filename| entry.filename.eq_ignore_ascii_case(filename))
+            {
                 matches.push("filename");
             }
             DuplicateCandidate { entry, matches }
@@ -117,7 +122,6 @@ pub(super) async fn preview_template(
         &request.variables,
     )?))
 }
-
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,7 +173,14 @@ pub(super) async fn delete_library_entry(
         DeleteLibraryMode::Purge => "library.purge",
     };
     Ok(Json(
-        audited(&s.repository, action, "library_entry", Some(&resource_id), result).await?,
+        audited(
+            &s.repository,
+            action,
+            "library_entry",
+            Some(&resource_id),
+            result,
+        )
+        .await?,
     ))
 }
 
@@ -195,7 +206,10 @@ pub(super) async fn restore_library_entry(
 pub(super) async fn start_library_import(
     State(s): State<ApiState>,
     Json(request): Json<crate::services::library::LibraryImportRequest>,
-) -> Result<(StatusCode, Json<crate::services::library::LibraryImportStatus>)> {
+) -> Result<(
+    StatusCode,
+    Json<crate::services::library::LibraryImportStatus>,
+)> {
     let config = s.manager.config();
     let status = s.library_import_status.clone();
     let snapshot = audited(
@@ -308,7 +322,14 @@ pub(super) async fn update_preset(
     let result = s.repository.update_download_preset(id, input).await;
     let resource_id = id.to_string();
     Ok(Json(
-        audited(&s.repository, "preset.update", "preset", Some(&resource_id), result).await?,
+        audited(
+            &s.repository,
+            "preset.update",
+            "preset",
+            Some(&resource_id),
+            result,
+        )
+        .await?,
     ))
 }
 
@@ -318,7 +339,14 @@ pub(super) async fn delete_preset(
 ) -> Result<StatusCode> {
     let result = s.repository.delete_download_preset(id).await;
     let resource_id = id.to_string();
-    audited(&s.repository, "preset.delete", "preset", Some(&resource_id), result).await?;
+    audited(
+        &s.repository,
+        "preset.delete",
+        "preset",
+        Some(&resource_id),
+        result,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -409,9 +437,7 @@ pub(super) struct BasketStartResult {
     items: Vec<BasketStartItemResult>,
 }
 
-pub(super) async fn start_basket(
-    State(s): State<ApiState>,
-) -> Result<Json<BasketStartResult>> {
+pub(super) async fn start_basket(State(s): State<ApiState>) -> Result<Json<BasketStartResult>> {
     let items = s.repository.list_basket_items().await?;
     let mut result = BasketStartResult {
         started: 0,
@@ -441,7 +467,11 @@ pub(super) async fn start_basket(
             }
         }
     }
-    let outcome = if result.failed == 0 { "success" } else { "failure" };
+    let outcome = if result.failed == 0 {
+        "success"
+    } else {
+        "failure"
+    };
     if let Err(error) = s
         .repository
         .append_audit_with_metadata(
@@ -499,7 +529,14 @@ pub(super) async fn update_profile(
     let result = s.repository.update_user_profile(id, input).await;
     let resource_id = id.to_string();
     Ok(Json(
-        audited(&s.repository, "profile.update", "profile", Some(&resource_id), result).await?,
+        audited(
+            &s.repository,
+            "profile.update",
+            "profile",
+            Some(&resource_id),
+            result,
+        )
+        .await?,
     ))
 }
 
@@ -509,7 +546,14 @@ pub(super) async fn delete_profile(
 ) -> Result<StatusCode> {
     let result = s.repository.delete_user_profile(id).await;
     let resource_id = id.to_string();
-    audited(&s.repository, "profile.delete", "profile", Some(&resource_id), result).await?;
+    audited(
+        &s.repository,
+        "profile.delete",
+        "profile",
+        Some(&resource_id),
+        result,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -570,7 +614,9 @@ pub(super) async fn job_trust(
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::services::trust::TrustReport>> {
     let job = s.repository.get_job(id).await?;
-    Ok(Json(crate::services::trust::for_job(&s.repository, &job).await?))
+    Ok(Json(
+        crate::services::trust::for_job(&s.repository, &job).await?,
+    ))
 }
 
 pub(super) async fn get_cleanup_policies(
@@ -602,7 +648,14 @@ pub(super) async fn run_library_cleanup(
     let config = s.manager.config();
     let result = crate::services::library::run_cleanup(&config, &s.repository, &policies).await;
     Ok(Json(
-        audited(&s.repository, "library.cleanup.run", "library", None, result).await?,
+        audited(
+            &s.repository,
+            "library.cleanup.run",
+            "library",
+            None,
+            result,
+        )
+        .await?,
     ))
 }
 

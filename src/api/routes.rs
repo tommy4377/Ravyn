@@ -53,6 +53,7 @@ pub struct ApiState {
     pub base_config: Arc<crate::config::Config>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
+    pub provisioning_cancellation: tokio_util::sync::CancellationToken,
 }
 
 async fn audited<T>(
@@ -137,7 +138,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/presets/{id}",
             get(get_preset).put(update_preset).delete(delete_preset),
         )
-        .route("/v1/basket", get(list_basket).post(add_basket_item).delete(clear_basket))
+        .route(
+            "/v1/basket",
+            get(list_basket).post(add_basket_item).delete(clear_basket),
+        )
         .route(
             "/v1/basket/{id}",
             axum::routing::patch(update_basket_item).delete(delete_basket_item),
@@ -270,6 +274,15 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/browser/sniff", post(sniff_page))
         .route("/v1/browser/import", post(import_browser_resources))
+        .route("/v1/components", get(list_components))
+        .route("/v1/components/features", post(save_feature_selections))
+        .route(
+            "/v1/components/{id}",
+            axum::routing::delete(remove_component),
+        )
+        .route("/v1/components/{id}/install", post(install_component))
+        .route("/v1/components/{id}/rollback", post(rollback_component))
+        .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/events", get(events))
         .with_state(state)
 }
@@ -284,6 +297,7 @@ fn import_status(result: &ImportResult) -> StatusCode {
 
 mod automation;
 mod browser;
+mod components;
 mod jobs;
 mod library;
 mod media;
@@ -291,5 +305,5 @@ mod system;
 mod torrents;
 
 use self::{
-    automation::*, browser::*, jobs::*, library::*, media::*, system::*, torrents::*,
+    automation::*, browser::*, components::*, jobs::*, library::*, media::*, system::*, torrents::*,
 };

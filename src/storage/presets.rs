@@ -45,10 +45,7 @@ pub struct PutDownloadPreset {
 }
 
 impl Repository {
-    pub async fn create_download_preset(
-        &self,
-        input: PutDownloadPreset,
-    ) -> Result<DownloadPreset> {
+    pub async fn create_download_preset(&self, input: PutDownloadPreset) -> Result<DownloadPreset> {
         validate_preset(&input)?;
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -158,7 +155,6 @@ fn map_unique_conflict(error: sqlx::Error) -> RavynError {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,10 +176,7 @@ mod tests {
                 name: "Music".into(),
                 payload: DownloadPresetPayload {
                     filename_template: Some("{artist}/{filename}".into()),
-                    template_variables: BTreeMap::from([(
-                        "artist".into(),
-                        "Example".into(),
-                    )]),
+                    template_variables: BTreeMap::from([("artist".into(), "Example".into())]),
                     ..DownloadPresetPayload::default()
                 },
             })

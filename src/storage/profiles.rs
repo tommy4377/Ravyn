@@ -192,9 +192,7 @@ fn row_to_profile(row: SqliteRow) -> Result<UserProfile> {
         id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
             .map_err(|error| RavynError::Internal(error.to_string()))?,
         name: row.try_get("name")?,
-        settings_patch: serde_json::from_str(&row.try_get::<String, _>(
-            "settings_patch_json",
-        )?)?,
+        settings_patch: serde_json::from_str(&row.try_get::<String, _>("settings_patch_json")?)?,
         default_preset_id: row
             .try_get::<Option<String>, _>("default_preset_id")?
             .map(|value| Uuid::parse_str(&value))
@@ -213,7 +211,6 @@ fn map_unique_conflict(error: sqlx::Error) -> RavynError {
         error.into()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -266,7 +263,12 @@ mod tests {
         assert!(active.active);
         assert_eq!(persisted.max_active, 2);
         assert_eq!(
-            repository.get_active_user_profile().await.unwrap().unwrap().id,
+            repository
+                .get_active_user_profile()
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
             profile.id
         );
     }

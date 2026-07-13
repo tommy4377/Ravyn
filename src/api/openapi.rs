@@ -72,7 +72,7 @@ pub fn document() -> Value {
             {"name":"Settings"},{"name":"Secrets"},{"name":"Database"},{"name":"Audit"},
             {"name":"Events"},{"name":"System"},{"name":"Library"},
             {"name":"Presets"},{"name":"Basket"},{"name":"Profiles"},
-            {"name":"Trust"},{"name":"Statistics"}
+            {"name":"Trust"},{"name":"Statistics"},{"name":"Components"}
         ],
         "paths": paths,
         "components": {
@@ -220,10 +220,14 @@ mod tests {
             ("post", "/v1/trust/preview"),
             ("get", "/v1/system/cleanup-policies"),
             ("get", "/v1/statistics"),
+            ("get", "/v1/components"),
+            ("post", "/v1/components/features"),
         ] {
-            assert!(OPERATIONS.iter().any(|operation| {
-                operation.path == path && operation.method == method
-            }));
+            assert!(
+                OPERATIONS
+                    .iter()
+                    .any(|operation| { operation.path == path && operation.method == method })
+            );
         }
     }
 

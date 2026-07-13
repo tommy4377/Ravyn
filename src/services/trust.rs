@@ -2,11 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    core::models::Job,
-    error::Result,
-    storage::Repository,
-};
+use crate::{core::models::Job, error::Result, storage::Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustFactor {
@@ -60,23 +56,27 @@ pub fn evaluate(input: &TrustPreviewRequest) -> Result<TrustReport> {
 fn verify_ed25519(input: &Ed25519SignatureInput) -> Result<bool> {
     use ed25519_dalek::{Signature, VerifyingKey};
 
-    let public_key = hex::decode(&input.public_key_hex)
-        .map_err(|_| crate::error::RavynError::Invalid("public_key_hex must be hexadecimal".into()))?;
+    let public_key = hex::decode(&input.public_key_hex).map_err(|_| {
+        crate::error::RavynError::Invalid("public_key_hex must be hexadecimal".into())
+    })?;
     let public_key: [u8; 32] = public_key.try_into().map_err(|_| {
         crate::error::RavynError::Invalid("public_key_hex must contain 32 bytes".into())
     })?;
-    let signature = hex::decode(&input.signature_hex)
-        .map_err(|_| crate::error::RavynError::Invalid("signature_hex must be hexadecimal".into()))?;
+    let signature = hex::decode(&input.signature_hex).map_err(|_| {
+        crate::error::RavynError::Invalid("signature_hex must be hexadecimal".into())
+    })?;
     let signature = Signature::try_from(signature.as_slice()).map_err(|_| {
         crate::error::RavynError::Invalid("signature_hex must contain 64 bytes".into())
     })?;
-    let digest = hex::decode(&input.signed_sha256)
-        .map_err(|_| crate::error::RavynError::Invalid("signed_sha256 must be hexadecimal".into()))?;
+    let digest = hex::decode(&input.signed_sha256).map_err(|_| {
+        crate::error::RavynError::Invalid("signed_sha256 must be hexadecimal".into())
+    })?;
     let digest: [u8; 32] = digest.try_into().map_err(|_| {
         crate::error::RavynError::Invalid("signed_sha256 must contain 32 bytes".into())
     })?;
-    let key = VerifyingKey::from_bytes(&public_key)
-        .map_err(|_| crate::error::RavynError::Invalid("public_key_hex is not a valid Ed25519 key".into()))?;
+    let key = VerifyingKey::from_bytes(&public_key).map_err(|_| {
+        crate::error::RavynError::Invalid("public_key_hex is not a valid Ed25519 key".into())
+    })?;
     Ok(key.verify_strict(&digest, &signature).is_ok())
 }
 
@@ -199,9 +199,7 @@ pub fn compute(input: &TrustPreviewRequest) -> TrustReport {
 pub async fn for_job(repository: &Repository, job: &Job) -> Result<TrustReport> {
     let outputs = repository.list_job_outputs(job.id).await?;
     let checksum_available = job.expected_sha256.is_some()
-        || outputs
-            .iter()
-            .any(|output| output.checksum_value.is_some());
+        || outputs.iter().any(|output| output.checksum_value.is_some());
     let checksum_verified = job.expected_sha256.as_ref().is_some_and(|expected| {
         outputs.iter().any(|output| {
             output
@@ -236,13 +234,7 @@ pub async fn for_job(repository: &Repository, job: &Job) -> Result<TrustReport> 
     Ok(report)
 }
 
-fn factor(
-    code: &str,
-    label: &str,
-    points: i32,
-    satisfied: bool,
-    explanation: &str,
-) -> TrustFactor {
+fn factor(code: &str, label: &str, points: i32, satisfied: bool, explanation: &str) -> TrustFactor {
     TrustFactor {
         code: code.into(),
         label: label.into(),
@@ -299,9 +291,11 @@ mod tests {
             ..TrustPreviewRequest::default()
         })
         .unwrap();
-        assert!(report
-            .factors
-            .iter()
-            .any(|factor| factor.code == "signature" && factor.satisfied));
+        assert!(
+            report
+                .factors
+                .iter()
+                .any(|factor| factor.code == "signature" && factor.satisfied)
+        );
     }
 }

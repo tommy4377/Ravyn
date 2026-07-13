@@ -13,16 +13,14 @@ use crate::{
         },
     },
     error::{RavynError, Result},
-    storage::NewLibraryEntry,
     services::{
         checksum, dedup,
-        library::{
-            LibraryCategory, category_directory, classify_name_with_overrides,
-        },
+        library::{LibraryCategory, category_directory, classify_name_with_overrides},
         presets,
         rules::{self},
         security,
     },
+    storage::NewLibraryEntry,
 };
 
 use crate::core::manager::{JobManager, validate_tags, validate_torrent_options};
@@ -35,19 +33,21 @@ fn automatic_library_destination(
         .library_auto_organize
         .then(|| config.effective_library_root())
         .flatten()?;
-    let candidate = request.filename.as_ref().map(std::path::PathBuf::from).or_else(|| {
-        url::Url::parse(&request.source).ok().and_then(|url| {
-            url.path_segments()
-                .and_then(|mut segments| segments.next_back())
-                .filter(|value| !value.is_empty())
-                .map(std::path::PathBuf::from)
-        })
-    });
+    let candidate = request
+        .filename
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            url::Url::parse(&request.source).ok().and_then(|url| {
+                url.path_segments()
+                    .and_then(|mut segments| segments.next_back())
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
+        });
     let category = candidate
         .as_deref()
-        .and_then(|path| {
-            classify_name_with_overrides(path, &config.library_category_overrides)
-        })
+        .and_then(|path| classify_name_with_overrides(path, &config.library_category_overrides))
         .unwrap_or(match request.kind {
             JobKind::Media
                 if request
@@ -303,11 +303,8 @@ impl JobManager {
         if entry.size_bytes.is_some_and(|size| size != metadata.len()) {
             return Ok(false);
         }
-        let actual = checksum::sha256(
-            &entry.path,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await?;
+        let actual =
+            checksum::sha256(&entry.path, &tokio_util::sync::CancellationToken::new()).await?;
         Ok(actual.eq_ignore_ascii_case(expected))
     }
 

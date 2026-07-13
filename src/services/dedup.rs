@@ -45,5 +45,7 @@ pub async fn cache_candidate(
     let Some(expected) = request.expected_sha256.as_deref() else {
         return Ok(None);
     };
-    repository.find_active_library_entry_by_sha256(expected).await
+    repository
+        .find_active_library_entry_by_sha256(expected)
+        .await
 }

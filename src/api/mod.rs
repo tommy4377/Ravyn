@@ -60,6 +60,7 @@ pub async fn serve(app: Ravyn) -> Result<()> {
         library_import_status: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::services::library::LibraryImportStatus::default(),
         )),
+        provisioning_cancellation: app.provisioning_cancellation.clone(),
     };
     let router = routes::router(state)
         .layer(DefaultBodyLimit::max(body_limit))

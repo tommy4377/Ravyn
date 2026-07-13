@@ -25,10 +25,7 @@ pub struct TemplatePreview {
 }
 
 /// Renders a relative filename template and sanitizes every generated path segment.
-pub fn render(
-    template: &str,
-    variables: &BTreeMap<String, String>,
-) -> Result<TemplatePreview> {
+pub fn render(template: &str, variables: &BTreeMap<String, String>) -> Result<TemplatePreview> {
     if template.trim().is_empty() || template.len() > MAX_TEMPLATE_LENGTH {
         return Err(RavynError::Invalid(format!(
             "filename templates must contain between 1 and {MAX_TEMPLATE_LENGTH} characters"
@@ -161,8 +158,11 @@ mod tests {
 
     #[test]
     fn supports_literal_braces() {
-        let preview = render("{{archive}}/{name}", &BTreeMap::from([("name".into(), "a".into())]))
-            .unwrap();
+        let preview = render(
+            "{{archive}}/{name}",
+            &BTreeMap::from([("name".into(), "a".into())]),
+        )
+        .unwrap();
         assert_eq!(preview.rendered, PathBuf::from("{archive}/a"));
     }
 }

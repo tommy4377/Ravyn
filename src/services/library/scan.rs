@@ -10,9 +10,7 @@ use crate::{
     config::Config,
     error::{RavynError, Result},
     services::{checksum, security},
-    storage::{
-        LibraryEntryState, LibraryListFilter, NewLibraryEntry, Repository,
-    },
+    storage::{LibraryEntryState, LibraryListFilter, NewLibraryEntry, Repository},
 };
 
 const DEFAULT_MAX_ENTRIES: usize = 100_000;
@@ -40,7 +38,7 @@ impl Default for LibraryImportRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct LibraryImportStatus {
     pub run_id: Option<Uuid>,
     pub running: bool,
@@ -52,23 +50,6 @@ pub struct LibraryImportStatus {
     pub errors: Vec<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-}
-
-impl Default for LibraryImportStatus {
-    fn default() -> Self {
-        Self {
-            run_id: None,
-            running: false,
-            root: None,
-            scanned: 0,
-            imported: 0,
-            duplicates: 0,
-            skipped: 0,
-            errors: Vec::new(),
-            started_at: None,
-            completed_at: None,
-        }
-    }
 }
 
 pub type SharedImportStatus = Arc<RwLock<LibraryImportStatus>>;
@@ -99,7 +80,12 @@ pub async fn reserve_import(
     request: &LibraryImportRequest,
     status: &SharedImportStatus,
 ) -> Result<LibraryImportStatus> {
-    validate_scan_request(config, &request.path, request.max_entries, request.max_depth)?;
+    validate_scan_request(
+        config,
+        &request.path,
+        request.max_entries,
+        request.max_depth,
+    )?;
     let mut current = status.write().await;
     if current.running {
         return Err(RavynError::Conflict(
@@ -124,14 +110,8 @@ pub async fn import_directory(
     status: SharedImportStatus,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    let result = import_directory_inner(
-        &config,
-        &repository,
-        &request,
-        &status,
-        &cancellation,
-    )
-    .await;
+    let result =
+        import_directory_inner(&config, &repository, &request, &status, &cancellation).await;
     let mut current = status.write().await;
     current.running = false;
     current.completed_at = Some(Utc::now());
@@ -172,10 +152,7 @@ async fn import_directory_inner(
                 Err(error) => {
                     let mut current = status.write().await;
                     current.skipped += 1;
-                    push_bounded_error(
-                        &mut current.errors,
-                        format!("{}: {error}", path.display()),
-                    );
+                    push_bounded_error(&mut current.errors, format!("{}: {error}", path.display()));
                     continue;
                 }
             };
@@ -200,10 +177,7 @@ async fn import_directory_inner(
                 Err(error) => {
                     let mut current = status.write().await;
                     current.skipped += 1;
-                    push_bounded_error(
-                        &mut current.errors,
-                        format!("{}: {error}", path.display()),
-                    );
+                    push_bounded_error(&mut current.errors, format!("{}: {error}", path.display()));
                     continue;
                 }
             };
@@ -406,9 +380,9 @@ fn validate_scan_request(
 }
 
 fn is_internal_scan_exclusion(config: &Config, path: &std::path::Path) -> bool {
-    config.effective_library_root().is_some_and(|root| {
-        path == root.join("Trash") || path == root.join("Temporary")
-    })
+    config
+        .effective_library_root()
+        .is_some_and(|root| path == root.join("Trash") || path == root.join("Temporary"))
 }
 
 async fn all_entries(
@@ -443,7 +417,6 @@ fn push_bounded_error(errors: &mut Vec<String>, error: String) {
         errors.push(error);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -511,6 +484,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repaired.repaired, 1);
-        assert_eq!(repository.get_library_entry(entries[0].id).await.unwrap().path, moved);
+        assert_eq!(
+            repository
+                .get_library_entry(entries[0].id)
+                .await
+                .unwrap()
+                .path,
+            moved
+        );
     }
 }
