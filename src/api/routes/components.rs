@@ -585,6 +585,25 @@ pub(super) async fn remove_component(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(super) async fn cleanup_component(
+    State(s): State<ApiState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<crate::services::engines::EngineCleanupReport>> {
+    let component = parse_component_id(&component_id)?;
+    if s.provisioning_cancellation.is_active(component) {
+        return Err(crate::error::RavynError::Conflict(
+            "cancel the active component operation before cleanup".into(),
+        ));
+    }
+    let manager = ComponentManager::new(
+        &s.configured_config.data_dir,
+        s.component_manifest.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let report = manager.cleanup_component(component).await?;
+    Ok(Json(report))
+}
+
 pub(super) async fn cancel_installation(
     State(s): State<ApiState>,
     Path(component_id): Path<String>,

@@ -553,6 +553,94 @@ impl EngineManager {
         let temporary = engine_dir.join(".active.json.tmp");
         write_metadata_atomic(&temporary, &destination, active).await
     }
+
+    /// Removes every versioned directory for `engine` except the active
+    /// version and the single previous version kept for rollback/diagnostics,
+    /// and deletes any stale `.download` partial-download temp files left
+    /// behind by an interrupted or failed install (including inside the
+    /// versions that are kept).
+    pub async fn cleanup_versions(&self, engine: &str) -> Result<EngineCleanupReport> {
+        validate_token(engine, "engine")?;
+        let engine_dir = self.root.join(engine);
+        let mut report = EngineCleanupReport::default();
+        if !tokio::fs::try_exists(&engine_dir).await? {
+            return Ok(report);
+        }
+
+        let mut kept = std::collections::BTreeSet::new();
+        for name in ["active.json", "previous.json"] {
+            let path = engine_dir.join(name);
+            if let Ok(bytes) = read_engine_metadata(&path).await {
+                if let Ok(entry) = serde_json::from_slice::<ActiveEngine>(&bytes) {
+                    if entry.validate().is_ok() {
+                        kept.insert(entry.version);
+                    }
+                }
+            }
+        }
+
+        let mut entries = tokio::fs::read_dir(&engine_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if kept.contains(name) {
+                let freed =
+                    remove_download_temp_files(&path, &mut report.removed_temp_files).await?;
+                report.bytes_freed = report.bytes_freed.saturating_add(freed);
+                continue;
+            }
+            report.bytes_freed = report
+                .bytes_freed
+                .saturating_add(directory_size(&path).await.unwrap_or(0));
+            tokio::fs::remove_dir_all(&path).await?;
+            report.removed_versions.push(name.to_owned());
+        }
+        Ok(report)
+    }
+}
+
+/// Summary of what an [`EngineManager::cleanup_versions`] pass removed.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EngineCleanupReport {
+    pub removed_versions: Vec<String>,
+    pub removed_temp_files: Vec<String>,
+    pub bytes_freed: u64,
+}
+
+async fn remove_download_temp_files(dir: &Path, removed: &mut Vec<String>) -> Result<u64> {
+    let mut freed = 0_u64;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with('.') && name.ends_with(".download")) {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata().await {
+            freed = freed.saturating_add(metadata.len());
+        }
+        tokio::fs::remove_file(&path).await?;
+        removed.push(name.to_owned());
+    }
+    Ok(freed)
+}
+
+async fn directory_size(dir: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if let Ok(metadata) = entry.metadata().await {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 async fn read_engine_metadata(path: &Path) -> Result<Vec<u8>> {
@@ -773,6 +861,55 @@ mod tests {
 
         assert_eq!(manager.rollback("ffmpeg").await.unwrap(), first);
         assert_eq!(manager.active_path("ffmpeg").await.unwrap(), Some(first));
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_only_the_active_and_previous_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(temp.path());
+        manager
+            .install_verified(&artifact(b"v1"), b"v1")
+            .await
+            .unwrap();
+        let mut v2 = artifact(b"v2");
+        v2.version = "7.2.0".into();
+        manager.install_verified(&v2, b"v2").await.unwrap();
+        let mut v3 = artifact(b"v3");
+        v3.version = "7.3.0".into();
+        manager.install_verified(&v3, b"v3").await.unwrap();
+
+        // A stray partial-download temp file left in the still-active
+        // version's directory, as if a prior download attempt crashed.
+        let stale_temp = temp
+            .path()
+            .join("engines")
+            .join("ffmpeg")
+            .join("7.3.0")
+            .join(".ffmpeg.exe.download");
+        tokio::fs::write(&stale_temp, b"partial").await.unwrap();
+
+        let report = manager.cleanup_versions("ffmpeg").await.unwrap();
+        assert_eq!(report.removed_versions, vec!["7.1.0".to_owned()]);
+        assert_eq!(
+            report.removed_temp_files,
+            vec![".ffmpeg.exe.download".to_owned()]
+        );
+        assert!(!tokio::fs::try_exists(&stale_temp).await.unwrap());
+        assert!(
+            !tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.1.0"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.2.0"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.3.0"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

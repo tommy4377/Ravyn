@@ -1367,6 +1367,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         None
     ),
     op!(
+        "post",
+        "/v1/components/{id}/cleanup",
+        "cleanupComponent",
+        "Components",
+        "Delete superseded managed engine versions and stale download temp files",
+        "200",
+        false,
+        false,
+        None
+    ),
+    op!(
         "delete",
         "/v1/components/{id}",
         "removeComponent",

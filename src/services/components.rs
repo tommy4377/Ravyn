@@ -998,6 +998,13 @@ impl ComponentManager {
             .with_expected_version(&artifact.version)
             .with_detected_version(&detected_version));
         }
+        if let Err(error) = self.cleanup_component(component).await {
+            tracing::warn!(
+                %error,
+                component = component.engine_name(),
+                "failed to clean up superseded managed engine versions after install"
+            );
+        }
         Ok(InstalledComponent {
             path,
             version: artifact.version,
@@ -1136,6 +1143,13 @@ impl ComponentManager {
             .with_stage("rollback")
             .with_path(path.display().to_string()));
         }
+        if let Err(error) = self.cleanup_component(component).await {
+            tracing::warn!(
+                %error,
+                component = component.engine_name(),
+                "failed to clean up superseded managed engine versions after rollback"
+            );
+        }
         Ok(InstalledComponent {
             path,
             version: health.version.clone().unwrap_or_default(),
@@ -1149,6 +1163,18 @@ impl ComponentManager {
             tokio::fs::remove_dir_all(&engine_dir).await?;
         }
         Ok(())
+    }
+
+    /// Deletes superseded version directories (beyond the active and single
+    /// previous version kept for rollback/diagnostics) and stale `.download`
+    /// temp files for `component`.
+    pub async fn cleanup_component(
+        &self,
+        component: ComponentId,
+    ) -> Result<crate::services::engines::EngineCleanupReport> {
+        self.engine_manager
+            .cleanup_versions(component.engine_name())
+            .await
     }
 }
 

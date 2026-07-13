@@ -286,6 +286,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/components/{id}/update", post(update_component))
         .route("/v1/components/{id}/verify", post(verify_component))
         .route("/v1/components/{id}/rollback", post(rollback_component))
+        .route("/v1/components/{id}/cleanup", post(cleanup_component))
         .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/setup", get(get_setup_state))
         .route("/v1/setup/library", post(prepare_library))

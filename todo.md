@@ -78,15 +78,9 @@ The desktop shell (`src-tauri/src/backend.rs:101`) generates a `uuid::Uuid::new_
 
 A failed capability check now fails the health check (`healthy: false`) with a descriptive message, exactly like the existing rqbit check.
 
-### 15. Cleaning and retention of engine versions are missing
+### ~~15. Cleaning and retention of engine versions are missing~~ ✅
 
-Atomic replacement and rollback are fully implemented. `previous.json` is maintained. But there is no proactive cleanup policy.
-
-**Still missing:**
-* deletion of failed-download versioned directories;
-* max-one-diagnostic retention policy;
-* deletion of `.download` and temporary metadata;
-* cleanup endpoint or scheduled job.
+`EngineManager::cleanup_versions()` (`src/services/engines.rs`) deletes every versioned directory for an engine except the active version and the single previous version kept for rollback/diagnostics (satisfying the max-one-diagnostic retention policy — this also covers failed-download versioned directories, since a failed `download_and_install` leaves its version directory un-adopted by `active.json`/`previous.json`), and separately deletes stale `.download` partial-download temp files even from directories that are kept. `ComponentManager::cleanup_component()` wraps it per component and is called automatically (best-effort, logged on failure, never fails the parent operation) after every successful install and rollback. It's also exposed directly via `POST /v1/components/{id}/cleanup`, which returns an `EngineCleanupReport` (removed versions, removed temp files, bytes freed).
 
 ### 17. In case of failed copy, the wrong executable may be registered
 
