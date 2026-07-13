@@ -147,6 +147,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/system/capabilities", get(system_capabilities))
         .route("/v1/settings", get(get_settings).patch(patch_settings))
         .route("/v1/settings/reset", post(reset_settings))
+        .route("/v1/settings/validate", post(validate_settings))
         .route("/v1/system/database", get(database_status))
         .route("/v1/system/database/backup", post(backup_database))
         .route("/v1/system/database/backups", get(list_backups))

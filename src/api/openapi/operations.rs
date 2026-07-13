@@ -348,6 +348,13 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         "Reset persistent settings"
     ),
     op!(
+        "post",
+        "/v1/settings/validate",
+        "validateSettings",
+        "Settings",
+        "Validate a settings patch and report every failing field"
+    ),
+    op!(
         "get",
         "/v1/system/database",
         "databaseStatus",

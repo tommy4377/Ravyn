@@ -412,13 +412,11 @@ pub(super) async fn system_capabilities(
             "metalink_v4",
             "piece_verified_mirror_failover",
             "managed_engine_activation",
-        ],
-        disabled_features: vec![
-            "native_tls",
-            "http3",
-            "speculative_http",
             "concurrent_multi_source",
+            "speculative_http",
+            "active_range_splitting",
         ],
+        disabled_features: vec!["native_tls", "http3"],
         platform: std::env::consts::OS,
         authentication_modes,
     }))
@@ -540,6 +538,130 @@ pub(super) fn settings_patch_requires_restart(patch: &PersistentSettingsPatch) -
         || patch.image_converter.is_some()
         || patch.avif_quality.is_some()
         || patch.cookie_dir.is_some()
+}
+
+#[derive(Serialize)]
+pub(super) struct SettingsIssue {
+    field: &'static str,
+    message: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct SettingsValidationResponse {
+    valid: bool,
+    restart_required: bool,
+    issues: Vec<SettingsIssue>,
+}
+
+/// Computes the per-field validation report for a settings patch. Each
+/// supplied field is applied alone to the known-good running configuration so
+/// blame lands on the field that actually fails; a failure that only appears
+/// when the fields combine is reported as `(combination)`.
+pub(super) fn settings_validation_issues(
+    current: &PersistentSettings,
+    base: &crate::config::Config,
+    patch: &PersistentSettingsPatch,
+) -> Vec<SettingsIssue> {
+    let mut merged = current.clone();
+    merged.merge(patch.clone());
+    let mut candidate = base.clone();
+    let mut issues = Vec::new();
+    if let Err(error) = merged.apply_to(&mut candidate) {
+        for (field, single) in single_field_patches(patch) {
+            let mut isolated = current.clone();
+            isolated.merge(single);
+            let mut candidate = base.clone();
+            if let Err(field_error) = isolated.apply_to(&mut candidate) {
+                issues.push(SettingsIssue {
+                    field,
+                    message: field_error.to_string(),
+                });
+            }
+        }
+        if issues.is_empty() {
+            issues.push(SettingsIssue {
+                field: "(combination)",
+                message: error.to_string(),
+            });
+        }
+    }
+    issues
+}
+
+fn single_field_patches(
+    patch: &PersistentSettingsPatch,
+) -> Vec<(&'static str, PersistentSettingsPatch)> {
+    macro_rules! explode {
+        ($($field:ident),+ $(,)?) => {{
+            let mut out = Vec::new();
+            $(
+                if patch.$field.is_some() {
+                    let mut single = PersistentSettingsPatch::default();
+                    single.$field = patch.$field.clone();
+                    out.push((stringify!($field), single));
+                }
+            )+
+            out
+        }};
+    }
+    explode!(
+        download_dir,
+        max_active,
+        max_segments,
+        segment_threshold_mib,
+        max_connections_per_host,
+        global_speed_limit_bps,
+        bandwidth_schedule,
+        ytdlp,
+        ffmpeg,
+        rqbit_api,
+        rqbit_credentials_secret_id,
+        seven_zip,
+        max_extract_mib,
+        max_extract_files,
+        max_extract_depth,
+        max_extract_ratio,
+        max_retries,
+        host_circuit_threshold,
+        host_circuit_cooldown_secs,
+        max_torrent_mib,
+        max_html_mib,
+        max_sniff_resources,
+        max_batch_urls,
+        connect_timeout_secs,
+        read_timeout_secs,
+        media_probe_timeout_secs,
+        media_probe_max_mib,
+        rqbit_timeout_secs,
+        rqbit_stats_timeout_secs,
+        torrent_refresh_concurrency,
+        image_converter,
+        avif_quality,
+        cookie_dir,
+        api_request_timeout_secs,
+        api_max_concurrent_requests,
+        api_rate_limit_per_minute,
+        api_rate_limit_burst,
+    )
+}
+
+/// Validates a settings patch without persisting or applying anything and
+/// returns every failing field instead of only the first error.
+pub(super) async fn validate_settings(
+    State(s): State<ApiState>,
+    Json(patch): Json<PersistentSettingsPatch>,
+) -> Result<Json<SettingsValidationResponse>> {
+    let current = s
+        .repository
+        .load_persistent_settings()
+        .await?
+        .unwrap_or_else(|| PersistentSettings::from_config(&s.manager.config()));
+    let issues = settings_validation_issues(&current, &s.manager.config(), &patch);
+    Ok(Json(SettingsValidationResponse {
+        valid: issues.is_empty(),
+        restart_required: settings_patch_requires_restart(&patch),
+        issues,
+    }))
 }
 
 pub(super) async fn patch_settings(
@@ -675,4 +797,43 @@ pub(super) fn to_sse_event(event: crate::core::events::SequencedEvent) -> SseEve
         .id(event.sequence.to_string())
         .json_data(event)
         .unwrap_or_else(|_| SseEvent::default().data("{}"))
+}
+
+#[cfg(test)]
+mod settings_validation_tests {
+    use clap::Parser as _;
+
+    use super::*;
+
+    #[test]
+    fn every_failing_field_is_reported_with_isolated_blame() {
+        let config = crate::config::Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            "data",
+            "--download-dir",
+            "downloads",
+        ])
+        .unwrap();
+        let current = PersistentSettings::from_config(&config);
+
+        let valid_patch = PersistentSettingsPatch {
+            max_retries: Some(5),
+            ..Default::default()
+        };
+        assert!(settings_validation_issues(&current, &config, &valid_patch).is_empty());
+
+        let invalid_patch = PersistentSettingsPatch {
+            max_segments: Some(0),
+            max_torrent_mib: Some(1_000_000),
+            max_retries: Some(5),
+            ..Default::default()
+        };
+        let issues = settings_validation_issues(&current, &config, &invalid_patch);
+        let fields = issues.iter().map(|issue| issue.field).collect::<Vec<_>>();
+        assert!(fields.contains(&"max_segments"), "{fields:?}");
+        assert!(fields.contains(&"max_torrent_mib"), "{fields:?}");
+        assert!(!fields.contains(&"max_retries"), "{fields:?}");
+        assert!(issues.iter().all(|issue| !issue.message.trim().is_empty()));
+    }
 }
