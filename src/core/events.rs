@@ -15,6 +15,19 @@ pub enum Event {
         error: Option<String>,
     },
     Progress(ProgressSnapshot),
+    /// Managed component provisioning state or download progress changed.
+    Component {
+        component: crate::services::components::ComponentId,
+        state: crate::services::components::ComponentState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        progress_pct: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bytes_downloaded: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bytes_total: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     QueueChanged,
     ResyncRequired {
         oldest_available: u64,

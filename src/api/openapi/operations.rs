@@ -1366,4 +1366,37 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         None
     ),
+    op!(
+        "get",
+        "/v1/setup",
+        "getSetupState",
+        "Setup",
+        "Read first-run and setup completion state",
+        "200",
+        false,
+        false,
+        Some("SetupState")
+    ),
+    op!(
+        "post",
+        "/v1/setup/library",
+        "prepareLibrary",
+        "Setup",
+        "Validate a library path and create the Ravyn library layout",
+        "200",
+        false,
+        true,
+        Some("PrepareLibraryResult")
+    ),
+    op!(
+        "post",
+        "/v1/setup/complete",
+        "completeSetup",
+        "Setup",
+        "Mark setup as complete",
+        "200",
+        false,
+        false,
+        Some("SetupState")
+    ),
 ];

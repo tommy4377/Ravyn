@@ -460,14 +460,14 @@ pub(super) fn schemas() -> Value {
                 "feature": {"type": "string", "enum": ["standard_downloads", "video_extraction", "media_merging", "torrent_support", "archive_extraction"]},
                 "enabled": {"type": "boolean"},
                 "satisfied": {"type": "boolean"},
-                "required_components": {"type": "array", "items": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]}}
+                "required_components": {"type": "array", "items": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]}}
             }
         },
         "ComponentStatus": {
             "type": "object",
             "required": ["component", "state", "enabled"],
             "properties": {
-                "component": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]},
+                "component": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]},
                 "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "custom_path"]},
                 "enabled": {"type": "boolean"},
                 "managed_version": {"type": ["string", "null"]},
@@ -494,6 +494,33 @@ pub(super) fn schemas() -> Value {
             "properties": {
                 "feature": {"type": "string", "enum": ["standard_downloads", "video_extraction", "media_merging", "torrent_support", "archive_extraction"]},
                 "enabled": {"type": "boolean"}
+            }
+        },
+        "SetupState": {
+            "type": "object",
+            "required": ["completed", "app_version", "platform", "features_selected", "library_prepared", "data_dir"],
+            "properties": {
+                "completed": {"type": "boolean"},
+                "completed_at": {"type": ["string", "null"], "format": "date-time"},
+                "completed_app_version": {"type": ["string", "null"]},
+                "app_version": {"type": "string"},
+                "platform": {"type": "string"},
+                "setup_profile": {"type": ["string", "null"], "enum": ["minimal", "recommended", "full", "custom", null]},
+                "features_selected": {"type": "boolean"},
+                "library_root": {"type": ["string", "null"]},
+                "library_prepared": {"type": "boolean"},
+                "data_dir": {"type": "string"}
+            }
+        },
+        "PrepareLibraryResult": {
+            "type": "object",
+            "required": ["path", "existed", "directories", "restart_required"],
+            "properties": {
+                "path": {"type": "string"},
+                "existed": {"type": "boolean"},
+                "directories": {"type": "array", "items": {"type": "string"}},
+                "available_bytes": {"type": ["integer", "null"], "minimum": 0},
+                "restart_required": {"type": "boolean"}
             }
         },
         "InstallComponentRequest": {

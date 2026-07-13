@@ -343,6 +343,52 @@ pub struct ComponentProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Provisioning cancellation
+// ---------------------------------------------------------------------------
+
+/// Shared, resettable cancellation for background provisioning.
+///
+/// A raw `CancellationToken` is one-way: once cancelled it would abort every
+/// future installation as well. This wrapper hands out the current token and
+/// replaces it with a fresh one after each cancellation so retries work.
+#[derive(Clone)]
+pub struct ProvisioningCancellation {
+    inner: Arc<std::sync::Mutex<CancellationToken>>,
+}
+
+impl Default for ProvisioningCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProvisioningCancellation {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(CancellationToken::new())),
+        }
+    }
+
+    /// The token active installations should observe.
+    pub fn current(&self) -> CancellationToken {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Cancel all active installations and arm a fresh token for retries.
+    pub fn cancel_and_reset(&self) {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.cancel();
+        *guard = CancellationToken::new();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Manifest provider abstraction
 // ---------------------------------------------------------------------------
 
@@ -563,6 +609,18 @@ impl ComponentManager {
         component: ComponentId,
         config: &crate::config::Config,
     ) -> Result<PathBuf> {
+        self.install_component_with_progress(component, config, None)
+            .await
+    }
+
+    /// Install a single component, reporting download progress as
+    /// `(bytes_downloaded, bytes_total)` through the optional callback.
+    pub async fn install_component_with_progress(
+        &self,
+        component: ComponentId,
+        config: &crate::config::Config,
+        progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+    ) -> Result<PathBuf> {
         let manifest = self
             .manifest_provider
             .load()?
@@ -571,7 +629,7 @@ impl ComponentManager {
         let artifact = manifest.artifact(component.engine_name(), self.target)?;
 
         self.engine_manager
-            .download_and_install(config, artifact, &self.cancellation)
+            .download_and_install(config, artifact, &self.cancellation, progress)
             .await
     }
 

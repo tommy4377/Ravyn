@@ -35,7 +35,7 @@ pub(super) async fn list_components(
     let component_manager = ComponentManager::new(
         &s.base_config.data_dir,
         std::sync::Arc::new(crate::services::components::BuiltInManifestProvider::empty()),
-        s.provisioning_cancellation.clone(),
+        s.provisioning_cancellation.current(),
     );
 
     let mut components = Vec::new();
@@ -133,7 +133,7 @@ pub(super) async fn install_component(
     let component_manager = ComponentManager::new(
         &s.base_config.data_dir,
         std::sync::Arc::new(crate::services::components::BuiltInManifestProvider::empty()),
-        s.provisioning_cancellation.clone(),
+        s.provisioning_cancellation.current(),
     );
 
     let state = component_manager
@@ -172,10 +172,13 @@ pub(super) async fn install_component(
     };
     s.repository.save_component_record(&record).await?;
 
+    let events = s.manager.events();
+    publish_component_event(&events, component, ComponentState::Queued, None, None, None);
+
     // Spawn background installation.
     let repo = s.repository.clone();
     let config = s.base_config.clone();
-    let cancellation = s.provisioning_cancellation.clone();
+    let cancellation = s.provisioning_cancellation.current();
     let comp = component;
 
     tokio::spawn(async move {
@@ -198,13 +201,60 @@ pub(super) async fn install_component(
             install_completed_at: None,
         };
         let _ = repo.save_component_record(&record).await;
+        publish_component_event(
+            &events,
+            comp,
+            ComponentState::Downloading,
+            Some(0),
+            None,
+            None,
+        );
 
-        match manager.install_component(comp, &config).await {
+        // Coalesce download progress to roughly 4 events per second so slow
+        // consumers and the SSE replay buffer are never flooded.
+        let throttle = std::sync::Mutex::new(std::time::Instant::now() - THROTTLE_INTERVAL);
+        let progress_events = events.clone();
+        let report = move |received: u64, total: u64| {
+            let mut last = throttle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let done = received >= total;
+            if !done && last.elapsed() < THROTTLE_INTERVAL {
+                return;
+            }
+            *last = std::time::Instant::now();
+            let pct = if total > 0 {
+                u8::try_from(received.saturating_mul(100) / total).unwrap_or(100)
+            } else {
+                0
+            };
+            publish_component_event(
+                &progress_events,
+                comp,
+                ComponentState::Downloading,
+                Some(pct),
+                Some(received),
+                Some(total),
+            );
+        };
+
+        match manager
+            .install_component_with_progress(comp, &config, Some(&report))
+            .await
+        {
             Ok(path) => {
                 record.state = ComponentState::Installed;
                 record.managed_path = Some(path);
                 record.install_completed_at = Some(chrono::Utc::now());
                 let _ = repo.save_component_record(&record).await;
+                publish_component_event(
+                    &events,
+                    comp,
+                    ComponentState::Installed,
+                    Some(100),
+                    None,
+                    None,
+                );
                 tracing::info!(
                     component = comp.engine_name(),
                     "component installed via API"
@@ -215,6 +265,14 @@ pub(super) async fn install_component(
                 record.error_message = Some(error.to_string());
                 record.install_completed_at = Some(chrono::Utc::now());
                 let _ = repo.save_component_record(&record).await;
+                events.publish(crate::core::events::Event::Component {
+                    component: comp,
+                    state: ComponentState::Failed,
+                    progress_pct: None,
+                    bytes_downloaded: None,
+                    bytes_total: None,
+                    message: Some(error.to_string()),
+                });
                 tracing::warn!(
                     %error,
                     component = comp.engine_name(),
@@ -236,7 +294,7 @@ pub(super) async fn rollback_component(
     let component_manager = ComponentManager::new(
         &s.base_config.data_dir,
         std::sync::Arc::new(crate::services::components::BuiltInManifestProvider::empty()),
-        s.provisioning_cancellation.clone(),
+        s.provisioning_cancellation.current(),
     );
 
     let path = component_manager.rollback_component(component).await?;
@@ -266,7 +324,7 @@ pub(super) async fn remove_component(
     let component_manager = ComponentManager::new(
         &s.base_config.data_dir,
         std::sync::Arc::new(crate::services::components::BuiltInManifestProvider::empty()),
-        s.provisioning_cancellation.clone(),
+        s.provisioning_cancellation.current(),
     );
 
     component_manager.remove_component(component).await?;
@@ -285,7 +343,7 @@ pub(super) async fn cancel_installation(
     if let Some(record) = records.get(&component) {
         if record.state.is_busy() {
             // Cancel the provisioning token (cancels ALL active installations).
-            s.provisioning_cancellation.cancel();
+            s.provisioning_cancellation.cancel_and_reset();
             // Reset state.
             let updated = PersistedComponent {
                 component,
@@ -299,11 +357,43 @@ pub(super) async fn cancel_installation(
                 install_completed_at: None,
             };
             s.repository.save_component_record(&updated).await?;
+            s.manager
+                .events()
+                .publish(crate::core::events::Event::Component {
+                    component,
+                    state: ComponentState::NotInstalled,
+                    progress_pct: None,
+                    bytes_downloaded: None,
+                    bytes_total: None,
+                    message: Some("installation cancelled by user".into()),
+                });
             return Ok(StatusCode::OK);
         }
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Minimum interval between coalesced component progress events.
+const THROTTLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Publish a component provisioning event on the shared event bus.
+fn publish_component_event(
+    events: &crate::core::events::EventBus,
+    component: ComponentId,
+    state: ComponentState,
+    progress_pct: Option<u8>,
+    bytes_downloaded: Option<u64>,
+    bytes_total: Option<u64>,
+) {
+    events.publish(crate::core::events::Event::Component {
+        component,
+        state,
+        progress_pct,
+        bytes_downloaded,
+        bytes_total,
+        message: None,
+    });
 }
 
 fn parse_component_id(s: &str) -> Result<ComponentId> {

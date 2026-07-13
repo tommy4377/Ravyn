@@ -17,6 +17,7 @@ mod repository_tests;
 mod schedules;
 mod secrets;
 mod settings;
+mod setup;
 mod torrent_policy;
 
 pub use audit::{AuditChainStatus, AuditRecord, JobLogRecord};
@@ -33,6 +34,7 @@ pub use profiles::{PutUserProfile, UserProfile};
 pub use repository::Repository;
 pub use schedules::{Schedule, ScheduleClaim, ScheduleExecutionRecord};
 pub use secrets::SecretReference;
+pub use setup::SetupStateRecord;
 pub use torrent_policy::{TorrentRecord, TorrentSeedingState};
 
 pub mod segments;

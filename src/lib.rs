@@ -25,8 +25,8 @@ pub struct Ravyn {
     pub base_config: Arc<Config>,
     pub repository: Repository,
     pub manager: Arc<JobManager>,
-    /// Cancellation token for background provisioning tasks.
-    pub provisioning_cancellation: tokio_util::sync::CancellationToken,
+    /// Resettable cancellation for background provisioning tasks.
+    pub provisioning_cancellation: services::components::ProvisioningCancellation,
 }
 
 impl Ravyn {
@@ -63,13 +63,13 @@ impl Ravyn {
         }
         config.prepare_directories().await?;
         apply_managed_engine_paths(&mut config).await?;
-        let provisioning_cancellation = tokio_util::sync::CancellationToken::new();
+        let provisioning_cancellation = services::components::ProvisioningCancellation::new();
 
         // Spawn async provisioning – does not block startup.
         if config.auto_provision {
             let provision_config = config.clone();
             let provision_repo = repository.clone();
-            let cancellation = provisioning_cancellation.clone();
+            let cancellation = provisioning_cancellation.current();
             tokio::spawn(async move {
                 if let Err(error) =
                     ensure_provisioned_components(&provision_config, &provision_repo, &cancellation)
@@ -121,8 +121,8 @@ async fn ensure_provisioned_components(
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     use services::components::{
-        ComponentId, ComponentManager, ComponentState, PersistedComponent,
-        effective_feature_set, required_components_for_features,
+        ComponentId, ComponentManager, ComponentState, PersistedComponent, effective_feature_set,
+        required_components_for_features,
     };
 
     let records = repository.load_component_records().await?;
