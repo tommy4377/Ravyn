@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{RavynError, Result};
+use crate::error::{ProvisioningErrorCode, RavynError, Result};
 
 // ---------------------------------------------------------------------------
 // Feature and component identifiers
@@ -549,9 +549,9 @@ impl ManifestProvider for FileManifestProvider {
             )));
         }
         let public_key = self.public_key.ok_or_else(|| {
-            RavynError::Unavailable(
-                "signed engine-manifest refresh is disabled because this build has no release public key"
-                    .into(),
+            RavynError::provisioning(
+                ProvisioningErrorCode::ManifestUnavailable,
+                "signed engine-manifest refresh is disabled because this build has no release public key",
             )
         })?;
         let bytes = std::fs::read(&self.path)?;
@@ -895,11 +895,16 @@ impl ComponentManager {
         stage: Option<&(dyn Fn(ComponentState) + Send + Sync)>,
     ) -> Result<InstalledComponent> {
         let artifact = self.manifest_artifact(component)?.ok_or_else(|| {
-            RavynError::Unavailable(format!(
-                "no managed {} artifact is available for {}",
-                component.engine_name(),
-                self.target
-            ))
+            RavynError::provisioning(
+                ProvisioningErrorCode::PlatformUnsupported,
+                format!(
+                    "no managed {} artifact is available for {}",
+                    component.engine_name(),
+                    self.target
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_target(self.target)
         })?;
         let stage_adapter = |engine_stage: crate::services::engines::EngineInstallStage| {
             if let Some(report) = stage {
@@ -952,27 +957,53 @@ impl ComponentManager {
                     "failed to deactivate an unhealthy managed component"
                 );
             }
-            return Err(RavynError::Unavailable(format!(
-                "managed {} failed its post-install health check: {health_error}",
-                component.engine_name()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} failed its post-install health check: {health_error}",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version));
         }
         let detected_version = health.version.ok_or_else(|| {
-            RavynError::Unavailable(format!(
-                "managed {} did not report a version during its health check",
-                component.engine_name()
-            ))
+            RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} did not report a version during its health check",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version)
         })?;
         if !detected_version
             .to_ascii_lowercase()
             .contains(&artifact.version.to_ascii_lowercase())
         {
             let _ = self.engine_manager.deactivate(component.engine_name()).await;
-            return Err(RavynError::Unavailable(format!(
-                "managed {} reported version {detected_version:?}, expected {}",
-                component.engine_name(),
-                artifact.version
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::HealthCheckFailed,
+                format!(
+                    "managed {} reported version {detected_version:?}, expected {}",
+                    component.engine_name(),
+                    artifact.version
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("install")
+            .with_expected_version(&artifact.version)
+            .with_detected_version(&detected_version));
+        }
+        if let Err(error) = self.cleanup_component(component).await {
+            tracing::warn!(
+                %error,
+                component = component.engine_name(),
+                "failed to clean up superseded managed engine versions after install"
+            );
         }
         Ok(InstalledComponent {
             path,
@@ -1101,10 +1132,23 @@ impl ComponentManager {
                     "failed to deactivate a managed component after a failed rollback health check"
                 );
             }
-            return Err(RavynError::Unavailable(format!(
-                "rolled-back {} failed its post-rollback health check: {health_error}",
-                component.engine_name()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::RollbackFailed,
+                format!(
+                    "rolled-back {} failed its post-rollback health check: {health_error}",
+                    component.engine_name()
+                ),
+            )
+            .with_component(component.engine_name())
+            .with_stage("rollback")
+            .with_path(path.display().to_string()));
+        }
+        if let Err(error) = self.cleanup_component(component).await {
+            tracing::warn!(
+                %error,
+                component = component.engine_name(),
+                "failed to clean up superseded managed engine versions after rollback"
+            );
         }
         Ok(InstalledComponent {
             path,
@@ -1119,6 +1163,18 @@ impl ComponentManager {
             tokio::fs::remove_dir_all(&engine_dir).await?;
         }
         Ok(())
+    }
+
+    /// Deletes superseded version directories (beyond the active and single
+    /// previous version kept for rollback/diagnostics) and stale `.download`
+    /// temp files for `component`.
+    pub async fn cleanup_component(
+        &self,
+        component: ComponentId,
+    ) -> Result<crate::services::engines::EngineCleanupReport> {
+        self.engine_manager
+            .cleanup_versions(component.engine_name())
+            .await
     }
 }
 
@@ -1674,6 +1730,51 @@ mod tests {
         assert!(registry.begin(ComponentId::Ytdlp).is_ok());
     }
 
+    #[tokio::test]
+    async fn provisioning_limiter_caps_simultaneous_installations_at_two() {
+        let registry = ProvisioningCancellation::new();
+        let cancellation = CancellationToken::new();
+        let first = registry.acquire(&cancellation).await.unwrap();
+        let second = registry.acquire(&cancellation).await.unwrap();
+
+        // A third simultaneous installation must queue, not proceed.
+        let third = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            registry.acquire(&cancellation),
+        )
+        .await;
+        assert!(
+            third.is_err(),
+            "a third concurrent install must block while two permits are held"
+        );
+
+        // Releasing one permit must unblock exactly one queued acquire.
+        drop(first);
+        let unblocked = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            registry.acquire(&cancellation),
+        )
+        .await;
+        assert!(unblocked.is_ok(), "releasing a permit must unblock a queued install");
+        drop(second);
+        drop(unblocked);
+    }
+
+    #[tokio::test]
+    async fn provisioning_limiter_acquire_is_cancellable_while_queued() {
+        let registry = ProvisioningCancellation::new();
+        let holder_cancellation = CancellationToken::new();
+        let _first = registry.acquire(&holder_cancellation).await.unwrap();
+        let _second = registry.acquire(&holder_cancellation).await.unwrap();
+
+        let queued_cancellation = CancellationToken::new();
+        queued_cancellation.cancel();
+        assert!(matches!(
+            registry.acquire(&queued_cancellation).await,
+            Err(RavynError::Cancelled)
+        ));
+    }
+
     #[test]
     fn current_target_is_non_empty() {
         assert!(!current_target().is_empty());
@@ -1685,6 +1786,23 @@ mod tests {
         let manifest = provider.load().unwrap();
         assert!(manifest.is_some());
         assert_eq!(manifest.unwrap().artifacts.len(), 0);
+    }
+
+    #[test]
+    fn embedded_manifest_parses_validates_and_covers_every_windows_engine() {
+        let provider = BuiltInManifestProvider::embedded().unwrap();
+        let manifest = provider.load().unwrap().unwrap();
+        let target = "x86_64-pc-windows-msvc";
+        for engine in [
+            ComponentId::Ytdlp.engine_name(),
+            ComponentId::Rqbit.engine_name(),
+            ComponentId::Ffmpeg.engine_name(),
+        ] {
+            assert!(
+                manifest.artifact(engine, target).is_ok(),
+                "expected an embedded {engine} artifact for {target}"
+            );
+        }
     }
 
     #[test]

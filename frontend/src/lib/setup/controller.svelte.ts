@@ -6,7 +6,8 @@
  * real backend events, and the deterministic handoff.
  */
 
-import { ApiError, RavynClient } from "../api/client";
+import { RavynClient } from "../api/client";
+import { describeError } from "../api/errors";
 import { RavynEventClient } from "../api/events.svelte";
 import type {
   ComponentId,
@@ -417,14 +418,4 @@ export class SetupController {
       this.stepError = describeError(error);
     }
   }
-}
-
-export function describeError(error: unknown): string {
-  if (error instanceof ApiError) {
-    return `${error.message} (${error.code})`;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
 }

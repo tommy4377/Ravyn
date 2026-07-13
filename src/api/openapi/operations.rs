@@ -1367,6 +1367,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         None
     ),
     op!(
+        "post",
+        "/v1/components/{id}/cleanup",
+        "cleanupComponent",
+        "Components",
+        "Delete superseded managed engine versions and stale download temp files",
+        "200",
+        false,
+        false,
+        None
+    ),
+    op!(
         "delete",
         "/v1/components/{id}",
         "removeComponent",
@@ -1409,6 +1420,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         true,
         Some("PrepareLibraryResult")
+    ),
+    op!(
+        "post",
+        "/v1/setup/installation",
+        "reportInstallation",
+        "Setup",
+        "Report the desktop shell's Windows installation/integration result",
+        "200",
+        false,
+        true,
+        Some("SetupState")
     ),
     op!(
         "post",

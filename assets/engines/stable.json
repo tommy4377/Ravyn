@@ -1,5 +1,38 @@
 {
   "schema_version": 1,
   "channel": "stable",
-  "artifacts": []
+  "artifacts": [
+    {
+      "engine": "yt-dlp",
+      "version": "2026.07.04",
+      "target": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
+      "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
+      "size_bytes": 18226085,
+      "filename": "yt-dlp.exe",
+      "capabilities": ["structured_json", "download_archive", "ffmpeg_location", "progress_template"]
+    },
+    {
+      "engine": "rqbit",
+      "version": "9.0.0-beta.2",
+      "target": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/ikatson/rqbit/releases/download/v9.0.0-beta.2/rqbit.exe",
+      "sha256": "2e4db7c500b19607545eb0e51c63ecc17018cd08906029abee1df61aa65fa409",
+      "size_bytes": 10399744,
+      "filename": "rqbit.exe",
+      "capabilities": ["http_api"]
+    },
+    {
+      "engine": "ffmpeg",
+      "version": "n7.1.5-2-g998de74adf",
+      "target": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-13-14-11/ffmpeg-n7.1.5-2-g998de74adf-win64-gpl-7.1.zip",
+      "sha256": "82a67a5a5dfb5dbc8c43fbea768d153f9730b1c84c33fdbde62bdde2c2e9c031",
+      "size_bytes": 158685247,
+      "filename": "ffmpeg.exe",
+      "capabilities": ["transcode"],
+      "archive_member": "ffmpeg-n7.1.5-2-g998de74adf-win64-gpl-7.1/bin/ffmpeg.exe",
+      "member_sha256": "1ee823c2158a01a19f090f921d2ae6c23735efebf26f88732db5c170481ccc7b"
+    }
+  ]
 }

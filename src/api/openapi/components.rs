@@ -516,7 +516,16 @@ pub(super) fn schemas() -> Value {
                 "features_selected": {"type": "boolean"},
                 "library_root": {"type": ["string", "null"]},
                 "library_prepared": {"type": "boolean"},
-                "data_dir": {"type": "string"}
+                "data_dir": {"type": "string"},
+                "installation": {"type": ["object", "null"], "properties": {
+                    "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                    "installed_exe": {"type": ["string", "null"]},
+                    "installed_version": {"type": ["string", "null"]},
+                    "installed_sha256": {"type": ["string", "null"]},
+                    "integration_completed": {"type": "boolean"},
+                    "integration_errors": {"type": "array", "items": {"type": "string"}},
+                    "relaunch_pending": {"type": "boolean"}
+                }}
             }
         },
         "PrepareLibraryResult": {

@@ -44,6 +44,10 @@
   --control-large: 40px;
   --hit-target-minimum: 40px;
 
+  /* Density (list/table row height + vertical padding); toggled via [data-density] on <html> */
+  --row-height: 36px;
+  --row-padding-v: var(--space-2);
+
   /* Motion */
   --motion-fast: 150ms;
   --motion-normal: 250ms;
@@ -223,6 +227,11 @@ body {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+:root[data-density="compact"] {
+  --row-height: 28px;
+  --row-padding-v: var(--space-1);
 }
 
 /* High Contrast: defer to system colors */
