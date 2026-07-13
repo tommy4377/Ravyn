@@ -58,6 +58,8 @@ The desktop shell (`src-tauri/src/backend.rs:101`) generates a `uuid::Uuid::new_
 * no downgrade/replay protection (manifest version/timestamp/expiration);
 * no controlled remote refresh with fallback to last verified.
 
+~~Manifest generation/checksum/signing pipeline (item 2)~~ ✅ — see below.
+
 ### 8. There is no real remote engine update
 
 `update_available` (`components.rs:751-758`) correctly compares manifest version vs active version via `version_cmp`. But the manifest only changes when a new Ravyn binary ships with a different embedded manifest, or when the user places a local signed file.
@@ -221,7 +223,7 @@ before the Tauri build. Windows tests on a clean machine (install → restart �
 The correct order now is:
 
 1. ~~Populate the embedded manifest with real artifacts.~~ ✅ (partial: yt-dlp/rqbit/ffmpeg done, 7-Zip still blocked on a format decision)
-2. **Add manifest generation, checksum, and signing pipeline.**
+2. ~~Add manifest generation, checksum, and signing pipeline.~~ ✅ — `src/bin/manifest_tool.rs` (`cargo run --bin manifest_tool`): `checksum <file>` prints sha256/size for an artifact; `keygen` generates an Ed25519 keypair via the OS CSPRNG (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix — no new RNG dependency); `sign --manifest <file> --key <hex-or-$RAVYN_ENGINE_MANIFEST_PRIVATE_KEY> --out <file>` validates and signs a plain manifest, self-verifying the signature before writing; `verify <signed> --public-key <hex>` checks a signed manifest exactly as the backend does. Manually exercised end to end against the real `assets/engines/stable.json` (signs, verifies with the right key, correctly rejects the wrong key).
 3. ~~Correct engine activation after provisioning via controlled restart.~~ ✅
 4. ~~Implement `RqbitProcessManager` and HTTP health check.~~ ✅
 5. ~~Actually launch the installed copy and close the original setup.~~ ✅
