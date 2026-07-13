@@ -17,7 +17,12 @@ pub struct Config {
     /// Optional root for the organized Ravyn library.
     #[arg(long, env = "RAVYN_LIBRARY_ROOT")]
     pub library_root: Option<PathBuf>,
-    #[arg(long, env = "RAVYN_LIBRARY_AUTO_ORGANIZE", default_value_t = true)]
+    #[arg(
+        long,
+        env = "RAVYN_LIBRARY_AUTO_ORGANIZE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
     pub library_auto_organize: bool,
     /// Persistent extension-to-category overrides loaded from runtime settings.
     #[arg(skip)]
@@ -115,7 +120,12 @@ pub struct Config {
     #[arg(long, env = "RAVYN_7Z", default_value = "7z")]
     pub seven_zip: PathBuf,
     /// Automatically download managed engine binaries for enabled features at startup.
-    #[arg(long, env = "RAVYN_AUTO_PROVISION", default_value_t = true)]
+    #[arg(
+        long,
+        env = "RAVYN_AUTO_PROVISION",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
     pub auto_provision: bool,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_MIB", default_value_t = 10_240)]
     pub max_extract_mib: u64,

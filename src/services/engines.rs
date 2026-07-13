@@ -229,6 +229,7 @@ impl EngineManager {
         config: &Config,
         artifact: &EngineArtifact,
         cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
     ) -> Result<PathBuf> {
         artifact.validate()?;
         let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
@@ -319,6 +320,9 @@ impl EngineManager {
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk).await?;
+                if let Some(report) = progress {
+                    report(received, artifact.size_bytes);
+                }
             }
             file.sync_all().await?;
             drop(file);

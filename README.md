@@ -1,6 +1,33 @@
-# Ravyn Backend
+# Ravyn
 
-Ravyn is a backend-first download manager written in Rust. It exposes a local HTTP API and supports direct HTTP downloads, media through yt-dlp, BitTorrent through rqbit, automation, post-processing, and a persistent organized download library.
+Ravyn is a download manager with a Rust backend and a native Windows desktop application. The backend exposes a local HTTP API and supports direct HTTP downloads, media through yt-dlp, BitTorrent through rqbit, automation, post-processing, and a persistent organized download library.
+
+## Desktop application and setup
+
+The repository contains three parts:
+
+- the root `ravyn` crate — the backend (HTTP API, engines, storage);
+- `src-tauri/` — the `ravyn-desktop` Tauri 2 shell that embeds the backend in-process on an ephemeral loopback port and hosts the setup and main windows;
+- `frontend/` — the Svelte 5 + Vite frontend (Fluent Design 2 tokens, custom setup flow).
+
+Frontend development:
+
+```text
+cd frontend
+npm install
+npm run check   # svelte-check, strict TypeScript
+npm run test    # vitest
+npm run build   # production bundle
+```
+
+Desktop shell development (starts the Vite dev server automatically when using the Tauri CLI, or run `npm run dev` manually and then start the exe):
+
+```text
+cargo build -p ravyn-desktop
+target/debug/ravyn-desktop.exe
+```
+
+The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`). On first run it opens the custom Ravyn setup; after setup completes it opens the main window. Setup documentation lives in `docs/SETUP_CAPABILITY_MATRIX.md`.
 
 ## Current capabilities
 

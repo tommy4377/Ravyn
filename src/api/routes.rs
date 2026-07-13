@@ -53,7 +53,7 @@ pub struct ApiState {
     pub base_config: Arc<crate::config::Config>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
-    pub provisioning_cancellation: tokio_util::sync::CancellationToken,
+    pub provisioning_cancellation: crate::services::components::ProvisioningCancellation,
 }
 
 async fn audited<T>(
@@ -283,6 +283,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/components/{id}/install", post(install_component))
         .route("/v1/components/{id}/rollback", post(rollback_component))
         .route("/v1/components/{id}/cancel", post(cancel_installation))
+        .route("/v1/setup", get(get_setup_state))
+        .route("/v1/setup/library", post(prepare_library))
+        .route("/v1/setup/complete", post(complete_setup))
         .route("/v1/events", get(events))
         .with_state(state)
 }
@@ -301,9 +304,11 @@ mod components;
 mod jobs;
 mod library;
 mod media;
+mod setup;
 mod system;
 mod torrents;
 
 use self::{
-    automation::*, browser::*, components::*, jobs::*, library::*, media::*, system::*, torrents::*,
+    automation::*, browser::*, components::*, jobs::*, library::*, media::*, setup::*, system::*,
+    torrents::*,
 };
