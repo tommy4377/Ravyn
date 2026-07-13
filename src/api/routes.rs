@@ -290,6 +290,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/setup", get(get_setup_state))
         .route("/v1/setup/library", post(prepare_library))
+        .route("/v1/setup/installation", post(report_installation))
         .route("/v1/setup/complete", post(complete_setup))
         .route("/v1/events", get(events))
         .with_state(state)

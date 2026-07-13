@@ -34,7 +34,7 @@ pub use profiles::{PutUserProfile, UserProfile};
 pub use repository::Repository;
 pub use schedules::{Schedule, ScheduleClaim, ScheduleExecutionRecord};
 pub use secrets::SecretReference;
-pub use setup::SetupStateRecord;
+pub use setup::{InstallationRecord, SetupStateRecord};
 pub use torrent_policy::{TorrentRecord, TorrentSeedingState};
 
 pub mod segments;

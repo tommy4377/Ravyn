@@ -167,14 +167,11 @@ The low-level `EngineManager::rollback()` (`engines.rs:471-495`) still only veri
 
 ---
 
-### 18. The backend does not know the result of the Windows installation
+### ~~18. The backend does not know the result of the Windows installation~~ ✅
 
-`IntegrationReport` remains in the Tauri/frontend layer and is not persisted in the backend setup state. `POST /v1/setup/complete` does not know if the app was copied, registration succeeded, or the mode is portable or installed.
+`setup_state` (migration `0024_setup_installation.sql`) now carries `installation_mode`, `installed_exe`, `installed_version`, `installed_sha256`, `integration_completed`, `integration_errors` (JSON array), and `relaunch_pending`. `Repository::save_installation_report()`/`load_setup_state()` (`src/storage/setup.rs`) persist and round-trip an `InstallationRecord` independently of `completed`/`completed_at`, so reporting installation before setup finishes doesn't mark it complete, and completing setup afterward doesn't erase the installation report (covered by `installation_report_round_trips_independently_of_completion`).
 
-**Needs persisted:**
-* `installation_mode`, `installed_exe`, `installed_version`, `installed_sha256`;
-* `integration_completed`, `integration_errors`;
-* `restart/relaunch_pending`.
+A new `POST /v1/setup/installation` endpoint (`src/api/routes/setup.rs`) accepts the report — validating `installation_mode` against `{installed, portable, development}`, `installed_sha256` as 64 hex characters, and bounding field lengths and the number/size of `integration_errors` — and `GET /v1/setup` now returns the persisted result under `installation`. The Tauri desktop shell (out of backend scope) still needs to actually call this endpoint after `apply_windows_integration`/`installation::detect()` run, but the backend side of the contract is complete.
 
 ---
 
@@ -230,7 +227,7 @@ The correct order now is:
 5. ~~Actually launch the installed copy and close the original setup.~~ ✅
 6. ~~Implement `--uninstall`.~~ ✅
 7. **Make Ravyn executable install/update/rollback transactional.**
-8. **Persist desktop installation mode and result in the setup backend.**
+8. ~~Persist desktop installation mode and result in the setup backend.~~ ✅
 9. ~~Correct version comparison, detected version, and capability checks.~~ ✅
 10. ~~Add global limit, cleanup, and close cancellation race conditions.~~ ✅ (partial for cleanup)
 11. **Build the desktop in CI and publish it in the release.**

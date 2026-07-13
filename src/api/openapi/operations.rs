@@ -1423,6 +1423,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
     ),
     op!(
         "post",
+        "/v1/setup/installation",
+        "reportInstallation",
+        "Setup",
+        "Report the desktop shell's Windows installation/integration result",
+        "200",
+        false,
+        true,
+        Some("SetupState")
+    ),
+    op!(
+        "post",
         "/v1/setup/complete",
         "completeSetup",
         "Setup",
