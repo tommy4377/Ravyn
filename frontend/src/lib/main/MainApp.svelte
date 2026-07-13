@@ -18,7 +18,7 @@
     error = "";
     try {
       const backend = await backendInfo();
-      const client = new RavynClient(backend.base_url);
+      const client = new RavynClient(backend.base_url, backend.api_token);
       setup = await client.getSetupState();
       connection = "ready";
       await mainWindowReady();

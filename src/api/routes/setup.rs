@@ -13,9 +13,22 @@ use crate::services::{
 /// Longest accepted library path, in UTF-8 bytes.
 const MAX_LIBRARY_PATH_BYTES: usize = 4096;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SetupLifecycleState {
+    NotStarted,
+    InProgress,
+    RestartRequired,
+    ReadyToComplete,
+    Completed,
+}
+
 #[derive(Serialize)]
 pub(super) struct SetupStateResponse {
     completed: bool,
+    lifecycle: SetupLifecycleState,
+    ready_to_complete: bool,
+    restart_required: bool,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
     completed_app_version: Option<String>,
     app_version: &'static str,
@@ -45,20 +58,64 @@ fn library_layout_prepared(root: &std::path::Path) -> bool {
             .all(|directory| root.join(directory).is_dir())
 }
 
+fn paths_equivalent(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn setup_lifecycle(
+    completed: bool,
+    features_selected: bool,
+    library_prepared: bool,
+    restart_required: bool,
+) -> SetupLifecycleState {
+    if restart_required {
+        SetupLifecycleState::RestartRequired
+    } else if completed {
+        SetupLifecycleState::Completed
+    } else if features_selected && library_prepared {
+        SetupLifecycleState::ReadyToComplete
+    } else if features_selected || library_prepared {
+        SetupLifecycleState::InProgress
+    } else {
+        SetupLifecycleState::NotStarted
+    }
+}
+
 pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<SetupStateResponse>> {
     let record = s.repository.load_setup_state().await?;
     let selections = s.repository.load_feature_selections().await?;
     let library_root = pending_library_root(&s).await?;
     let library_prepared = library_root.as_deref().is_some_and(library_layout_prepared);
+    let runtime_library_root = s.manager.config().effective_library_root();
+    let restart_required = match (library_root.as_deref(), runtime_library_root.as_deref()) {
+        (Some(pending), Some(runtime)) => !paths_equivalent(pending, runtime),
+        (None, None) => false,
+        _ => true,
+    };
+    let completed = record.as_ref().is_some_and(|r| r.completed);
+    let features_selected = selections.is_some();
+    let ready_to_complete = features_selected && library_prepared && !restart_required;
+    let lifecycle = setup_lifecycle(
+        completed,
+        features_selected,
+        library_prepared,
+        restart_required,
+    );
 
     Ok(Json(SetupStateResponse {
-        completed: record.as_ref().is_some_and(|r| r.completed),
+        completed,
+        lifecycle,
+        ready_to_complete,
+        restart_required,
         completed_at: record.as_ref().and_then(|r| r.completed_at),
         completed_app_version: record.and_then(|r| r.app_version),
         app_version: env!("CARGO_PKG_VERSION"),
         platform: crate::services::components::current_target(),
         setup_profile: selections.as_ref().map(|(profile, _)| *profile),
-        features_selected: selections.is_some(),
+        features_selected,
         library_root: library_root.map(|p| p.display().to_string()),
         library_prepared,
         data_dir: s.manager.config().data_dir.display().to_string(),
@@ -109,6 +166,10 @@ pub(super) async fn prepare_library(
 
         let existed = root.is_dir();
         prepare_library_layout(&root).await?;
+        let runtime_library_root = s.manager.config().effective_library_root();
+        let restart_required = runtime_library_root
+            .as_deref()
+            .is_none_or(|runtime| !paths_equivalent(&root, runtime));
 
         // Persist the chosen root so the backend adopts it on next start.
         let mut values = s
@@ -126,7 +187,7 @@ pub(super) async fn prepare_library(
             existed,
             directories: LIBRARY_DIRECTORIES.to_vec(),
             available_bytes: available_disk_bytes(&root),
-            restart_required: true,
+            restart_required,
         })
     }
     .await;
@@ -143,11 +204,36 @@ pub(super) async fn prepare_library(
 }
 
 pub(super) async fn complete_setup(State(s): State<ApiState>) -> Result<Json<SetupStateResponse>> {
+    let selections = s.repository.load_feature_selections().await?;
+    if selections.is_none() {
+        return Err(crate::error::RavynError::Conflict(
+            "feature selections must be saved before setup can be completed".into(),
+        ));
+    }
     let library_root = pending_library_root(&s).await?;
-    let library_root_str = library_root.map(|p| p.display().to_string());
+    let Some(library_root) = library_root else {
+        return Err(crate::error::RavynError::Conflict(
+            "a Ravyn library must be prepared before setup can be completed".into(),
+        ));
+    };
+    if !library_layout_prepared(&library_root) {
+        return Err(crate::error::RavynError::Conflict(
+            "the Ravyn library layout is incomplete".into(),
+        ));
+    }
+    let runtime_library_root = s.manager.config().effective_library_root();
+    if runtime_library_root
+        .as_deref()
+        .is_none_or(|runtime| !paths_equivalent(&library_root, runtime))
+    {
+        return Err(crate::error::RavynError::Conflict(
+            "the backend must restart before setup can be completed with the selected library".into(),
+        ));
+    }
+    let library_root_str = library_root.display().to_string();
     let result = s
         .repository
-        .save_setup_complete(env!("CARGO_PKG_VERSION"), library_root_str.as_deref())
+        .save_setup_complete(env!("CARGO_PKG_VERSION"), Some(&library_root_str))
         .await;
     audited(&s.repository, "setup.complete", "setup", None, result).await?;
     get_setup_state(State(s)).await
@@ -196,6 +282,22 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         prepare_library_layout(temporary.path()).await.unwrap();
         assert!(library_layout_prepared(temporary.path()));
+    }
+
+    #[test]
+    fn lifecycle_requires_restart_before_completion() {
+        assert_eq!(
+            setup_lifecycle(false, true, true, true),
+            SetupLifecycleState::RestartRequired
+        );
+        assert_eq!(
+            setup_lifecycle(false, true, true, false),
+            SetupLifecycleState::ReadyToComplete
+        );
+        assert_eq!(
+            setup_lifecycle(true, true, true, false),
+            SetupLifecycleState::Completed
+        );
     }
 
     #[test]

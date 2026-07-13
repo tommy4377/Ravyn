@@ -3539,9 +3539,11 @@ name = "ravyn-desktop"
 version = "0.2.0"
 dependencies = [
  "clap",
+ "hex",
  "ravyn",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3549,6 +3551,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "winreg",
 ]
 

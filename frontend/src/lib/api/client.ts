@@ -36,7 +36,10 @@ export class ApiError extends Error {
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class RavynClient {
-  constructor(readonly baseUrl: string) {}
+  constructor(
+    readonly baseUrl: string,
+    private readonly apiToken: string,
+  ) {}
 
   private async request<T>(
     method: string,
@@ -54,7 +57,10 @@ export class RavynClient {
     try {
       response = await fetch(`${this.baseUrl}${path}`, {
         method,
-        headers: body !== undefined ? { "content-type": "application/json" } : {},
+        headers: {
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+          authorization: `Bearer ${this.apiToken}`,
+        },
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });

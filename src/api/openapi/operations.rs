@@ -1335,6 +1335,28 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
     ),
     op!(
         "post",
+        "/v1/components/{id}/update",
+        "updateComponent",
+        "Components",
+        "Install the verified manifest version of a managed component",
+        "202",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/verify",
+        "verifyComponent",
+        "Components",
+        "Run a bounded component health and version check",
+        "200",
+        false,
+        false,
+        Some("ComponentHealth")
+    ),
+    op!(
+        "post",
         "/v1/components/{id}/rollback",
         "rollbackComponent",
         "Components",

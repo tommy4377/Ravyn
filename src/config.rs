@@ -499,6 +499,8 @@ pub struct PersistentSettings {
     pub bandwidth_schedule: BandwidthSchedule,
     pub ytdlp: PathBuf,
     pub ffmpeg: PathBuf,
+    #[serde(default = "default_rqbit")]
+    pub rqbit: PathBuf,
     pub rqbit_api: String,
     pub rqbit_credentials_secret_id: Option<uuid::Uuid>,
     pub seven_zip: PathBuf,
@@ -588,6 +590,9 @@ fn default_media_probe_timeout_secs() -> u64 {
 fn default_media_probe_max_mib() -> usize {
     32
 }
+fn default_rqbit() -> PathBuf {
+    PathBuf::from("rqbit")
+}
 fn default_rqbit_timeout_secs() -> u64 {
     120
 }
@@ -635,6 +640,7 @@ pub struct PersistentSettingsPatch {
     pub bandwidth_schedule: Option<BandwidthSchedule>,
     pub ytdlp: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
+    pub rqbit: Option<PathBuf>,
     pub rqbit_api: Option<String>,
     pub rqbit_credentials_secret_id: Option<Option<uuid::Uuid>>,
     pub seven_zip: Option<PathBuf>,
@@ -681,6 +687,7 @@ impl PersistentSettings {
             bandwidth_schedule: BandwidthSchedule::default(),
             ytdlp: config.ytdlp.clone(),
             ffmpeg: config.ffmpeg.clone(),
+            rqbit: config.rqbit.clone(),
             rqbit_api: config.rqbit_api.clone(),
             rqbit_credentials_secret_id: config.rqbit_credentials_secret_id,
             seven_zip: config.seven_zip.clone(),
@@ -726,6 +733,7 @@ impl PersistentSettings {
         config.global_speed_limit_bps = self.global_speed_limit_bps;
         config.ytdlp = self.ytdlp.clone();
         config.ffmpeg = self.ffmpeg.clone();
+        config.rqbit = self.rqbit.clone();
         config.rqbit_api = self.rqbit_api.clone();
         config.rqbit_credentials_secret_id = self.rqbit_credentials_secret_id;
         config.seven_zip = self.seven_zip.clone();
@@ -794,6 +802,9 @@ impl PersistentSettings {
         }
         if let Some(value) = patch.ffmpeg {
             self.ffmpeg = value;
+        }
+        if let Some(value) = patch.rqbit {
+            self.rqbit = value;
         }
         if let Some(value) = patch.rqbit_api {
             self.rqbit_api = value;
@@ -900,6 +911,7 @@ mod tests {
             "global_speed_limit_bps":0,
             "ytdlp":"yt-dlp",
             "ffmpeg":"ffmpeg",
+            "rqbit":"rqbit",
             "rqbit_api":"http://127.0.0.1:3030",
             "rqbit_credentials_secret_id":null,
             "seven_zip":"7z",

@@ -15,11 +15,16 @@ export class RavynEventClient {
   private readonly handlers = new Set<EventHandler>();
   connected = $state(false);
 
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiToken: string,
+  ) {}
 
   connect(): void {
     if (this.source) return;
-    const source = new EventSource(`${this.baseUrl}/v1/events`);
+    const source = new EventSource(
+      `${this.baseUrl}/v1/events?access_token=${encodeURIComponent(this.apiToken)}`,
+    );
     this.source = source;
     source.onopen = () => {
       this.connected = true;

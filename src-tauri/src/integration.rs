@@ -82,7 +82,6 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
                 } else if cfg!(debug_assertions) {
                     // Development builds stay in the target directory; copying
                     // a debug binary into Programs would misrepresent install.
-                    installed_exe = Some(source.clone());
                     steps.push(skipped(
                         "install_application",
                         "development build runs in place",
@@ -104,6 +103,28 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         }
     } else {
         steps.push(skipped("install_application", "not requested"));
+    }
+
+    // An explicitly requested installation is transactional from the caller's
+    // perspective: never register or shortcut the source executable when the
+    // copy step failed or was intentionally skipped for a development build.
+    if request.install_application && installed_exe.is_none() {
+        for step in [
+            "register_installed_app",
+            "start_menu_shortcut",
+            "desktop_shortcut",
+            "launch_at_startup",
+        ] {
+            steps.push(skipped(
+                step,
+                "application installation did not produce an installed executable",
+            ));
+        }
+        return IntegrationReport {
+            steps,
+            install_dir,
+            installed_exe: None,
+        };
     }
 
     let effective_exe = installed_exe.clone().or(source_exe);
@@ -189,13 +210,66 @@ fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Res
     // executable but not overwriting it in place).
     let staged = dir.join(".ravyn.install.tmp");
     std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
+    if sha256_file(source)? != sha256_file(&staged)? {
+        let _ = std::fs::remove_file(&staged);
+        return Err("staged executable checksum does not match the source".into());
+    }
+    let backup = dir.join(".ravyn.previous.exe");
+    let replaced_existing = target.exists();
     if target.exists() {
-        let backup = dir.join(".ravyn.previous.exe");
         let _ = std::fs::remove_file(&backup);
         std::fs::rename(target, &backup).map_err(|e| e.to_string())?;
     }
-    std::fs::rename(&staged, target).map_err(|e| e.to_string())?;
+    if let Err(error) = std::fs::rename(&staged, target) {
+        if replaced_existing && backup.exists() {
+            if let Err(restore_error) = std::fs::rename(&backup, target) {
+                let _ = std::fs::remove_file(&staged);
+                return Err(format!(
+                    "failed to activate the staged executable ({error}) and restore the previous executable ({restore_error})"
+                ));
+            }
+        }
+        let _ = std::fs::remove_file(&staged);
+        return Err(error.to_string());
+    }
     Ok(())
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// A freshly launched installed copy calls this only after its backend is
+/// ready. Retaining the previous binary until this point leaves a manual
+/// recovery path if startup fails.
+pub fn confirm_installed_copy_ready() {
+    let Some(dir) = crate::installation::default_install_dir() else {
+        return;
+    };
+    let current = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let expected = std::path::PathBuf::from(dir).join("Ravyn.exe");
+    if current
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.to_string_lossy())
+    {
+        let _ = std::fs::remove_file(expected.with_file_name(".ravyn.previous.exe"));
+    }
 }
 
 #[cfg(windows)]
