@@ -441,6 +441,66 @@ pub(super) fn schemas() -> Value {
                 "last_result":{"type":["object","null"]},
                 "restart_required":{"type":"boolean"}
             }
+        },
+        "ComponentOverview": {
+            "type": "object",
+            "required": ["setup_profile", "features", "components", "platform", "manifest_provider"],
+            "properties": {
+                "setup_profile": {"type": "string", "enum": ["minimal", "recommended", "full", "custom"]},
+                "features": {"type": "array", "items": {"$ref": "#/components/schemas/FeatureStatus"}},
+                "components": {"type": "array", "items": {"$ref": "#/components/schemas/ComponentStatus"}},
+                "platform": {"type": "string"},
+                "manifest_provider": {"type": "string"}
+            }
+        },
+        "FeatureStatus": {
+            "type": "object",
+            "required": ["feature", "enabled", "satisfied", "required_components"],
+            "properties": {
+                "feature": {"type": "string", "enum": ["standard_downloads", "video_extraction", "media_merging", "torrent_support", "archive_extraction"]},
+                "enabled": {"type": "boolean"},
+                "satisfied": {"type": "boolean"},
+                "required_components": {"type": "array", "items": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]}}
+            }
+        },
+        "ComponentStatus": {
+            "type": "object",
+            "required": ["component", "state", "enabled"],
+            "properties": {
+                "component": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]},
+                "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "custom_path"]},
+                "enabled": {"type": "boolean"},
+                "managed_version": {"type": ["string", "null"]},
+                "managed_path": {"type": ["string", "null"]},
+                "custom_path": {"type": ["string", "null"]},
+                "effective_path": {"type": ["string", "null"]},
+                "error_message": {"type": ["string", "null"]},
+                "last_checked_at": {"type": ["string", "null"], "format": "date-time"},
+                "install_started_at": {"type": ["string", "null"], "format": "date-time"},
+                "install_completed_at": {"type": ["string", "null"], "format": "date-time"}
+            }
+        },
+        "SaveFeatureSelections": {
+            "type": "object",
+            "required": ["setup_profile", "features"],
+            "properties": {
+                "setup_profile": {"type": "string", "enum": ["minimal", "recommended", "full", "custom"]},
+                "features": {"type": "array", "items": {"$ref": "#/components/schemas/FeatureSelection"}}
+            }
+        },
+        "FeatureSelection": {
+            "type": "object",
+            "required": ["feature", "enabled"],
+            "properties": {
+                "feature": {"type": "string", "enum": ["standard_downloads", "video_extraction", "media_merging", "torrent_support", "archive_extraction"]},
+                "enabled": {"type": "boolean"}
+            }
+        },
+        "InstallComponentRequest": {
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "default": false}
+            }
         }
     })
 }

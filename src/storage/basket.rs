@@ -50,11 +50,7 @@ impl Repository {
         self.get_basket_item(id).await
     }
 
-    pub async fn update_basket_item(
-        &self,
-        id: Uuid,
-        input: PutBasketItem,
-    ) -> Result<BasketItem> {
+    pub async fn update_basket_item(&self, id: Uuid, input: PutBasketItem) -> Result<BasketItem> {
         if let Some(preset_id) = input.preset_id {
             self.get_download_preset(preset_id).await?;
         }
@@ -105,8 +101,7 @@ impl Repository {
             .await?
             .into_iter()
             .map(|value| {
-                Uuid::parse_str(&value)
-                    .map_err(|error| RavynError::Internal(error.to_string()))
+                Uuid::parse_str(&value).map_err(|error| RavynError::Internal(error.to_string()))
             })
             .collect::<Result<std::collections::HashSet<_>>>()?;
         let requested_ids = ids
@@ -137,10 +132,11 @@ impl Repository {
 
     pub async fn delete_basket_item(&self, id: Uuid) -> Result<()> {
         let mut transaction = self.pool().begin().await?;
-        let position: Option<i64> = sqlx::query_scalar("SELECT position FROM basket_items WHERE id=?")
-            .bind(id.to_string())
-            .fetch_optional(&mut *transaction)
-            .await?;
+        let position: Option<i64> =
+            sqlx::query_scalar("SELECT position FROM basket_items WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
         let Some(position) = position else {
             return Err(RavynError::NotFound(format!("basket item {id}")));
         };
@@ -181,7 +177,6 @@ fn row_to_basket_item(row: SqliteRow) -> Result<BasketItem> {
         updated_at: row.try_get("updated_at")?,
     })
 }
-
 
 #[cfg(test)]
 mod tests {

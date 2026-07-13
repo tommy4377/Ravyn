@@ -143,7 +143,6 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         Some("JobOutputPage")
     ),
-
     op!(
         "get",
         "/v1/library",
@@ -1300,5 +1299,71 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         "streamEvents",
         "Events",
         "Stream replayable server-sent events"
+    ),
+    op!(
+        "get",
+        "/v1/components",
+        "listComponents",
+        "Components",
+        "List component and feature status",
+        "200",
+        false,
+        false,
+        Some("ComponentOverview")
+    ),
+    op!(
+        "post",
+        "/v1/components/features",
+        "saveFeatureSelections",
+        "Components",
+        "Save feature selections and setup profile",
+        "200",
+        false,
+        true,
+        Some("ComponentOverview")
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/install",
+        "installComponent",
+        "Components",
+        "Install a managed component",
+        "202",
+        false,
+        true,
+        None
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/rollback",
+        "rollbackComponent",
+        "Components",
+        "Roll back a component to its previous version",
+        "200",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "delete",
+        "/v1/components/{id}",
+        "removeComponent",
+        "Components",
+        "Remove a managed component",
+        "204",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/cancel",
+        "cancelComponentInstallation",
+        "Components",
+        "Cancel an active component installation",
+        "200",
+        false,
+        false,
+        None
     ),
 ];

@@ -43,15 +43,8 @@ impl JobManager {
                 let (path, metadata) = self
                     .organize_primary_library_output(job, &mut output, metadata)
                     .await?;
-                self.record_library_file(
-                    job,
-                    &output,
-                    &path,
-                    &metadata,
-                    true,
-                    cancellation,
-                )
-                .await?;
+                self.record_library_file(job, &output, &path, &metadata, true, cancellation)
+                    .await?;
                 continue;
             }
             if !metadata.is_dir() {
@@ -471,7 +464,11 @@ impl JobManager {
                             match action_result {
                                 Ok(output) => {
                                     self.repository
-                                        .finish_job_action(job.id, journal_index, Ok(output.as_path()))
+                                        .finish_job_action(
+                                            job.id,
+                                            journal_index,
+                                            Ok(output.as_path()),
+                                        )
                                         .await?;
                                     match action {
                                         PostAction::VerifySha256 { expected } => {
@@ -805,7 +802,8 @@ async fn move_regular_file_without_replacement(
         return Err(error.into());
     }
     drop(output);
-    if let Err(error) = tokio::fs::set_permissions(destination, source_metadata.permissions()).await {
+    if let Err(error) = tokio::fs::set_permissions(destination, source_metadata.permissions()).await
+    {
         let _ = tokio::fs::remove_file(destination).await;
         return Err(error.into());
     }

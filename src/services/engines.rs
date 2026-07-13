@@ -174,6 +174,11 @@ impl EngineManager {
         }
     }
 
+    /// Root directory for all managed engine binaries.
+    pub fn root_dir(&self) -> &Path {
+        &self.root
+    }
+
     pub async fn install_verified(
         &self,
         artifact: &EngineArtifact,

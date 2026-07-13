@@ -114,6 +114,9 @@ pub struct Config {
     pub avif_quality: u8,
     #[arg(long, env = "RAVYN_7Z", default_value = "7z")]
     pub seven_zip: PathBuf,
+    /// Automatically download managed engine binaries for enabled features at startup.
+    #[arg(long, env = "RAVYN_AUTO_PROVISION", default_value_t = true)]
+    pub auto_provision: bool,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_MIB", default_value_t = 10_240)]
     pub max_extract_mib: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_FILES", default_value_t = 100_000)]
@@ -327,9 +330,7 @@ impl Config {
                 "RAVYN_MAX_EXTRACT_RATIO must be between 1 and 1000000".into(),
             ));
         }
-        crate::services::library::validate_category_overrides(
-            &self.library_category_overrides,
-        )?;
+        crate::services::library::validate_category_overrides(&self.library_category_overrides)?;
         Ok(())
     }
 
@@ -478,8 +479,7 @@ pub struct PersistentSettings {
     #[serde(default = "default_library_auto_organize")]
     pub library_auto_organize: bool,
     #[serde(default)]
-    pub library_category_overrides:
-        BTreeMap<String, crate::services::library::LibraryCategory>,
+    pub library_category_overrides: BTreeMap<String, crate::services::library::LibraryCategory>,
     pub max_active: usize,
     pub max_segments: usize,
     pub segment_threshold_mib: u64,
@@ -492,6 +492,8 @@ pub struct PersistentSettings {
     pub rqbit_api: String,
     pub rqbit_credentials_secret_id: Option<uuid::Uuid>,
     pub seven_zip: PathBuf,
+    #[serde(default = "default_auto_provision")]
+    pub auto_provision: bool,
     pub max_extract_mib: u64,
     pub max_extract_files: usize,
     pub max_extract_depth: usize,
@@ -591,6 +593,9 @@ fn default_image_converter() -> PathBuf {
 fn default_avif_quality() -> u8 {
     65
 }
+fn default_auto_provision() -> bool {
+    true
+}
 
 fn default_api_request_timeout_secs() -> u64 {
     120
@@ -623,6 +628,7 @@ pub struct PersistentSettingsPatch {
     pub rqbit_api: Option<String>,
     pub rqbit_credentials_secret_id: Option<Option<uuid::Uuid>>,
     pub seven_zip: Option<PathBuf>,
+    pub auto_provision: Option<bool>,
     pub max_extract_mib: Option<u64>,
     pub max_extract_files: Option<usize>,
     pub max_extract_depth: Option<usize>,
@@ -668,6 +674,7 @@ impl PersistentSettings {
             rqbit_api: config.rqbit_api.clone(),
             rqbit_credentials_secret_id: config.rqbit_credentials_secret_id,
             seven_zip: config.seven_zip.clone(),
+            auto_provision: config.auto_provision,
             max_extract_mib: config.max_extract_mib,
             max_extract_files: config.max_extract_files,
             max_extract_depth: config.max_extract_depth,
@@ -712,6 +719,7 @@ impl PersistentSettings {
         config.rqbit_api = self.rqbit_api.clone();
         config.rqbit_credentials_secret_id = self.rqbit_credentials_secret_id;
         config.seven_zip = self.seven_zip.clone();
+        config.auto_provision = self.auto_provision;
         config.max_extract_mib = self.max_extract_mib;
         config.max_extract_files = self.max_extract_files;
         config.max_extract_depth = self.max_extract_depth;
@@ -785,6 +793,9 @@ impl PersistentSettings {
         }
         if let Some(value) = patch.seven_zip {
             self.seven_zip = value;
+        }
+        if let Some(value) = patch.auto_provision {
+            self.auto_provision = value;
         }
         if let Some(value) = patch.max_extract_mib {
             self.max_extract_mib = value;

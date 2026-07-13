@@ -180,7 +180,6 @@ async fn cleanup_directory(root: &Path, cutoff: DateTime<Utc>) -> Result<(u64, u
     Ok((files, bytes))
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration as StdDuration, SystemTime};
@@ -196,12 +195,14 @@ mod tests {
     #[test]
     fn cleanup_policies_reject_unbounded_or_zero_retention() {
         assert!(CleanupPolicies::default().validate().is_ok());
-        assert!(CleanupPolicies {
-            temporary_max_age_days: 0,
-            ..CleanupPolicies::default()
-        }
-        .validate()
-        .is_err());
+        assert!(
+            CleanupPolicies {
+                temporary_max_age_days: 0,
+                ..CleanupPolicies::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -223,7 +224,9 @@ mod tests {
 
         let old = SystemTime::now() - StdDuration::from_secs(3 * 24 * 60 * 60);
         let temporary_file = root.join("Temporary/old.part");
-        tokio::fs::write(&temporary_file, b"temporary").await.unwrap();
+        tokio::fs::write(&temporary_file, b"temporary")
+            .await
+            .unwrap();
         std::fs::File::open(&temporary_file)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(old))

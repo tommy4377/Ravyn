@@ -24,20 +24,15 @@ pub async fn move_to_trash(
     }
     security::validate_output_path(config, &entry.path)?;
     validate_regular_file(&entry.path)?;
-    let root = config.effective_library_root().ok_or_else(|| {
-        RavynError::Conflict("library trash requires RAVYN_LIBRARY_ROOT".into())
-    })?;
+    let root = config
+        .effective_library_root()
+        .ok_or_else(|| RavynError::Conflict("library trash requires RAVYN_LIBRARY_ROOT".into()))?;
     let trash_root = root.join("Trash");
     tokio::fs::create_dir_all(&trash_root).await?;
     let target = unique_trash_path(&trash_root, id, &entry.filename).await?;
     move_file(&entry.path, &target).await?;
     match repository
-        .update_library_state(
-            id,
-            LibraryEntryState::Trashed,
-            &entry.path,
-            Some(&target),
-        )
+        .update_library_state(id, LibraryEntryState::Trashed, &entry.path, Some(&target))
         .await
     {
         Ok(updated) => Ok(updated),
@@ -66,9 +61,10 @@ pub async fn restore(
             "only trashed library entries can be restored".into(),
         ));
     }
-    let trash_path = entry.trash_path.as_deref().ok_or_else(|| {
-        RavynError::Internal("trashed library entry has no trash path".into())
-    })?;
+    let trash_path = entry
+        .trash_path
+        .as_deref()
+        .ok_or_else(|| RavynError::Internal("trashed library entry has no trash path".into()))?;
     security::validate_output_path(config, trash_path)?;
     security::validate_output_path(config, &entry.path)?;
     validate_regular_file(trash_path)?;
@@ -105,11 +101,7 @@ pub async fn restore(
 }
 
 /// Permanently removes the payload and its database record.
-pub async fn purge(
-    config: &Config,
-    repository: &Repository,
-    id: uuid::Uuid,
-) -> Result<()> {
+pub async fn purge(config: &Config, repository: &Repository, id: uuid::Uuid) -> Result<()> {
     let entry = repository.get_library_entry(id).await?;
     let payload = if entry.state == LibraryEntryState::Trashed {
         entry.trash_path.clone()
@@ -337,7 +329,10 @@ mod tests {
             .unwrap();
 
         assert_ne!(old.id, new.id);
-        assert_eq!(repository.get_library_entry(old.id).await.unwrap().state, LibraryEntryState::Trashed);
+        assert_eq!(
+            repository.get_library_entry(old.id).await.unwrap().state,
+            LibraryEntryState::Trashed
+        );
         assert!(restore(&config, &repository, old.id).await.is_err());
         assert_eq!(tokio::fs::read(&path).await.unwrap(), b"new");
     }

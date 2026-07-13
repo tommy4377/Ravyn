@@ -487,121 +487,6 @@ pub(crate) fn row_to_library_entry(row: SqliteRow) -> Result<LibraryEntry> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn repository() -> (tempfile::TempDir, Repository) {
-        let temporary = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}", temporary.path().join("test.sqlite3").display());
-        let repository = Repository::connect(&url).await.unwrap();
-        (temporary, repository)
-    }
-
-    fn entry(path: PathBuf) -> NewLibraryEntry {
-        NewLibraryEntry {
-            job_id: None,
-            source_url: "https://example.test/manual.pdf".into(),
-            mirrors: Vec::new(),
-            sha256: Some("AA".repeat(32)),
-            size_bytes: Some(42),
-            filename: "manual.pdf".into(),
-            path,
-            category: LibraryCategory::Documents,
-            mime_type: Some("application/pdf".into()),
-            media_metadata: serde_json::json!({}),
-            torrent_metadata: serde_json::json!({}),
-            tags: vec!["manual".into()],
-            trust: None,
-            imported: false,
-            downloaded_at: Utc::now(),
-        }
-    }
-
-    #[tokio::test]
-    async fn upsert_search_and_hash_lookup_round_trip() {
-        let (temporary, repository) = repository().await;
-        let path = temporary.path().join("manual.pdf");
-        let inserted = repository
-            .upsert_library_entry(entry(path.clone()))
-            .await
-            .unwrap();
-
-        let by_hash = repository
-            .find_active_library_entry_by_sha256(&"aa".repeat(32))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(by_hash.id, inserted.id);
-
-        let listed = repository
-            .list_library_entries(
-                &LibraryListFilter {
-                    search: Some("manual".into()),
-                    category: Some(LibraryCategory::Documents),
-                    state: Some(LibraryEntryState::Active),
-                    tag: Some("manual".into()),
-                    ..Default::default()
-                },
-                0,
-                10,
-            )
-            .await
-            .unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].path, path);
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_sha256_values_before_persisting() {
-        let (temporary, repository) = repository().await;
-        let mut invalid = entry(temporary.path().join("invalid.bin"));
-        invalid.sha256 = Some("not-a-sha256".into());
-
-        assert!(repository.upsert_library_entry(invalid).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn duplicate_candidates_match_hash_size_or_case_insensitive_filename() {
-        let (temporary, repository) = repository().await;
-        let path = temporary.path().join("manual.pdf");
-        repository.upsert_library_entry(entry(path)).await.unwrap();
-
-        let matches = repository
-            .find_library_duplicate_candidates(None, Some(42), Some("MANUAL.PDF"), 10)
-            .await
-            .unwrap();
-        assert_eq!(matches.len(), 1);
-        assert!(repository
-            .find_library_duplicate_candidates(None, None, None, 10)
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn state_and_counter_updates_are_persistent() {
-        let (temporary, repository) = repository().await;
-        let path = temporary.path().join("manual.pdf");
-        let inserted = repository
-            .upsert_library_entry(entry(path.clone()))
-            .await
-            .unwrap();
-        let trash_path = temporary.path().join("Trash/manual.pdf");
-        let updated = repository
-            .update_library_state(
-                inserted.id,
-                LibraryEntryState::Trashed,
-                &trash_path,
-                Some(&trash_path),
-            )
-            .await
-            .unwrap();
-        assert_eq!(updated.state, LibraryEntryState::Trashed);
-        assert_eq!(repository.increment_stat_counter("saved_bytes", 7).await.unwrap(), 7);
-        assert_eq!(repository.increment_stat_counter("saved_bytes", 5).await.unwrap(), 12);
-    }
-}
-
 impl Repository {
     pub async fn load_cleanup_policies(
         &self,
@@ -740,7 +625,8 @@ async fn activity_buckets(
     rows.into_iter()
         .map(|row| {
             Ok(ActivityBucket {
-                period: row.try_get::<Option<String>, _>("period")?.unwrap_or_default(),
+                period: row.try_get::<Option<String>, _>("period")?
+                    .unwrap_or_default(),
                 files: u64::try_from(row.try_get::<i64, _>("files")?)
                     .map_err(|_| RavynError::Internal("negative activity count".into()))?,
                 bytes: u64::try_from(row.try_get::<i64, _>("bytes")?)
@@ -753,4 +639,120 @@ async fn activity_buckets(
 fn counter(values: &std::collections::HashMap<String, i64>, key: &str) -> Result<u64> {
     u64::try_from(values.get(key).copied().unwrap_or_default())
         .map_err(|_| RavynError::Internal(format!("stat counter {key} is negative")))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn repository() -> (tempfile::TempDir, Repository) {
+        let temporary = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", temporary.path().join("test.sqlite3").display());
+        let repository = Repository::connect(&url).await.unwrap();
+        (temporary, repository)
+    }
+
+    fn entry(path: PathBuf) -> NewLibraryEntry {
+        NewLibraryEntry {
+            job_id: None,
+            source_url: "https://example.test/manual.pdf".into(),
+            mirrors: Vec::new(),
+            sha256: Some("AA".repeat(32)),
+            size_bytes: Some(42),
+            filename: "manual.pdf".into(),
+            path,
+            category: LibraryCategory::Documents,
+            mime_type: Some("application/pdf".into()),
+            media_metadata: serde_json::json!({}),
+            torrent_metadata: serde_json::json!({}),
+            tags: vec!["manual".into()],
+            trust: None,
+            imported: false,
+            downloaded_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_search_and_hash_lookup_round_trip() {
+        let (temporary, repository) = repository().await;
+        let path = temporary.path().join("manual.pdf");
+        let inserted = repository
+            .upsert_library_entry(entry(path.clone()))
+            .await
+            .unwrap();
+
+        let by_hash = repository
+            .find_active_library_entry_by_sha256(&"aa".repeat(32))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_hash.id, inserted.id);
+
+        let listed = repository
+            .list_library_entries(
+                &LibraryListFilter {
+                    search: Some("manual".into()),
+                    category: Some(LibraryCategory::Documents),
+                    state: Some(LibraryEntryState::Active),
+                    tag: Some("manual".into()),
+                    ..Default::default()
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, path);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_sha256_values_before_persisting() {
+        let (temporary, repository) = repository().await;
+        let mut invalid = entry(temporary.path().join("invalid.bin"));
+        invalid.sha256 = Some("not-a-sha256".into());
+
+        assert!(repository.upsert_library_entry(invalid).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicate_candidates_match_hash_size_or_case_insensitive_filename() {
+        let (temporary, repository) = repository().await;
+        let path = temporary.path().join("manual.pdf");
+        repository.upsert_library_entry(entry(path)).await.unwrap();
+
+        let matches = repository
+            .find_library_duplicate_candidates(None, Some(42), Some("MANUAL.PDF"), 10)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(repository
+            .find_library_duplicate_candidates(None, None, None, 10)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn state_and_counter_updates_are_persistent() {
+        let (temporary, repository) = repository().await;
+        let path = temporary.path().join("manual.pdf");
+        let inserted = repository
+            .upsert_library_entry(entry(path.clone()))
+            .await
+            .unwrap();
+        let trash_path = temporary.path().join("Trash/manual.pdf");
+        let updated = repository
+            .update_library_state(
+                inserted.id,
+                LibraryEntryState::Trashed,
+                &trash_path,
+                Some(&trash_path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.state, LibraryEntryState::Trashed);
+        assert_eq!(repository.increment_stat_counter("saved_bytes", 7).await.unwrap(), 7);
+        assert_eq!(repository.increment_stat_counter("saved_bytes", 5).await.unwrap(), 12);
+    }
 }

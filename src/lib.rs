@@ -25,6 +25,8 @@ pub struct Ravyn {
     pub base_config: Arc<Config>,
     pub repository: Repository,
     pub manager: Arc<JobManager>,
+    /// Cancellation token for background provisioning tasks.
+    pub provisioning_cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl Ravyn {
@@ -61,6 +63,23 @@ impl Ravyn {
         }
         config.prepare_directories().await?;
         apply_managed_engine_paths(&mut config).await?;
+        let provisioning_cancellation = tokio_util::sync::CancellationToken::new();
+
+        // Spawn async provisioning – does not block startup.
+        if config.auto_provision {
+            let provision_config = config.clone();
+            let provision_repo = repository.clone();
+            let cancellation = provisioning_cancellation.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    ensure_provisioned_components(&provision_config, &provision_repo, &cancellation)
+                        .await
+                {
+                    tracing::warn!(%error, "background component provisioning encountered errors");
+                }
+            });
+        }
+
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);
         Ok(Self {
@@ -68,6 +87,7 @@ impl Ravyn {
             base_config,
             repository,
             manager,
+            provisioning_cancellation,
         })
     }
 }
@@ -89,6 +109,127 @@ async fn apply_managed_engine_paths(config: &mut Config) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Provision all components required by the user's feature selections.
+///
+/// Runs in the background at startup.  Never blocks the main bootstrap.
+async fn ensure_provisioned_components(
+    config: &Config,
+    repository: &Repository,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    use services::components::{
+        ComponentId, ComponentManager, ComponentState, PersistedComponent,
+        effective_feature_set, required_components_for_features,
+    };
+
+    let records = repository.load_component_records().await?;
+    let (profile, features_json) = match repository.load_feature_selections().await? {
+        Some((profile, features)) => (profile, features),
+        None => {
+            // No selections yet – default to minimal (no engines needed).
+            return Ok(());
+        }
+    };
+
+    let features = effective_feature_set(profile, &features_json).unwrap_or_default();
+    let required = required_components_for_features(&features);
+
+    if required.is_empty() {
+        return Ok(());
+    }
+
+    let manager = ComponentManager::new(
+        &config.data_dir,
+        std::sync::Arc::new(services::components::BuiltInManifestProvider::empty()),
+        cancellation.clone(),
+    );
+
+    for component in required {
+        let default = std::path::Path::new(component.engine_name());
+        let config_path = match component {
+            ComponentId::Ytdlp => &config.ytdlp,
+            ComponentId::Ffmpeg => &config.ffmpeg,
+            ComponentId::Rqbit => &config.rqbit,
+            ComponentId::SevenZip => &config.seven_zip,
+        };
+
+        // Skip if user provided a custom path.
+        if config_path != default {
+            continue;
+        }
+
+        // Skip if already installed.
+        if let Some(record) = records.get(&component) {
+            if record.state.is_operational() {
+                continue;
+            }
+        }
+
+        // Skip if engine manager already has a verified binary.
+        if manager
+            .engine_manager()
+            .active_path(component.engine_name())
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+
+        tracing::info!(
+            component = component.engine_name(),
+            "provisioning managed engine in background"
+        );
+
+        // Attempt installation; failures are logged but do not block.
+        match manager.install_component(component, config).await {
+            Ok(path) => {
+                tracing::info!(
+                    component = component.engine_name(),
+                    path = %path.display(),
+                    "managed engine installed successfully"
+                );
+                let record = PersistedComponent {
+                    component,
+                    state: ComponentState::Installed,
+                    managed_version: None,
+                    managed_path: Some(path),
+                    custom_path: None,
+                    error_message: None,
+                    last_checked_at: Some(chrono::Utc::now()),
+                    install_started_at: None,
+                    install_completed_at: Some(chrono::Utc::now()),
+                };
+                if let Err(error) = repository.save_component_record(&record).await {
+                    tracing::warn!(%error, component = component.engine_name(), "failed to persist component state");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    component = component.engine_name(),
+                    "managed engine provisioning failed"
+                );
+                let record = PersistedComponent {
+                    component,
+                    state: ComponentState::Failed,
+                    managed_version: None,
+                    managed_path: None,
+                    custom_path: None,
+                    error_message: Some(error.to_string()),
+                    last_checked_at: Some(chrono::Utc::now()),
+                    install_started_at: None,
+                    install_completed_at: None,
+                };
+                if let Err(save_error) = repository.save_component_record(&record).await {
+                    tracing::warn!(%save_error, component = component.engine_name(), "failed to persist component failure state");
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -294,7 +294,12 @@ async fn automatic_library_organization_uses_detected_file_content() {
     )
     .await;
 
-    assert_eq!(completed.status, JobStatus::Completed, "{:?}", completed.error);
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
     let organized = temp.path().join("Ravyn/Documents/payload.bin");
     assert_eq!(tokio::fs::read(&organized).await.unwrap(), body);
     assert!(
@@ -351,16 +356,15 @@ async fn checksum_and_post_transfer_lifecycle_use_an_uncancelled_job_token() {
     );
     let library = app
         .repository
-        .list_library_entries(
-            &ravyn::storage::LibraryListFilter::default(),
-            0,
-            10,
-        )
+        .list_library_entries(&ravyn::storage::LibraryListFilter::default(), 0, 10)
         .await
         .unwrap();
     assert_eq!(library.len(), 1);
     assert_eq!(library[0].job_id, Some(job.id));
-    assert_eq!(library[0].sha256.as_deref(), completed.expected_sha256.as_deref());
+    assert_eq!(
+        library[0].sha256.as_deref(),
+        completed.expected_sha256.as_deref()
+    );
     app.manager.shutdown().await;
 }
 
@@ -385,7 +389,12 @@ async fn verified_library_cache_reuse_completes_without_a_second_transfer() {
         Duration::from_secs(20),
     )
     .await;
-    assert_eq!(completed.status, JobStatus::Completed, "{:?}", completed.error);
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
 
     let second_server = TestServer::start(body.clone(), "\"v2\"", Duration::ZERO).await;
     let mut request = create_request(second_server.url(), Some(expected));
