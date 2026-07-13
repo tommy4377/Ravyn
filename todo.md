@@ -133,13 +133,14 @@ Converted call sites: `EngineManifest::artifact()` (platform unsupported), `Sign
 
 ## ❌ NOT IMPLEMENTED — still needs to be built
 
-### 1. The embedded manifest is still empty
+### 🔶 1. The embedded manifest is now populated for 3 of 4 engines
 
-`assets/engines/stable.json` contains `"artifacts": []`. On a clean installation Ravyn cannot install yt-dlp, FFmpeg, rqbit, or 7-Zip.
+`assets/engines/stable.json` now carries real, independently verified `x86_64-pc-windows-msvc` artifacts for `yt-dlp` (2026.07.04, raw `yt-dlp.exe` from the official GitHub release), `rqbit` (9.0.0-beta.2, raw `rqbit.exe`), and `ffmpeg` (a pinned BtbN static-build release, `autobuild-2026-07-13-14-11`, not the rolling `latest` tag). Every URL, size, and SHA-256 was checked against the real download (GitHub's server-computed asset digest, cross-checked with a local `Get-FileHash` after download) before being written into the manifest, and `embedded_manifest_parses_validates_and_covers_every_windows_engine` (`src/services/components.rs`) asserts the embedded manifest actually parses, validates, and resolves an artifact for each of these three engines on the Windows target at test time.
 
-**Needs:**
-* engine name, version, Rust target, HTTPS URL, filename, exact size, SHA-256, declared capabilities for every supported target;
-* decision on how to distribute FFmpeg and 7-Zip (single executable vs archive + extraction).
+**Resolved:** the FFmpeg/archive distribution question — `EngineArtifact` gained `archive_member`/`member_sha256` fields (`src/services/engines.rs`), and `EngineManager::install_verified()`/`download_and_install()` now extract and checksum-verify a single named member out of a downloaded ZIP (via the new `zip` crate dependency, run on a blocking task) instead of requiring the artifact to already be a bare executable. The activation checksum stored in `active.json` is the *member's* hash, not the archive's. FFmpeg's manifest entry uses this: the artifact `sha256`/`size_bytes` describe the 158 MB build archive, and `archive_member`/`member_sha256` point at and verify the extracted `bin/ffmpeg.exe` (138 MB) inside it.
+
+**Still missing:**
+* 7-Zip has no manifest entry. The official distribution offers no single-file Windows binary that both (a) requires no separate 7-Zip installation to unpack and (b) supports the ZIP format used by the item-11 capability probe: `7zr.exe` (the one genuinely raw GitHub release asset) only reads `.7z` archives, while the full `7za.exe` (which reads ZIP) ships only inside a `.7z`-compressed "Extra" package — a circular dependency until this crate can also read `.7z`, or the capability probe is changed to hand-build a minimal `.7z` test archive instead of a `.zip` one.
 
 ---
 
@@ -222,7 +223,7 @@ before the Tauri build. Windows tests on a clean machine (install → restart �
 
 The correct order now is:
 
-1. **Populate the embedded manifest with real artifacts.**
+1. ~~Populate the embedded manifest with real artifacts.~~ ✅ (partial: yt-dlp/rqbit/ffmpeg done, 7-Zip still blocked on a format decision)
 2. **Add manifest generation, checksum, and signing pipeline.**
 3. ~~Correct engine activation after provisioning via controlled restart.~~ ✅
 4. ~~Implement `RqbitProcessManager` and HTTP health check.~~ ✅

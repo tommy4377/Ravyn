@@ -1744,6 +1744,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_manifest_parses_validates_and_covers_every_windows_engine() {
+        let provider = BuiltInManifestProvider::embedded().unwrap();
+        let manifest = provider.load().unwrap().unwrap();
+        let target = "x86_64-pc-windows-msvc";
+        for engine in [
+            ComponentId::Ytdlp.engine_name(),
+            ComponentId::Rqbit.engine_name(),
+            ComponentId::Ffmpeg.engine_name(),
+        ] {
+            assert!(
+                manifest.artifact(engine, target).is_ok(),
+                "expected an embedded {engine} artifact for {target}"
+            );
+        }
+    }
+
+    #[test]
     fn local_manifest_requires_a_valid_release_signature() {
         use ed25519_dalek::{Signer, SigningKey};
 
