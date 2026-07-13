@@ -94,6 +94,222 @@ pub(super) fn schemas() -> Value {
                 {"properties":{"items":{"type":"array","items":{"$ref":"#/components/schemas/JobOutput"}}}}
             ]
         },
+        "LibraryEntry": {
+            "type":"object",
+            "required":["id","source_url","mirrors","path","filename","category","media_metadata","torrent_metadata","tags","state","imported","downloaded_at","created_at","updated_at"],
+            "properties": {
+                "id":{"type":"string","format":"uuid"},
+                "job_id":{"type":["string","null"],"format":"uuid"},
+                "source_url":{"type":"string"},
+                "mirrors":{"type":"array","items":{"type":"string"}},
+                "sha256":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{64}$"},
+                "size_bytes":{"type":["integer","null"],"minimum":0},
+                "path":{"type":"string"},
+                "filename":{"type":"string"},
+                "category":{"type":"string","enum":["downloads","videos","music","documents","images","archives","torrents","playlists","temporary","other"]},
+                "mime_type":{"type":["string","null"]},
+                "media_metadata":{},
+                "torrent_metadata":{},
+                "tags":{"type":"array","items":{"type":"string"}},
+                "trust":{"oneOf":[{"$ref":"#/components/schemas/TrustReport"},{"type":"null"}]},
+                "state":{"type":"string","enum":["active","trashed","missing"]},
+                "trash_path":{"type":["string","null"]},
+                "imported":{"type":"boolean"},
+                "downloaded_at":{"type":"string","format":"date-time"},
+                "created_at":{"type":"string","format":"date-time"},
+                "updated_at":{"type":"string","format":"date-time"}
+            }
+        },
+        "LibraryPage": {
+            "allOf":[
+                {"$ref":"#/components/schemas/GenericPage"},
+                {"properties":{"items":{"type":"array","items":{"$ref":"#/components/schemas/LibraryEntry"}}}}
+            ]
+        },
+        "DuplicateCandidate": {
+            "type":"object",
+            "required":["entry","matches"],
+            "properties": {
+                "entry":{"$ref":"#/components/schemas/LibraryEntry"},
+                "matches":{"type":"array","items":{"type":"string","enum":["sha256","size_bytes","filename"]}}
+            }
+        },
+        "DuplicateCandidateList": {
+            "type":"array",
+            "items":{"$ref":"#/components/schemas/DuplicateCandidate"}
+        },
+        "DeleteLibraryResult": {
+            "type":"object",
+            "required":["purged","entry"],
+            "properties": {
+                "purged":{"type":"boolean"},
+                "entry":{"oneOf":[{"$ref":"#/components/schemas/LibraryEntry"},{"type":"null"}]}
+            }
+        },
+        "TemplatePreview": {
+            "type":"object",
+            "required":["rendered","missing_variables"],
+            "properties": {
+                "rendered":{"type":"string"},
+                "missing_variables":{"type":"array","items":{"type":"string"}}
+            }
+        },
+        "LibraryImportStatus": {
+            "type":"object",
+            "required":["running","scanned","imported","duplicates","skipped","errors"],
+            "properties": {
+                "run_id":{"type":["string","null"],"format":"uuid"},
+                "running":{"type":"boolean"},
+                "root":{"type":["string","null"]},
+                "scanned":{"type":"integer","minimum":0},
+                "imported":{"type":"integer","minimum":0},
+                "duplicates":{"type":"integer","minimum":0},
+                "skipped":{"type":"integer","minimum":0},
+                "errors":{"type":"array","items":{"type":"string"}},
+                "started_at":{"type":["string","null"],"format":"date-time"},
+                "completed_at":{"type":["string","null"],"format":"date-time"}
+            }
+        },
+        "VerifyLibraryReport": {
+            "type":"object",
+            "required":["checked","missing"],
+            "properties": {
+                "checked":{"type":"integer","minimum":0},
+                "missing":{"type":"integer","minimum":0}
+            }
+        },
+        "RelocationReport": {
+            "type":"object",
+            "required":["scanned","repaired","unmatched"],
+            "properties": {
+                "scanned":{"type":"integer","minimum":0},
+                "repaired":{"type":"integer","minimum":0},
+                "unmatched":{"type":"integer","minimum":0}
+            }
+        },
+        "DownloadPreset": {
+            "type":"object",
+            "required":["id","name","payload","created_at","updated_at"],
+            "properties": {
+                "id":{"type":"string","format":"uuid"},
+                "name":{"type":"string"},
+                "payload":{"type":"object","additionalProperties":true},
+                "created_at":{"type":"string","format":"date-time"},
+                "updated_at":{"type":"string","format":"date-time"}
+            }
+        },
+        "DownloadPresetList": {
+            "type":"array",
+            "items":{"$ref":"#/components/schemas/DownloadPreset"}
+        },
+        "BasketItem": {
+            "type":"object",
+            "required":["id","position","request","created_at","updated_at"],
+            "properties": {
+                "id":{"type":"string","format":"uuid"},
+                "position":{"type":"integer","minimum":0},
+                "request":{"type":"object","additionalProperties":true},
+                "preset_id":{"type":["string","null"],"format":"uuid"},
+                "created_at":{"type":"string","format":"date-time"},
+                "updated_at":{"type":"string","format":"date-time"}
+            }
+        },
+        "BasketItemList": {
+            "type":"array",
+            "items":{"$ref":"#/components/schemas/BasketItem"}
+        },
+        "BasketStartResult": {
+            "type":"object",
+            "required":["started","failed","items"],
+            "properties": {
+                "started":{"type":"integer","minimum":0},
+                "failed":{"type":"integer","minimum":0},
+                "items":{"type":"array","items":{"type":"object","additionalProperties":true}}
+            }
+        },
+        "UserProfile": {
+            "type":"object",
+            "required":["id","name","settings_patch","active","created_at","updated_at"],
+            "properties": {
+                "id":{"type":"string","format":"uuid"},
+                "name":{"type":"string"},
+                "settings_patch":{"type":"object","additionalProperties":true},
+                "default_preset_id":{"type":["string","null"],"format":"uuid"},
+                "active":{"type":"boolean"},
+                "created_at":{"type":"string","format":"date-time"},
+                "updated_at":{"type":"string","format":"date-time"}
+            }
+        },
+        "UserProfileList": {
+            "type":"array",
+            "items":{"$ref":"#/components/schemas/UserProfile"}
+        },
+        "ActivateProfileResponse": {
+            "type":"object",
+            "required":["profile","restart_required"],
+            "properties": {
+                "profile":{"$ref":"#/components/schemas/UserProfile"},
+                "restart_required":{"type":"boolean"}
+            }
+        },
+        "TrustFactor": {
+            "type":"object",
+            "required":["code","label","points","satisfied","explanation"],
+            "properties": {
+                "code":{"type":"string"},
+                "label":{"type":"string"},
+                "points":{"type":"integer"},
+                "satisfied":{"type":"boolean"},
+                "explanation":{"type":"string"}
+            }
+        },
+        "TrustReport": {
+            "type":"object",
+            "required":["score","level","factors"],
+            "properties": {
+                "score":{"type":"integer","minimum":0,"maximum":100},
+                "level":{"type":"string"},
+                "factors":{"type":"array","items":{"$ref":"#/components/schemas/TrustFactor"}}
+            }
+        },
+        "CleanupPolicies": {
+            "type":"object",
+            "required":["temporary_max_age_days","trash_retention_days","log_retention_days","cache_retention_days"],
+            "properties": {
+                "temporary_max_age_days":{"type":"integer","minimum":1,"maximum":3650},
+                "trash_retention_days":{"type":"integer","minimum":1,"maximum":3650},
+                "log_retention_days":{"type":"integer","minimum":1,"maximum":3650},
+                "cache_retention_days":{"type":"integer","minimum":1,"maximum":3650}
+            }
+        },
+        "CleanupReport": {
+            "type":"object",
+            "required":["temporary_files_removed","temporary_bytes_removed","cache_files_removed","cache_bytes_removed","trash_entries_purged","job_logs_removed"],
+            "properties": {
+                "temporary_files_removed":{"type":"integer","minimum":0},
+                "temporary_bytes_removed":{"type":"integer","minimum":0},
+                "cache_files_removed":{"type":"integer","minimum":0},
+                "cache_bytes_removed":{"type":"integer","minimum":0},
+                "trash_entries_purged":{"type":"integer","minimum":0},
+                "job_logs_removed":{"type":"integer","minimum":0}
+            }
+        },
+        "PersonalStatistics": {
+            "type":"object",
+            "required":["total_files","total_downloaded_bytes","active_storage_bytes","trashed_storage_bytes","average_speed_bps","saved_bandwidth_bytes","duplicate_avoidance_count","categories","monthly_activity","yearly_activity"],
+            "properties": {
+                "total_files":{"type":"integer","minimum":0},
+                "total_downloaded_bytes":{"type":"integer","minimum":0},
+                "active_storage_bytes":{"type":"integer","minimum":0},
+                "trashed_storage_bytes":{"type":"integer","minimum":0},
+                "average_speed_bps":{"type":"integer","minimum":0},
+                "saved_bandwidth_bytes":{"type":"integer","minimum":0},
+                "duplicate_avoidance_count":{"type":"integer","minimum":0},
+                "categories":{"type":"object","additionalProperties":{"type":"object","additionalProperties":true}},
+                "monthly_activity":{"type":"array","items":{"type":"object","additionalProperties":true}},
+                "yearly_activity":{"type":"array","items":{"type":"object","additionalProperties":true}}
+            }
+        },
         "SegmentRecord": {
             "type":"object",
             "required":["index","start","end","downloaded","completed"],

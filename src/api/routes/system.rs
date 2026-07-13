@@ -415,6 +415,20 @@ pub(super) async fn system_capabilities(
             "concurrent_multi_source",
             "speculative_http",
             "active_range_splitting",
+            "organized_download_library",
+            "library_content_classification",
+            "library_category_overrides",
+            "library_duplicate_candidates",
+            "download_presets",
+            "filename_templates",
+            "local_cache_reuse",
+            "library_import_and_relocation",
+            "download_trash",
+            "download_basket",
+            "user_profiles",
+            "explainable_trust_score",
+            "cleanup_policies",
+            "personal_statistics",
         ],
         disabled_features: vec!["native_tls", "http3"],
         platform: std::env::consts::OS,
@@ -436,6 +450,9 @@ pub(super) fn settings_response(
     let mut application = std::collections::BTreeMap::new();
     for key in [
         "download_dir",
+        "library_root",
+        "library_auto_organize",
+        "library_category_overrides",
         "max_active",
         "max_segments",
         "segment_threshold_mib",
@@ -509,6 +526,9 @@ pub(super) async fn get_settings(State(s): State<ApiState>) -> Result<Json<Setti
 
 pub(super) fn settings_patch_requires_restart(patch: &PersistentSettingsPatch) -> bool {
     patch.download_dir.is_some()
+        || patch.library_root.is_some()
+        || patch.library_auto_organize.is_some()
+        || patch.library_category_overrides.is_some()
         || patch.max_segments.is_some()
         || patch.segment_threshold_mib.is_some()
         || patch.max_connections_per_host.is_some()
@@ -606,6 +626,9 @@ fn single_field_patches(
     }
     explode!(
         download_dir,
+        library_root,
+        library_auto_organize,
+        library_category_overrides,
         max_active,
         max_segments,
         segment_threshold_mib,

@@ -7,11 +7,19 @@ use uuid::Uuid;
 use crate::{
     core::{
         events::Event,
-        models::{CreateJob, Job, JobKind, JobStatus, UpdateJob},
+        models::{
+            CreateJob, DuplicatePolicy, Job, JobKind, JobStatus, OutputSourceKind, OutputType,
+            UpdateJob,
+        },
     },
     error::{RavynError, Result},
+    storage::NewLibraryEntry,
     services::{
         checksum, dedup,
+        library::{
+            LibraryCategory, category_directory, classify_name_with_overrides,
+        },
+        presets,
         rules::{self},
         security,
     },
@@ -19,8 +27,68 @@ use crate::{
 
 use crate::core::manager::{JobManager, validate_tags, validate_torrent_options};
 
+fn automatic_library_destination(
+    config: &crate::config::Config,
+    request: &CreateJob,
+) -> Option<std::path::PathBuf> {
+    let root = config
+        .library_auto_organize
+        .then(|| config.effective_library_root())
+        .flatten()?;
+    let candidate = request.filename.as_ref().map(std::path::PathBuf::from).or_else(|| {
+        url::Url::parse(&request.source).ok().and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+    });
+    let category = candidate
+        .as_deref()
+        .and_then(|path| {
+            classify_name_with_overrides(path, &config.library_category_overrides)
+        })
+        .unwrap_or(match request.kind {
+            JobKind::Media
+                if request
+                    .options
+                    .media
+                    .as_ref()
+                    .is_some_and(|media| media.audio_only) =>
+            {
+                LibraryCategory::Music
+            }
+            JobKind::Media
+                if request
+                    .options
+                    .media
+                    .as_ref()
+                    .is_some_and(|media| media.playlist) =>
+            {
+                LibraryCategory::Playlists
+            }
+            JobKind::Media => LibraryCategory::Videos,
+            JobKind::Torrent => LibraryCategory::Torrents,
+            JobKind::Http => LibraryCategory::Downloads,
+        });
+    Some(category_directory(&root, category))
+}
+
 impl JobManager {
     pub async fn create(&self, mut request: CreateJob) -> Result<Job> {
+        if request.preset_id.is_none() {
+            request.preset_id = self
+                .repository
+                .get_active_user_profile()
+                .await?
+                .and_then(|profile| profile.default_preset_id);
+        }
+        let preset_subdirectory = if let Some(preset_id) = request.preset_id {
+            let preset = self.repository.get_download_preset(preset_id).await?;
+            presets::apply(&preset, &mut request)?
+        } else {
+            None
+        };
         let extension = url::Url::parse(&request.source).ok().and_then(|url| {
             std::path::Path::new(url.path())
                 .extension()
@@ -29,6 +97,9 @@ impl JobManager {
         });
         let loaded_rules = self.repository.list_rules().await?;
         rules::apply_matching(&loaded_rules, &mut request, None, extension.as_deref());
+        if request.duplicate_policy == DuplicatePolicy::Overwrite {
+            request.options.overwrite = true;
+        }
         validate_tags(&request.options.tags)?;
         validate_filename(request.filename.as_deref())?;
         if let Some(expected) = request.expected_sha256.as_deref() {
@@ -136,10 +207,21 @@ impl JobManager {
                 }
             }
         }
-        let destination = request
+        let automatic_destination = if request.destination.is_none() {
+            automatic_library_destination(&self.config, &request)
+        } else {
+            None
+        };
+        request.options.library_auto_destination = automatic_destination.is_some();
+        let mut destination = request
             .destination
             .clone()
+            .or(automatic_destination)
             .unwrap_or_else(|| self.config.effective_download_dir());
+        if let Some(subdirectory) = preset_subdirectory.as_ref() {
+            destination = destination.join(subdirectory);
+        }
+        request.destination = Some(destination.clone());
         security::validate_output_path(&self.config, &destination)?;
         if let Some(existing) = dedup::resolve(
             &self.repository,
@@ -150,14 +232,170 @@ impl JobManager {
         {
             return Ok(existing);
         }
+        let cache_candidate = match dedup::cache_candidate(&self.repository, &request).await? {
+            Some(entry) => match self.cache_entry_is_verified(&entry, &request).await {
+                Ok(true) => Some(entry),
+                Ok(false) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        entry_id = %entry.id,
+                        "local cache candidate could not be verified and will not be reused"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        if request.options.library_auto_destination {
+            if let (Some(entry), Some(root)) = (
+                cache_candidate.as_ref(),
+                self.config.effective_library_root(),
+            ) {
+                let mut cache_destination = category_directory(&root, entry.category);
+                if let Some(subdirectory) = preset_subdirectory.as_ref() {
+                    cache_destination = cache_destination.join(subdirectory);
+                }
+                security::validate_output_path(&self.config, &cache_destination)?;
+                request.destination = Some(cache_destination);
+            }
+        }
         let tags = request.options.tags.clone();
         let job = self
             .repository
             .insert_job(request, self.config.effective_download_dir())
             .await?;
         self.repository.attach_tags(job.id, &tags).await?;
+        if let Some(entry) = cache_candidate {
+            match self.materialize_cached_entry(job.clone(), entry).await {
+                Ok(completed) => return Ok(completed),
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = self
+                        .repository
+                        .set_status(job.id, JobStatus::Failed, Some(&message))
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
         self.events.publish(Event::QueueChanged);
         Ok(job)
+    }
+
+    async fn cache_entry_is_verified(
+        &self,
+        entry: &crate::storage::LibraryEntry,
+        request: &CreateJob,
+    ) -> Result<bool> {
+        let Some(expected) = request.expected_sha256.as_deref() else {
+            return Ok(false);
+        };
+        security::validate_output_path(&self.config, &entry.path)?;
+        let metadata = match tokio::fs::symlink_metadata(&entry.path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if entry.size_bytes.is_some_and(|size| size != metadata.len()) {
+            return Ok(false);
+        }
+        let actual = checksum::sha256(
+            &entry.path,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+        Ok(actual.eq_ignore_ascii_case(expected))
+    }
+
+    async fn materialize_cached_entry(
+        &self,
+        job: Job,
+        entry: crate::storage::LibraryEntry,
+    ) -> Result<Job> {
+        security::validate_output_path(&self.config, &entry.path)?;
+        let source_metadata = tokio::fs::symlink_metadata(&entry.path).await?;
+        if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+            return Err(RavynError::Conflict(
+                "the cached library object is not a regular file".into(),
+            ));
+        }
+        let destination = std::path::PathBuf::from(&job.destination);
+        tokio::fs::create_dir_all(&destination).await?;
+        let filename = job
+            .filename
+            .clone()
+            .unwrap_or_else(|| crate::services::filename::sanitize(&entry.filename));
+        let target = destination.join(filename);
+        security::validate_output_path(&self.config, &target)?;
+        if target != entry.path {
+            if tokio::fs::try_exists(&target).await? {
+                if job.options_json.overwrite {
+                    tokio::fs::remove_file(&target).await?;
+                } else {
+                    return Err(RavynError::Conflict(format!(
+                        "cache target already exists: {}",
+                        target.display()
+                    )));
+                }
+            }
+            if tokio::fs::hard_link(&entry.path, &target).await.is_err() {
+                tokio::fs::copy(&entry.path, &target).await?;
+            }
+        }
+        let source_kind = match job.kind {
+            JobKind::Http => OutputSourceKind::Http,
+            JobKind::Media => OutputSourceKind::Media,
+            JobKind::Torrent => OutputSourceKind::Torrent,
+        };
+        let output = self
+            .repository
+            .register_output(&job, &target, OutputType::Primary, source_kind)
+            .await?;
+        if let Some(sha256) = entry.sha256.as_deref() {
+            self.repository
+                .set_output_checksum(output.id, "sha256", sha256)
+                .await?;
+        }
+        if target != entry.path {
+            self.repository
+                .upsert_library_entry(NewLibraryEntry {
+                    job_id: Some(job.id),
+                    source_url: job.source.clone(),
+                    mirrors: job.options_json.mirrors.clone(),
+                    sha256: entry.sha256.clone(),
+                    size_bytes: Some(source_metadata.len()),
+                    path: target,
+                    filename: entry.filename,
+                    category: entry.category,
+                    mime_type: entry.mime_type,
+                    media_metadata: entry.media_metadata,
+                    torrent_metadata: entry.torrent_metadata,
+                    tags: job.options_json.tags.clone(),
+                    trust: entry.trust,
+                    imported: false,
+                    downloaded_at: chrono::Utc::now(),
+                })
+                .await?;
+        }
+        self.repository
+            .increment_stat_counter("duplicate_avoidance_count", 1)
+            .await?;
+        self.repository
+            .increment_stat_counter("saved_bandwidth_bytes", source_metadata.len())
+            .await?;
+        self.repository
+            .complete_from_local_cache(job.id, source_metadata.len())
+            .await?;
+        self.events.publish(Event::JobStatus {
+            job_id: job.id,
+            status: JobStatus::Completed,
+            error: None,
+        });
+        self.repository.get_job(job.id).await
     }
 
     pub async fn create_idempotent(&self, request: CreateJob, key: &str) -> Result<Job> {
@@ -208,6 +446,11 @@ impl JobManager {
         if let Some(tags) = request.tags.as_deref() {
             validate_tags(tags)?;
         }
+        let updated_options = request.destination.as_ref().map(|_| {
+            let mut options = current.options_json.clone();
+            options.library_auto_destination = false;
+            options
+        });
         let updated = self
             .repository
             .update_job_fields(
@@ -216,6 +459,7 @@ impl JobManager {
                 request.speed_limit_bps,
                 request.destination.as_deref(),
                 request.filename.as_deref(),
+                updated_options.as_ref(),
             )
             .await?;
         if let Some(tags) = request.tags.as_deref() {

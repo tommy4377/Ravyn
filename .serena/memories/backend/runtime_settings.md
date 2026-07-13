@@ -5,3 +5,5 @@
 - Health request timeout is always capped at five seconds.
 - Settings reset reapplies job, bandwidth, and API live baselines; fields not backed by shared mutable runtime state remain `backend_restart`.
 - Persisted candidates are validated through `PersistentSettings::apply_to` before saving or applying.
+- `POST /v1/settings/validate` reports every failing field with isolated per-field blame without persisting; covers library fields (`library_root`, `library_auto_organize`, `library_category_overrides`).
+- `PersistentSettings` gained library fields: `library_root`, `library_auto_organize`, `library_category_overrides`. These are applied via `apply_to` and merged via `merge`.

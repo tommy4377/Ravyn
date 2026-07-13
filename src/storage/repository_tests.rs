@@ -33,6 +33,7 @@ mod resume_identity_tests {
         repository
             .insert_job(
                 CreateJob {
+                    preset_id: None,
                     kind: JobKind::Http,
                     source: "https://example.test/file.bin".into(),
                     destination: Some(PathBuf::from("downloads")),
@@ -249,6 +250,7 @@ mod resume_identity_tests {
         let result = repository
             .insert_job(
                 CreateJob {
+                    preset_id: None,
                     kind: JobKind::Http,
                     source: "https://example.test/file.bin".into(),
                     destination: Some(PathBuf::from("downloads")),
@@ -299,6 +301,7 @@ mod resume_identity_tests {
         let job = repository
             .insert_job(
                 CreateJob {
+                    preset_id: None,
                     kind: JobKind::Http,
                     source: "https://example.test/file.bin".into(),
                     destination: Some(destination.clone()),
@@ -429,6 +432,7 @@ mod fault_injection_tests {
         repository
             .insert_job(
                 CreateJob {
+                    preset_id: None,
                     kind: JobKind::Http,
                     source: "https://example.test/file.bin".into(),
                     destination: Some(PathBuf::from("downloads")),

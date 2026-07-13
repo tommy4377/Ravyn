@@ -5,7 +5,7 @@ use crate::{
     error::{RavynError, Result},
 };
 
-/// Ensures output paths stay inside Ravyn's configured download root.
+/// Ensures output paths stay inside an operator-configured Ravyn output root.
 pub fn validate_output_path(config: &Config, path: &Path) -> Result<()> {
     if path
         .components()
@@ -15,23 +15,29 @@ pub fn validate_output_path(config: &Config, path: &Path) -> Result<()> {
             "output path may not contain parent traversal".into(),
         ));
     }
-    let root = std::fs::canonicalize(absolutize(&config.effective_download_dir())?)?;
+
     let candidate = absolutize(path)?;
-    let mut existing = candidate.as_path();
-    while !existing.exists() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| RavynError::Invalid("output path has no existing ancestor".into()))?;
+    let roots = std::iter::once(config.effective_download_dir())
+        .chain(config.effective_library_root())
+        .collect::<Vec<_>>();
+    for root in &roots {
+        let canonical_root = std::fs::canonicalize(absolutize(root)?)?;
+        let mut existing = candidate.as_path();
+        while !existing.exists() {
+            existing = existing.parent().ok_or_else(|| {
+                RavynError::Invalid("output path has no existing ancestor".into())
+            })?;
+        }
+        let resolved_ancestor = std::fs::canonicalize(existing)?;
+        if resolved_ancestor.starts_with(&canonical_root) {
+            return Ok(());
+        }
     }
-    let resolved_ancestor = std::fs::canonicalize(existing)?;
-    if !resolved_ancestor.starts_with(&root) {
-        return Err(RavynError::Invalid(format!(
-            "output path {} is outside the configured download root {}",
-            candidate.display(),
-            root.display()
-        )));
-    }
-    Ok(())
+
+    Err(RavynError::Invalid(format!(
+        "output path {} is outside the configured Ravyn output roots",
+        candidate.display()
+    )))
 }
 
 fn absolutize(path: &Path) -> Result<std::path::PathBuf> {

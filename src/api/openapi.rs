@@ -70,7 +70,9 @@ pub fn document() -> Value {
             {"name":"Jobs"},{"name":"Media"},{"name":"Torrents"},{"name":"Rules"},
             {"name":"Tags"},{"name":"Schedules"},{"name":"Pages"},{"name":"Browser"},
             {"name":"Settings"},{"name":"Secrets"},{"name":"Database"},{"name":"Audit"},
-            {"name":"Events"},{"name":"System"}
+            {"name":"Events"},{"name":"System"},{"name":"Library"},
+            {"name":"Presets"},{"name":"Basket"},{"name":"Profiles"},
+            {"name":"Trust"},{"name":"Statistics"}
         ],
         "paths": paths,
         "components": {
@@ -207,6 +209,22 @@ mod tests {
             operation.path == "/v1/system/database/backups/{name}/restore"
                 && operation.method == "post"
         }));
+        for (method, path) in [
+            ("get", "/v1/library"),
+            ("get", "/v1/library/duplicates"),
+            ("post", "/v1/library/import"),
+            ("post", "/v1/templates/preview"),
+            ("get", "/v1/presets"),
+            ("get", "/v1/basket"),
+            ("get", "/v1/profiles"),
+            ("post", "/v1/trust/preview"),
+            ("get", "/v1/system/cleanup-policies"),
+            ("get", "/v1/statistics"),
+        ] {
+            assert!(OPERATIONS.iter().any(|operation| {
+                operation.path == path && operation.method == method
+            }));
+        }
     }
 
     #[test]

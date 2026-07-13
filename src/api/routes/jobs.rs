@@ -162,6 +162,7 @@ pub(super) async fn create_metalink_job(
     let result = s
         .manager
         .create(CreateJob {
+            preset_id: None,
             kind: JobKind::Http,
             source,
             destination: request.destination,

@@ -261,6 +261,7 @@ impl Repository {
         speed_limit_bps: Option<Option<u64>>,
         destination: Option<&std::path::Path>,
         filename: Option<&str>,
+        options: Option<&DownloadOptions>,
     ) -> Result<Job> {
         let mut query = QueryBuilder::<Sqlite>::new("UPDATE jobs SET updated_at=");
         query.push_bind(Utc::now());
@@ -280,6 +281,11 @@ impl Repository {
         }
         if let Some(filename) = filename {
             query.push(",filename=").push_bind(filename);
+        }
+        if let Some(options) = options {
+            query
+                .push(",options_json=")
+                .push_bind(serde_json::to_string(options)?);
         }
         query.push(" WHERE id=").push_bind(id.to_string());
         let changed = query.build().execute(self.pool()).await?.rows_affected();
@@ -407,6 +413,30 @@ impl Repository {
             .bind(id.to_string())
             .execute(self.pool())
             .await?;
+        Ok(())
+    }
+
+    /// Atomically marks a job completed from a verified local cache object.
+    pub async fn complete_from_local_cache(&self, id: Uuid, size_bytes: u64) -> Result<()> {
+        let size_bytes = size_bytes.min(i64::MAX as u64) as i64;
+        let now = Utc::now();
+        let changed = sqlx::query(
+            "UPDATE jobs SET status='completed',downloaded_bytes=?,total_bytes=?,\
+             transfer_mode='complete',error=NULL,started_at=COALESCE(started_at,?),\
+             completed_at=?,updated_at=? WHERE id=?",
+        )
+        .bind(size_bytes)
+        .bind(size_bytes)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(RavynError::NotFound(format!("job {id}")));
+        }
         Ok(())
     }
 

@@ -1,23 +1,251 @@
 //! End-to-end execution of a claimed job through its engine, checksum,
 //! and post-processing phases.
 
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{
         events::Event,
-        models::{Job, JobKind, JobStatus, OutputState, OutputType, PostAction},
+        models::{Job, JobKind, JobOutput, JobStatus, OutputState, OutputType, PostAction},
     },
     download::adapter::DownloadAdapter,
     error::RavynError,
     postprocess,
-    services::checksum,
+    services::{checksum, library, security},
+    storage::NewLibraryEntry,
 };
 
 use crate::core::manager::{JobManager, output_source, output_type, post_action_name};
 
 impl JobManager {
+    async fn record_library_outputs(
+        &self,
+        job: &Job,
+        cancellation: &CancellationToken,
+    ) -> crate::error::Result<()> {
+        let outputs = self.repository.list_job_outputs(job.id).await?;
+        for mut output in outputs {
+            if !matches!(output.state, OutputState::Ready | OutputState::Moved) {
+                continue;
+            }
+            let metadata = match tokio::fs::symlink_metadata(&output.current_path).await {
+                Ok(metadata) if !metadata.file_type().is_symlink() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.is_file() {
+                let (path, metadata) = self
+                    .organize_primary_library_output(job, &mut output, metadata)
+                    .await?;
+                self.record_library_file(
+                    job,
+                    &output,
+                    &path,
+                    &metadata,
+                    true,
+                    cancellation,
+                )
+                .await?;
+                continue;
+            }
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            // Extracted directory outputs are expanded into bounded file entries so
+            // deleting the source archive never makes the generated content disappear
+            // from the persistent library.
+            let mut queue = VecDeque::from([(output.current_path.clone(), 0_usize)]);
+            let mut visited = 0_usize;
+            while let Some((directory, depth)) = queue.pop_front() {
+                if cancellation.is_cancelled() {
+                    return Err(RavynError::Cancelled);
+                }
+                let mut entries = tokio::fs::read_dir(&directory).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    if cancellation.is_cancelled() {
+                        return Err(RavynError::Cancelled);
+                    }
+                    visited = visited.saturating_add(1);
+                    if visited > self.config.max_extract_files {
+                        return Err(RavynError::Conflict(format!(
+                            "library indexing exceeded the configured {} entry limit",
+                            self.config.max_extract_files
+                        )));
+                    }
+                    let path = entry.path();
+                    let metadata = tokio::fs::symlink_metadata(&path).await?;
+                    if metadata.file_type().is_symlink() {
+                        continue;
+                    }
+                    if metadata.is_dir() {
+                        if depth < self.config.max_extract_depth {
+                            queue.push_back((path, depth + 1));
+                        }
+                        continue;
+                    }
+                    if metadata.is_file() {
+                        self.record_library_file(
+                            job,
+                            &output,
+                            &path,
+                            &metadata,
+                            false,
+                            cancellation,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn organize_primary_library_output(
+        &self,
+        job: &Job,
+        output: &mut JobOutput,
+        metadata: std::fs::Metadata,
+    ) -> crate::error::Result<(PathBuf, std::fs::Metadata)> {
+        if !job.options_json.library_auto_destination
+            || job.kind != JobKind::Http
+            || output.output_type != OutputType::Primary
+            || output.state != OutputState::Ready
+        {
+            return Ok((output.current_path.clone(), metadata));
+        }
+
+        let Some(root) = self.config.effective_library_root() else {
+            return Ok((output.current_path.clone(), metadata));
+        };
+        let category = library::classify_file_with_overrides(
+            &output.current_path,
+            output.mime_type.as_deref(),
+            &self.config.library_category_overrides,
+        )
+        .await?;
+        let job_destination = Path::new(&job.destination);
+        let Ok(relative) = output.current_path.strip_prefix(job_destination) else {
+            return Ok((output.current_path.clone(), metadata));
+        };
+        if relative.as_os_str().is_empty() {
+            return Ok((output.current_path.clone(), metadata));
+        }
+
+        let preferred = library::category_directory(&root, category).join(relative);
+        if preferred == output.current_path {
+            return Ok((output.current_path.clone(), metadata));
+        }
+        let target = available_organized_path(&preferred).await?;
+        security::validate_output_path(&self.config, &target)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        move_regular_file_without_replacement(&output.current_path, &target).await?;
+        if let Err(error) = self
+            .repository
+            .update_output_path(job, output.id, &target, OutputState::Moved)
+            .await
+        {
+            if let Err(rollback_error) =
+                move_regular_file_without_replacement(&target, &output.current_path).await
+            {
+                tracing::error!(
+                    %rollback_error,
+                    source = %target.display(),
+                    destination = %output.current_path.display(),
+                    "failed to roll back an automatically organized output"
+                );
+            }
+            return Err(error);
+        }
+
+        output.current_path = target.clone();
+        output.state = OutputState::Moved;
+        let metadata = tokio::fs::symlink_metadata(&target).await?;
+        Ok((target, metadata))
+    }
+
+    async fn record_library_file(
+        &self,
+        job: &Job,
+        output: &JobOutput,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+        persist_output_checksum: bool,
+        cancellation: &CancellationToken,
+    ) -> crate::error::Result<()> {
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let existing_sha256 = output
+            .checksum_algorithm
+            .as_deref()
+            .filter(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
+            .and(output.checksum_value.as_deref());
+        let sha256 = if persist_output_checksum && existing_sha256.is_some() {
+            existing_sha256.map(str::to_owned)
+        } else {
+            let value = checksum::sha256(path, cancellation).await?;
+            if persist_output_checksum {
+                self.repository
+                    .set_output_checksum(output.id, "sha256", &value)
+                    .await?;
+            }
+            Some(value)
+        };
+        let category = library::classify_file_with_overrides(
+            path,
+            output.mime_type.as_deref(),
+            &self.config.library_category_overrides,
+        )
+        .await?;
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                RavynError::Invalid(format!(
+                    "library output has no valid filename: {}",
+                    path.display()
+                ))
+            })?
+            .to_owned();
+        self.repository
+            .upsert_library_entry(NewLibraryEntry {
+                job_id: Some(job.id),
+                source_url: job.source.clone(),
+                mirrors: job.options_json.mirrors.clone(),
+                sha256,
+                size_bytes: Some(metadata.len()),
+                path: path.to_path_buf(),
+                filename,
+                category,
+                mime_type: output.mime_type.clone(),
+                media_metadata: if job.kind == JobKind::Media {
+                    output.metadata.clone()
+                } else {
+                    serde_json::json!({})
+                },
+                torrent_metadata: if job.kind == JobKind::Torrent {
+                    output.metadata.clone()
+                } else {
+                    serde_json::json!({})
+                },
+                tags: job.options_json.tags.clone(),
+                trust: None,
+                imported: false,
+                downloaded_at: chrono::Utc::now(),
+            })
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn execute(&self, job: Job, token: CancellationToken) {
         let current = match self.repository.get_job(job.id).await {
             Ok(current) => current,
@@ -181,159 +409,176 @@ impl JobManager {
                         registered.push((artifact.id, path));
                     }
                 }
-                if registered.is_empty() || job.options_json.post_actions.is_empty() {
-                    return Ok(());
-                }
-
-                let _ = self
-                    .repository
-                    .set_status(job.id, JobStatus::PostProcessing, None)
-                    .await;
-                for (file_index, (output_id, path)) in registered.into_iter().enumerate() {
-                    let mut current_output_id = output_id;
-                    let mut current = path;
-                    for (action_index, action) in job.options_json.post_actions.iter().enumerate() {
-                        let journal_index = file_index
-                            .saturating_mul(job.options_json.post_actions.len())
-                            .saturating_add(action_index);
-                        if let Some(output) = self
-                            .repository
-                            .begin_job_action(job.id, journal_index, action, &current)
-                            .await?
+                if !registered.is_empty() && !job.options_json.post_actions.is_empty() {
+                    let _ = self
+                        .repository
+                        .set_status(job.id, JobStatus::PostProcessing, None)
+                        .await;
+                    for (file_index, (output_id, path)) in registered.into_iter().enumerate() {
+                        let mut current_output_id = output_id;
+                        let mut current = path;
+                        for (action_index, action) in
+                            job.options_json.post_actions.iter().enumerate()
                         {
-                            if !tokio::fs::try_exists(&output).await? {
-                                return Err(RavynError::Internal(format!(
-                                    "completed post-processing output is missing: {}",
-                                    output.display()
-                                )));
-                            }
-                            if let Some(artifact) = self
+                            let journal_index = file_index
+                                .saturating_mul(job.options_json.post_actions.len())
+                                .saturating_add(action_index);
+                            if let Some(output) = self
                                 .repository
-                                .find_job_output_by_path(job.id, &output)
+                                .begin_job_action(job.id, journal_index, action, &current)
                                 .await?
                             {
-                                current_output_id = artifact.id;
+                                if !tokio::fs::try_exists(&output).await? {
+                                    return Err(RavynError::Internal(format!(
+                                        "completed post-processing output is missing: {}",
+                                        output.display()
+                                    )));
+                                }
+                                if let Some(artifact) = self
+                                    .repository
+                                    .find_job_output_by_path(job.id, &output)
+                                    .await?
+                                {
+                                    current_output_id = artifact.id;
+                                }
+                                current = output;
+                                continue;
                             }
-                            current = output;
-                            continue;
-                        }
-                        let action_started = std::time::Instant::now();
-                        let action_result = postprocess::pipeline::run(
-                            self.config.clone(),
-                            current.clone(),
-                            std::slice::from_ref(action),
-                            token.child_token(),
-                        )
-                        .await;
-                        self.metrics.post_action_finished(
-                            post_action_name(action),
-                            action_result.is_ok(),
-                            action_started.elapsed(),
-                        );
-                        if let Some(tool) = match action {
-                            PostAction::Extract { .. } => Some("seven_zip"),
-                            PostAction::ConvertMedia { .. } => Some("ffmpeg"),
-                            _ => None,
-                        } {
-                            self.metrics.process_finished(
-                                tool,
+                            let action_started = std::time::Instant::now();
+                            let action_result = postprocess::pipeline::run(
+                                self.config.clone(),
+                                current.clone(),
+                                std::slice::from_ref(action),
+                                token.child_token(),
+                            )
+                            .await;
+                            self.metrics.post_action_finished(
+                                post_action_name(action),
                                 action_result.is_ok(),
                                 action_started.elapsed(),
                             );
-                        }
-                        match action_result {
-                            Ok(output) => {
-                                self.repository
-                                    .finish_job_action(job.id, journal_index, Ok(output.as_path()))
-                                    .await?;
-                                match action {
-                                    PostAction::VerifySha256 { expected } => {
-                                        self.repository
-                                            .set_output_checksum(
-                                                current_output_id,
-                                                "sha256",
-                                                expected,
-                                            )
-                                            .await?;
-                                    }
-                                    PostAction::Extract { delete_archive, .. } => {
-                                        let derived = self
-                                            .repository
-                                            .register_derived_output(
-                                                &job,
-                                                current_output_id,
-                                                &output,
-                                                OutputType::Directory,
-                                                journal_index,
-                                                serde_json::json!({
-                                                    "action": "extract",
-                                                    "source": current
-                                                }),
-                                            )
-                                            .await?;
-                                        if *delete_archive {
-                                            self.repository
-                                                .set_output_state(
-                                                    current_output_id,
-                                                    OutputState::Deleted,
-                                                )
-                                                .await?;
-                                        }
-                                        current_output_id = derived.id;
-                                    }
-                                    PostAction::ConvertMedia {
-                                        extension,
-                                        delete_original,
-                                        ..
-                                    } => {
-                                        let derived = self
-                                            .repository
-                                            .register_derived_output(
-                                                &job,
-                                                current_output_id,
-                                                &output,
-                                                OutputType::ConvertedFile,
-                                                journal_index,
-                                                serde_json::json!({
-                                                    "action": "convert_media",
-                                                    "extension": extension,
-                                                    "source": current
-                                                }),
-                                            )
-                                            .await?;
-                                        if *delete_original {
-                                            self.repository
-                                                .set_output_state(
-                                                    current_output_id,
-                                                    OutputState::Replaced,
-                                                )
-                                                .await?;
-                                        }
-                                        current_output_id = derived.id;
-                                    }
-                                    PostAction::Move { .. } => {
-                                        self.repository
-                                            .update_output_path(
-                                                &job,
-                                                current_output_id,
-                                                &output,
-                                                OutputState::Moved,
-                                            )
-                                            .await?;
-                                    }
-                                    PostAction::Open => {}
-                                }
-                                current = output;
+                            if let Some(tool) = match action {
+                                PostAction::Extract { .. } => Some("seven_zip"),
+                                PostAction::ConvertMedia { .. } => Some("ffmpeg"),
+                                _ => None,
+                            } {
+                                self.metrics.process_finished(
+                                    tool,
+                                    action_result.is_ok(),
+                                    action_started.elapsed(),
+                                );
                             }
-                            Err(error) => {
-                                let message = error.to_string();
-                                self.repository
-                                    .finish_job_action(job.id, journal_index, Err(&message))
-                                    .await?;
-                                return Err(error);
+                            match action_result {
+                                Ok(output) => {
+                                    self.repository
+                                        .finish_job_action(job.id, journal_index, Ok(output.as_path()))
+                                        .await?;
+                                    match action {
+                                        PostAction::VerifySha256 { expected } => {
+                                            self.repository
+                                                .set_output_checksum(
+                                                    current_output_id,
+                                                    "sha256",
+                                                    expected,
+                                                )
+                                                .await?;
+                                        }
+                                        PostAction::Extract { delete_archive, .. } => {
+                                            let derived = self
+                                                .repository
+                                                .register_derived_output(
+                                                    &job,
+                                                    current_output_id,
+                                                    &output,
+                                                    OutputType::Directory,
+                                                    journal_index,
+                                                    serde_json::json!({
+                                                        "action": "extract",
+                                                        "source": current
+                                                    }),
+                                                )
+                                                .await?;
+                                            if *delete_archive {
+                                                self.repository
+                                                    .set_output_state(
+                                                        current_output_id,
+                                                        OutputState::Deleted,
+                                                    )
+                                                    .await?;
+                                            }
+                                            current_output_id = derived.id;
+                                        }
+                                        PostAction::ConvertMedia {
+                                            extension,
+                                            delete_original,
+                                            ..
+                                        } => {
+                                            let derived = self
+                                                .repository
+                                                .register_derived_output(
+                                                    &job,
+                                                    current_output_id,
+                                                    &output,
+                                                    OutputType::ConvertedFile,
+                                                    journal_index,
+                                                    serde_json::json!({
+                                                        "action": "convert_media",
+                                                        "extension": extension,
+                                                        "source": current
+                                                    }),
+                                                )
+                                                .await?;
+                                            if *delete_original {
+                                                self.repository
+                                                    .set_output_state(
+                                                        current_output_id,
+                                                        OutputState::Replaced,
+                                                    )
+                                                    .await?;
+                                            }
+                                            current_output_id = derived.id;
+                                        }
+                                        PostAction::Move { .. } => {
+                                            self.repository
+                                                .update_output_path(
+                                                    &job,
+                                                    current_output_id,
+                                                    &output,
+                                                    OutputState::Moved,
+                                                )
+                                                .await?;
+                                        }
+                                        PostAction::Open => {}
+                                    }
+                                    current = output;
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    self.repository
+                                        .finish_job_action(job.id, journal_index, Err(&message))
+                                        .await?;
+                                    return Err(error);
+                                }
                             }
                         }
                     }
+                }
+                if let Err(error) = self.record_library_outputs(&job, &token).await {
+                    tracing::warn!(
+                        %error,
+                        job_id = %job.id,
+                        "download completed but persistent library indexing failed"
+                    );
+                    let _ = self
+                        .repository
+                        .append_job_log(
+                            job.id,
+                            "library",
+                            "warning",
+                            "LIBRARY_INDEX_FAILED",
+                            &error.public_message(),
+                        )
+                        .await;
                 }
                 Ok(())
             }
@@ -469,4 +714,104 @@ impl JobManager {
             }
         }
     }
+}
+
+async fn available_organized_path(preferred: &Path) -> crate::error::Result<PathBuf> {
+    if !tokio::fs::try_exists(preferred).await? {
+        return Ok(preferred.to_path_buf());
+    }
+
+    for suffix in 1_u32..=10_000 {
+        let candidate = path_with_numeric_suffix(preferred, suffix)?;
+        if !tokio::fs::try_exists(&candidate).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(RavynError::Conflict(format!(
+        "could not allocate a unique organized path for {}",
+        preferred.display()
+    )))
+}
+
+fn path_with_numeric_suffix(path: &Path, suffix: u32) -> crate::error::Result<PathBuf> {
+    let stem = path.file_stem().ok_or_else(|| {
+        RavynError::Invalid(format!(
+            "automatic organization target has no filename: {}",
+            path.display()
+        ))
+    })?;
+    let mut filename = stem.to_os_string();
+    filename.push(format!(" ({suffix})"));
+    if let Some(extension) = path.extension() {
+        filename.push(".");
+        filename.push(extension);
+    }
+    Ok(path.with_file_name(filename))
+}
+
+async fn move_regular_file_without_replacement(
+    source: &Path,
+    destination: &Path,
+) -> crate::error::Result<()> {
+    let source_metadata = tokio::fs::symlink_metadata(source).await?;
+    if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
+        return Err(RavynError::Conflict(format!(
+            "automatic organization requires a regular non-symlink file: {}",
+            source.display()
+        )));
+    }
+
+    match tokio::fs::hard_link(source, destination).await {
+        Ok(()) => {
+            if let Err(error) = tokio::fs::remove_file(source).await {
+                let _ = tokio::fs::remove_file(destination).await;
+                return Err(error.into());
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(RavynError::Conflict(format!(
+                "automatic organization target already exists: {}",
+                destination.display()
+            )));
+        }
+        Err(_) => {}
+    }
+
+    let mut input = tokio::fs::File::open(source).await?;
+    let mut output = match tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(destination)
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(RavynError::Conflict(format!(
+                "automatic organization target already exists: {}",
+                destination.display()
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = tokio::io::copy(&mut input, &mut output).await {
+        drop(output);
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(error.into());
+    }
+    if let Err(error) = output.sync_all().await {
+        drop(output);
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(error.into());
+    }
+    drop(output);
+    if let Err(error) = tokio::fs::set_permissions(destination, source_metadata.permissions()).await {
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::remove_file(source).await {
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(error.into());
+    }
+    Ok(())
 }

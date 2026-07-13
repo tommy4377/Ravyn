@@ -43,6 +43,7 @@ impl JobManager {
         let mut rejected = 0;
         for source in sources {
             let request = CreateJob {
+                preset_id: None,
                 kind: defaults.kind,
                 source: source.clone(),
                 destination: defaults.destination.clone(),

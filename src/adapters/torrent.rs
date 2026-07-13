@@ -1115,6 +1115,7 @@ mod restart_tests {
         let job = repository
             .insert_job(
                 CreateJob {
+                    preset_id: None,
                     kind: JobKind::Torrent,
                     source: format!("magnet:?xt=urn:btih:{}", "a".repeat(40)),
                     destination: None,

@@ -5,4 +5,7 @@
 - Bench: `cargo bench --locked --bench transfer_policy`.
 - Fuzz compile: `cargo check --manifest-path fuzz/Cargo.toml --bins`.
 - Search: `rg <pattern> <path>`; enumerate: `rg --files`.
+- Format check: `cargo fmt --all -- --check`.
+- Clippy strict: `cargo clippy --locked --all-targets --all-features -- -D warnings`.
+- Release build: `cargo build --locked --release`.
 - Prefer Serena symbol/structure/reference tools for source navigation and Git MCP for repository operations.

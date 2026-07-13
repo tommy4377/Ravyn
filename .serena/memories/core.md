@@ -2,6 +2,7 @@
 - Rust 2024 backend download manager; current checkout has no Svelte/TypeScript source despite Serena's Svelte language configuration.
 - Entrypoints: `src/main.rs` binary and `src/lib.rs` application assembly.
 - Backend domain map and persistence invariants: `mem:backend/core`.
+- Library features (15-feature persistent library, presets, basket, profiles, trust, cleanup, statistics): `mem:backend/library`.
 - Frontend availability boundary: `mem:frontend/core`.
 - Dependency/toolchain pins: `mem:tech_stack`.
 - Repository conventions and security defaults: `mem:conventions`.

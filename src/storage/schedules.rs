@@ -106,6 +106,7 @@ impl Schedule {
     }
     pub fn to_create_job(&self) -> CreateJob {
         CreateJob {
+            preset_id: None,
             kind: self.kind,
             source: self.source.clone(),
             destination: Some(self.destination.clone()),

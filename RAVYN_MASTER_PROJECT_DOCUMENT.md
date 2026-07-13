@@ -20,6 +20,8 @@ Ravyn is a backend-only download manager written in Rust. It combines:
 - persistent queue and automation;
 - rules, tags, schedules, and monitored pages;
 - checksums and post-processing;
+- an automatic, searchable, hash-indexed Ravyn library;
+- presets, profiles, a download basket, managed trash, cleanup, and statistics;
 - a secured local API;
 - browser-scoped integration endpoints;
 - operational diagnostics, backups, audit records, metrics, and event streaming.
@@ -54,19 +56,20 @@ production observability
 
 # 2. Current repository snapshot
 
-This section describes the latest consolidated backend snapshot after Increment 4.
+This section describes the current repository after the 2026-07-13 library-feature implementation pass. Older numeric checkpoints elsewhere in this document are retained as historical evidence and do not supersede this table.
 
 | Item | Current value |
 |---|---:|
-| Rust source and Rust test lines | approximately 22,244 |
-| Rust source files | 76 (largest file 910 lines after the de-monolith refactor) |
-| Database migrations | 16 |
-| Database tables after migrations | 23 |
-| Axum/OpenAPI operations | 90 / 90 |
-| Rust test attributes present | approximately 99 (95 unit/property + 4 integration) |
+| Rust lines across source, tests, benches, and fuzz targets | approximately 34,122 |
+| Rust files | 106 (largest file 1,884 lines) |
+| Database migrations | 20 |
+| Database tables after migrations | 29 |
+| Axum/OpenAPI operations | 128 / 128 |
+| Rust test attributes present | 190 by static scan |
 | Runtime `todo!`, `unimplemented!`, or application `panic!` | 0 found by static scan |
-| Latest SQLite integrity check | `ok` |
-| Latest foreign-key violations | 0 |
+| Latest fresh-database migration application | all 20 migrations succeeded |
+| Latest router/OpenAPI parity check | 128 unique method/path pairs, exact parity |
+| Latest Rust syntax parse | 106 files, 0 tree-sitter syntax errors |
 
 External runtime programs:
 
@@ -1851,3 +1854,49 @@ Exact verification on 2026-07-13 (post-pass): `cargo fmt --all -- --check`,
 `cargo test --locked --all-targets` (152 unit/property tests plus 9 HTTP
 integration tests and Criterion targets in test mode), the fuzz manifest
 check for all 11 binaries, and `cargo build --locked --release` all passed.
+
+## 2026-07-13 persistent-library implementation pass
+
+The complete fifteen-feature library plan in `LIBRARY_FEATURES_PLAN.md` is now
+implemented and documented. This pass adds:
+
+- an automatic platform-aware Ravyn root, defaulting to the current user's
+  `Downloads/Ravyn` directory and creating Downloads, Videos, Music,
+  Documents, Images, Archives, Torrents, Playlists, Temporary, and Trash;
+- startup sequencing that waits for persistent settings before creating the
+  final library layout, avoiding an unused default directory when a saved
+  custom root exists;
+- extension/MIME/magic-byte categorization with persistent operator overrides;
+- migrations 0019 and 0020 for the persistent library, statistics, cleanup
+  settings, presets, profiles, and ordered basket items;
+- searchable permanent library records with SHA-256 identity, output metadata,
+  tags, trust information, and active/trashed/missing state;
+- safe filename templates, preset application, profile overlays, and a deferred
+  basket with transactional ordering;
+- exact duplicate lookup and local cache reuse that re-hashes the current file
+  before hard-linking or copying it;
+- bounded import, missing-file verification, hash-based relocation repair,
+  managed trash/restore, compensating filesystem rollbacks, and staged purge;
+- explainable trust reports with optional strict Ed25519 verification;
+- cleanup retention policies, a supervised daily maintenance task, and
+  user-facing statistics;
+- additive `/v1` endpoints and exact OpenAPI registration for all new surfaces.
+
+Static delivery evidence for this pass:
+
+- all 20 migrations apply in order to a fresh SQLite database;
+- the live-path partial unique index permits a trashed historical row and one
+  current row at the same original path while rejecting two current rows;
+- router and OpenAPI inventories contain the same 128 unique operation pairs;
+- every OpenAPI schema reference resolves;
+- all 106 Rust files parse with zero tree-sitter Rust syntax errors;
+- all `CreateJob` struct literals were reconciled with the new optional
+  `preset_id` field.
+
+The current execution environment does not include `cargo`, `rustc`, or
+`rustfmt`. Consequently this pass is not represented as compiler-, Clippy-,
+rustfmt-, or executable-test-verified. The previous compiler-verified
+checkpoints remain valid for their earlier source snapshots only. Before merge
+or release, run the complete locked gate in `AGENTS.md` against this exact
+snapshot.
+

@@ -14,5 +14,8 @@ pub mod sniffer;
 pub mod schedules;
 
 pub mod imports;
+pub mod library;
 pub mod metalink;
 pub mod process;
+pub mod presets;
+pub mod trust;
