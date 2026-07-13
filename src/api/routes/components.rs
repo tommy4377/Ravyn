@@ -250,27 +250,40 @@ async fn start_component_installation(
 
     tokio::spawn(run_component_installation(
         component,
-        s.configured_config.clone(),
-        s.repository.clone(),
-        s.component_manifest.clone(),
-        s.provisioning_cancellation.clone(),
+        InstallationContext {
+            config: s.configured_config.clone(),
+            repository: s.repository.clone(),
+            manifest_provider: s.component_manifest.clone(),
+            registry: s.provisioning_cancellation.clone(),
+            events: s.manager.events(),
+        },
         cancellation,
-        s.manager.events(),
         started,
     ));
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn run_component_installation(
-    component: ComponentId,
+struct InstallationContext {
     config: Arc<crate::config::Config>,
     repository: crate::storage::Repository,
     manifest_provider: Arc<dyn crate::services::components::ManifestProvider>,
     registry: crate::services::components::ProvisioningCancellation,
-    cancellation: tokio_util::sync::CancellationToken,
     events: crate::core::events::EventBus,
+}
+
+async fn run_component_installation(
+    component: ComponentId,
+    context: InstallationContext,
+    cancellation: tokio_util::sync::CancellationToken,
     started: chrono::DateTime<chrono::Utc>,
 ) {
+    let InstallationContext {
+        config,
+        repository,
+        manifest_provider,
+        registry,
+        events,
+    } = context;
     let result = async {
         let _permit = registry.acquire(&cancellation).await?;
         let mut prior_records = repository.load_component_records().await?;
@@ -508,16 +521,17 @@ pub(super) async fn rollback_component(
         token,
     );
     let result = async {
-        let path = manager.rollback_component(component).await?;
-        let version = manager.installed_version(component).await;
+        let installed = manager
+            .rollback_component(component, &s.configured_config)
+            .await?;
         let now = chrono::Utc::now();
         s.repository
             .save_component_record(&PersistedComponent {
                 component,
                 state: ComponentState::Installed,
-                managed_version: version.clone(),
-                detected_version: version,
-                managed_path: Some(path),
+                managed_version: installed.detected_version.clone(),
+                detected_version: installed.detected_version,
+                managed_path: Some(installed.path),
                 custom_path: None,
                 error_message: None,
                 last_checked_at: Some(now),

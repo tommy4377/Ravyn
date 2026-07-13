@@ -69,14 +69,14 @@ The desktop shell (`src-tauri/src/backend.rs:101`) generates a `uuid::Uuid::new_
 * new version notification;
 * refresh retry and fallback to the last verified manifest.
 
-### 11. Declared capabilities are not truly verified
+### ~~11. Declared capabilities are not truly verified~~ ✅
 
-`rqbit_api_health()` (`components.rs:1130-1191`) verifies required rqbit HTTP API endpoints. This is the only functional capability check.
+`rqbit_api_health()`, `ffmpeg_capability_check()`, `seven_zip_capability_check()`, and `ytdlp_capability_check()` (`src/services/components.rs`) each run a real functional probe from `ComponentManager::health_check`, not just a version banner:
+* FFmpeg runs a minimal `lavfi` color source through a null muxer (`-f lavfi -i color=... -f null -`), proving encode/decode actually works;
+* 7-Zip is handed a hand-built minimal ZIP archive and asked to `t` (test) it, proving real archive I/O;
+* yt-dlp's `--help` output is checked for the option flags the adapter layer depends on (`--dump-single-json`, `--download-archive`, `--ffmpeg-location`, `--progress-template`).
 
-**Still missing:**
-* FFmpeg: list of codecs/formats or minimal command;
-* 7-Zip: extraction of a small test archive;
-* yt-dlp: check options/minimum version.
+A failed capability check now fails the health check (`healthy: false`) with a descriptive message, exactly like the existing rqbit check.
 
 ### 15. Cleaning and retention of engine versions are missing
 
@@ -163,15 +163,9 @@ Atomic replacement and rollback are fully implemented. `previous.json` is mainta
 
 ---
 
-### 12. Manual rollback does not execute a full health check
+### ~~12. Manual rollback does not execute a full health check~~ ✅
 
-`rollback()` (`engines.rs:471-495`) verifies the checksum of the previous binary but does not run a health check before declaring it operational.
-
-**Needs:**
-* binary health check;
-* version detection;
-* capability verification;
-* for rqbit: launch and query the service.
+The low-level `EngineManager::rollback()` (`engines.rs:471-495`) still only verifies the checksum, but `ComponentManager::rollback_component()` (`src/services/components.rs`) — the method actually used by `POST /v1/components/{id}/rollback` and by the automatic rollback-on-failed-install path — now runs the checksum swap, then the same `health_check()` used after a fresh install (process launch, version detection, and capability verification, including the rqbit HTTP check). If the restored version fails, it is deactivated instead of being reported as the active/verified version.
 
 ---
 

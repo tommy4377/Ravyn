@@ -933,36 +933,24 @@ impl ComponentManager {
             let health_error = health
                 .message
                 .unwrap_or_else(|| "component health check failed".into());
-            let rollback_restored_health = if self.rollback_available(component).await {
-                match self.rollback_component(component).await {
-                    Ok(_) => self
-                        .health_check(component, config, &BTreeMap::new())
-                        .await
-                        .healthy,
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            component = component.engine_name(),
-                            "managed component failed its health check and rollback failed"
-                        );
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            if !rollback_restored_health {
-                if let Err(error) = self
-                    .engine_manager
-                    .deactivate(component.engine_name())
-                    .await
-                {
-                    tracing::warn!(
+            if self.rollback_available(component).await {
+                if let Err(error) = self.rollback_component(component, config).await {
+                    tracing::error!(
                         %error,
                         component = component.engine_name(),
-                        "failed to deactivate an unhealthy managed component"
+                        "managed component failed its health check and rollback failed"
                     );
                 }
+            } else if let Err(error) = self
+                .engine_manager
+                .deactivate(component.engine_name())
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    component = component.engine_name(),
+                    "failed to deactivate an unhealthy managed component"
+                );
             }
             return Err(RavynError::Unavailable(format!(
                 "managed {} failed its post-install health check: {health_error}",
@@ -1046,16 +1034,20 @@ impl ComponentManager {
                     .map(str::trim)
                     .find(|line| !line.is_empty())
                     .map(ToOwned::to_owned);
-                if component == ComponentId::Rqbit {
-                    if let Err(error) = rqbit_api_health(configured).await {
-                        return ComponentHealth {
-                            component,
-                            healthy: false,
-                            path: Some(path),
-                            version,
-                            message: Some(error.to_string()),
-                        };
-                    }
+                let capability_error = match component {
+                    ComponentId::Rqbit => rqbit_api_health(configured).await.err(),
+                    ComponentId::Ffmpeg => ffmpeg_capability_check(&path).await.err(),
+                    ComponentId::SevenZip => seven_zip_capability_check(&path).await.err(),
+                    ComponentId::Ytdlp => ytdlp_capability_check(&path).await.err(),
+                };
+                if let Some(error) = capability_error {
+                    return ComponentHealth {
+                        component,
+                        healthy: false,
+                        path: Some(path),
+                        version,
+                        message: Some(error.to_string()),
+                    };
                 }
                 ComponentHealth {
                     component,
@@ -1082,8 +1074,43 @@ impl ComponentManager {
         }
     }
 
-    pub async fn rollback_component(&self, component: ComponentId) -> Result<PathBuf> {
-        self.engine_manager.rollback(component.engine_name()).await
+    /// Rolls back to the previous checksum-verified version and runs the same
+    /// health check (process launch, version detection, capability
+    /// verification) applied after a fresh install. If the restored version
+    /// fails the check, it is deactivated rather than left as the reported
+    /// active version.
+    pub async fn rollback_component(
+        &self,
+        component: ComponentId,
+        config: &crate::config::Config,
+    ) -> Result<InstalledComponent> {
+        let path = self.engine_manager.rollback(component.engine_name()).await?;
+        let health = self.health_check(component, config, &BTreeMap::new()).await;
+        if !health.healthy {
+            let health_error = health
+                .message
+                .unwrap_or_else(|| "component health check failed".into());
+            if let Err(error) = self
+                .engine_manager
+                .deactivate(component.engine_name())
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    component = component.engine_name(),
+                    "failed to deactivate a managed component after a failed rollback health check"
+                );
+            }
+            return Err(RavynError::Unavailable(format!(
+                "rolled-back {} failed its post-rollback health check: {health_error}",
+                component.engine_name()
+            )));
+        }
+        Ok(InstalledComponent {
+            path,
+            version: health.version.clone().unwrap_or_default(),
+            detected_version: health.version,
+        })
     }
 
     pub async fn remove_component(&self, component: ComponentId) -> Result<()> {
@@ -1197,6 +1224,179 @@ fn rqbit_endpoint_matches(actual: &str, required: &str) -> bool {
             .replace("{torrent_id}", "{id}")
     };
     normalize(actual) == normalize(required)
+}
+
+const CAPABILITY_PROCESS_LIMITS: crate::services::process::ProcessLimits =
+    crate::services::process::ProcessLimits {
+        wall_time: std::time::Duration::from_secs(15),
+        cpu_time: std::time::Duration::from_secs(10),
+        memory_bytes: 512 * 1024 * 1024,
+        output_file_bytes: None,
+        stdout_bytes: 64 * 1024,
+        stderr_bytes: 64 * 1024,
+    };
+
+/// Runs a minimal decode-to-null encode through a synthetic `lavfi` source so
+/// a health check exercises real codec/muxer capability rather than just the
+/// version banner.
+async fn ffmpeg_capability_check(path: &Path) -> Result<()> {
+    let mut command = tokio::process::Command::new(path);
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=16x16:d=0.1",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let output = crate::services::process::run(
+        &mut command,
+        &CAPABILITY_PROCESS_LIMITS,
+        None,
+        CancellationToken::new(),
+    )
+    .await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(RavynError::Unavailable(format!(
+            "ffmpeg failed a minimal lavfi encode/decode capability check: {}",
+            output.status
+        )))
+    }
+}
+
+const YTDLP_REQUIRED_OPTIONS: &[&str] = &[
+    "--dump-single-json",
+    "--download-archive",
+    "--ffmpeg-location",
+    "--progress-template",
+];
+
+/// Runs `--help` and checks for options the adapter layer relies on, catching
+/// a managed yt-dlp build that launches but is too old or stripped down.
+async fn ytdlp_capability_check(path: &Path) -> Result<()> {
+    let mut command = tokio::process::Command::new(path);
+    command.arg("--help");
+    let output = crate::services::process::run(
+        &mut command,
+        &CAPABILITY_PROCESS_LIMITS,
+        None,
+        CancellationToken::new(),
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(RavynError::Unavailable(format!(
+            "yt-dlp --help capability probe exited with {}",
+            output.status
+        )));
+    }
+    let help = String::from_utf8_lossy(&output.stdout);
+    let missing: Vec<&str> = YTDLP_REQUIRED_OPTIONS
+        .iter()
+        .copied()
+        .filter(|option| !help.contains(option))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(RavynError::Unavailable(format!(
+            "yt-dlp is missing required options: {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+/// A hand-built, uncompressed single-entry ZIP archive (one empty file named
+/// `health.check`) used to prove 7-Zip can actually read and test an archive
+/// rather than merely printing its own version banner.
+fn minimal_test_archive() -> Vec<u8> {
+    const NAME: &[u8] = b"health.check";
+    let mut bytes = Vec::with_capacity(128);
+    let local_header_offset = 0u32;
+
+    // Local file header.
+    bytes.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    bytes.extend_from_slice(&0x0021u16.to_le_bytes()); // mod date (1980-01-01)
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // crc32 of empty content
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // compressed size
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+    bytes.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    bytes.extend_from_slice(NAME);
+
+    let central_directory_offset = bytes.len() as u32;
+
+    // Central directory header.
+    bytes.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&20u16.to_le_bytes()); // version made by
+    bytes.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    bytes.extend_from_slice(&0x0021u16.to_le_bytes()); // mod date
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // crc32
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // compressed size
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // uncompressed size
+    bytes.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    bytes.extend_from_slice(&local_header_offset.to_le_bytes());
+    bytes.extend_from_slice(NAME);
+
+    let central_directory_size = bytes.len() as u32 - central_directory_offset;
+
+    // End of central directory record.
+    bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // entries on this disk
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // total entries
+    bytes.extend_from_slice(&central_directory_size.to_le_bytes());
+    bytes.extend_from_slice(&central_directory_offset.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+    bytes
+}
+
+/// Writes the synthetic archive to a scratch file and asks 7-Zip to test its
+/// integrity, proving the managed binary can actually open and read archives.
+async fn seven_zip_capability_check(path: &Path) -> Result<()> {
+    let archive_path =
+        std::env::temp_dir().join(format!("ravyn-7z-health-{}.zip", uuid::Uuid::new_v4()));
+    tokio::fs::write(&archive_path, minimal_test_archive()).await?;
+    let mut command = tokio::process::Command::new(path);
+    command.arg("t").arg(&archive_path);
+    let result = crate::services::process::run(
+        &mut command,
+        &CAPABILITY_PROCESS_LIMITS,
+        None,
+        CancellationToken::new(),
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&archive_path).await;
+    let output = result?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(RavynError::Unavailable(format!(
+            "7-Zip failed to test a minimal archive: {}",
+            output.status
+        )))
+    }
 }
 
 fn component_config_path(
@@ -1345,6 +1545,20 @@ pub fn effective_feature_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_test_archive_is_structurally_valid() {
+        let bytes = minimal_test_archive();
+        assert_eq!(&bytes[0..4], &0x0403_4b50u32.to_le_bytes());
+        let eocd = &bytes[bytes.len() - 22..];
+        assert_eq!(&eocd[0..4], &0x0605_4b50u32.to_le_bytes());
+        let entries_total = u16::from_le_bytes([eocd[10], eocd[11]]);
+        assert_eq!(entries_total, 1);
+        let cd_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]);
+        let cd_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]);
+        assert_eq!(cd_offset as usize + cd_size as usize, bytes.len() - 22);
+        assert_eq!(&bytes[cd_offset as usize..cd_offset as usize + 4], &0x0201_4b50u32.to_le_bytes());
+    }
 
     #[test]
     fn default_commands_match_config_defaults() {
