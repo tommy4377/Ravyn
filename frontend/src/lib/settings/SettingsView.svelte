@@ -1,7 +1,7 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
   import { systemAppearance } from "../appearance/systemAppearance.svelte";
-  import type { DownloadPreset, PersistentSettings, PersistentSettingsPatch, SecretReference, SecretType, UserProfile } from "../api/types";
+  import type { DownloadPreset, PersistentSettings, PersistentSettingsPatch, SecretReference, SecretType, TagRecord, UserProfile } from "../api/types";
   import Button from "../components/Button.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Dialog from "../components/Dialog.svelte";
@@ -35,6 +35,7 @@
   let presets = $state<DownloadPreset[]>([]);
   let profiles = $state<UserProfile[]>([]);
   let presetOpen = $state(false);
+  let editingPreset = $state<DownloadPreset | null>(null);
   let presetName = $state("");
   let presetDestination = $state("");
   let presetTemplate = $state("");
@@ -46,6 +47,7 @@
   let templatePreviewError = $state<string | null>(null);
   let templatePreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let profileOpen = $state(false);
+  let editingProfile = $state<UserProfile | null>(null);
   let profileName = $state("");
   let profileMaxActive = $state("3");
   let profileSpeed = $state("0");
@@ -55,6 +57,8 @@
   let deleteBusy = $state(false);
   let deleteError = $state<string | null>(null);
   let secrets = $state<SecretReference[]>([]);
+  let tags = $state<TagRecord[]>([]);
+  let tagDeleteBusy = $state<number | null>(null);
   let secretOpen = $state(false);
   let secretName = $state("");
   let secretType = $state<SecretType>("api_token");
@@ -136,16 +140,18 @@
     loading = true;
     error = null;
     try {
-      const [response, loadedPresets, loadedProfiles, loadedSecrets] = await Promise.all([
+      const [response, loadedPresets, loadedProfiles, loadedSecrets, loadedTags] = await Promise.all([
         connection.client.getSettings(),
         connection.client.listPresets(),
         connection.client.listProfiles(),
         connection.client.listSecrets({ limit: 100 }),
+        connection.client.listTags({ limit: 250 }).catch(() => null),
       ]);
       sync(response.values);
       presets = loadedPresets;
       profiles = loadedProfiles;
       secrets = loadedSecrets.items;
+      tags = loadedTags?.items ?? [];
     } catch (cause) {
       error = describeError(cause);
     } finally {
@@ -366,48 +372,83 @@
     }
   }
 
-  async function createPreset(): Promise<void> {
+  function openPresetEditor(preset: DownloadPreset | null): void {
+    editingPreset = preset;
+    presetName = preset?.name ?? "";
+    presetDestination = preset?.payload.destination ?? "";
+    presetTemplate = preset?.payload.filename_template ?? "";
+    presetPriority = String(preset?.payload.priority ?? 0);
+    presetSpeed = String(preset?.payload.speed_limit_bps ? Math.round(preset.payload.speed_limit_bps / 125000 * 10) / 10 : 0);
+    templatePreview = null;
+    templatePreviewMissing = [];
+    templatePreviewError = null;
+    scheduleTemplatePreview();
+    presetOpen = true;
+  }
+
+  async function savePreset(): Promise<void> {
     if (!connection.client || !presetName.trim() || presetBusy) return;
     presetBusy = true;
     try {
-      const created = await connection.client.createPreset({
-        name: presetName.trim(),
-        payload: {
-          destination: presetDestination.trim() || null,
-          filename_template: presetTemplate.trim() || null,
-          priority: Math.round(Number(presetPriority) || 0),
-          speed_limit_bps: Math.round(Math.max(0, Number(presetSpeed) || 0) * 125000),
-        },
-      });
-      presets = [...presets, created].sort((a, b) => a.name.localeCompare(b.name));
+      const changes = {
+        destination: presetDestination.trim() || null,
+        filename_template: presetTemplate.trim() || null,
+        priority: Math.round(Number(presetPriority) || 0),
+        speed_limit_bps: Math.round(Math.max(0, Number(presetSpeed) || 0) * 125000),
+      };
+      const saved = editingPreset
+        ? // Spread the existing payload so fields this dialog does not edit
+          // (rules, template variables, options) survive the PUT.
+          await connection.client.updatePreset(editingPreset.id, {
+            name: presetName.trim(),
+            payload: { ...editingPreset.payload, ...changes },
+          })
+        : await connection.client.createPreset({ name: presetName.trim(), payload: changes });
+      presets = [...presets.filter((preset) => preset.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name));
       presetOpen = false;
       presetName = "";
-      notifications.success("Preset created");
+      notifications.success(editingPreset ? "Preset updated" : "Preset created");
+      editingPreset = null;
     } catch (cause) {
-      notifications.error("Couldn't create the preset", describeError(cause));
+      notifications.error(editingPreset ? "Couldn't update the preset" : "Couldn't create the preset", describeError(cause));
     } finally {
       presetBusy = false;
     }
   }
 
-  async function createProfile(): Promise<void> {
+  function openProfileEditor(profile: UserProfile | null): void {
+    editingProfile = profile;
+    profileName = profile?.name ?? "";
+    profileMaxActive = String(profile?.settings_patch.max_active ?? 3);
+    profileSpeed = String(profile?.settings_patch.global_speed_limit_bps ? Math.round(profile.settings_patch.global_speed_limit_bps / 125000 * 10) / 10 : 0);
+    profilePresetId = profile?.default_preset_id ?? "";
+    profileOpen = true;
+  }
+
+  async function saveProfile(): Promise<void> {
     if (!connection.client || !profileName.trim() || profileBusy) return;
     profileBusy = true;
     try {
-      const created = await connection.client.createProfile({
+      const input = {
         name: profileName.trim(),
         default_preset_id: profilePresetId || null,
         settings_patch: {
+          // Keep patch fields this dialog does not edit when updating.
+          ...(editingProfile?.settings_patch ?? {}),
           max_active: Math.max(1, Math.round(Number(profileMaxActive) || 3)),
           global_speed_limit_bps: Math.round(Math.max(0, Number(profileSpeed) || 0) * 125000),
         },
-      });
-      profiles = [...profiles, created].sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
+      };
+      const saved = editingProfile
+        ? await connection.client.updateProfile(editingProfile.id, input)
+        : await connection.client.createProfile(input);
+      profiles = [...profiles.filter((profile) => profile.id !== saved.id), saved].sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
       profileOpen = false;
       profileName = "";
-      notifications.success("Profile created");
+      notifications.success(editingProfile ? "Profile updated" : "Profile created");
+      editingProfile = null;
     } catch (cause) {
-      notifications.error("Couldn't create the profile", describeError(cause));
+      notifications.error(editingProfile ? "Couldn't update the profile" : "Couldn't create the profile", describeError(cause));
     } finally {
       profileBusy = false;
     }
@@ -426,6 +467,20 @@
       notifications.error("Couldn't activate the profile", describeError(cause));
     } finally {
       profileBusy = false;
+    }
+  }
+
+  async function deleteTag(tag: TagRecord): Promise<void> {
+    if (!connection.client || tagDeleteBusy !== null) return;
+    tagDeleteBusy = tag.id;
+    try {
+      await connection.client.deleteTag(tag.id);
+      tags = tags.filter((item) => item.id !== tag.id);
+      notifications.info(`Tag "${tag.name}" deleted`);
+    } catch (cause) {
+      notifications.error("Couldn't delete the tag", describeError(cause));
+    } finally {
+      tagDeleteBusy = null;
     }
   }
 
@@ -659,12 +714,16 @@
         <div class="section-copy"><span class="section-icon"><Icon name="tag" size={20} /></span><div><h2>Presets and profiles</h2><p>Reuse download destinations and switch between performance configurations.</p></div></div>
         <div class="management-stack">
           <Surface padding="none" class="management-card">
-            <div class="management-heading"><div><strong>Download presets</strong><span>Reusable destination, naming, priority and speed settings.</span></div><Button onclick={() => (presetOpen = true)}><Icon name="add" size={15} /> New preset</Button></div>
-            {#if presets.length === 0}<p class="management-empty">No presets created.</p>{:else}{#each presets as preset (preset.id)}<div class="management-row"><span class="management-icon"><Icon name="download" size={17} /></span><div><strong>{preset.name}</strong><span>{preset.payload.destination ?? "Default destination"}{preset.payload.speed_limit_bps ? ` · ${Math.round(preset.payload.speed_limit_bps / 125000 * 10) / 10} Mbit/s` : " · unlimited"}</span></div><IconButton icon="trash" label="Delete preset" variant="subtle" onclick={() => { deleteError = null; deleteTarget = { kind: "preset", id: preset.id, name: preset.name }; }} /></div>{/each}{/if}
+            <div class="management-heading"><div><strong>Download presets</strong><span>Reusable destination, naming, priority and speed settings.</span></div><Button onclick={() => openPresetEditor(null)}><Icon name="add" size={15} /> New preset</Button></div>
+            {#if presets.length === 0}<p class="management-empty">No presets created.</p>{:else}{#each presets as preset (preset.id)}<div class="management-row"><span class="management-icon"><Icon name="download" size={17} /></span><div><strong>{preset.name}</strong><span>{preset.payload.destination ?? "Default destination"}{preset.payload.speed_limit_bps ? ` · ${Math.round(preset.payload.speed_limit_bps / 125000 * 10) / 10} Mbit/s` : " · unlimited"}</span></div><IconButton icon="edit" label="Edit preset" variant="subtle" onclick={() => openPresetEditor(preset)} /><IconButton icon="trash" label="Delete preset" variant="subtle" onclick={() => { deleteError = null; deleteTarget = { kind: "preset", id: preset.id, name: preset.name }; }} /></div>{/each}{/if}
           </Surface>
           <Surface padding="none" class="management-card">
-            <div class="management-heading"><div><strong>Settings profiles</strong><span>Switch download concurrency, bandwidth, and default preset together.</span></div><Button onclick={() => (profileOpen = true)}><Icon name="add" size={15} /> New profile</Button></div>
-            {#if profiles.length === 0}<p class="management-empty">No profiles created.</p>{:else}{#each profiles as profile (profile.id)}<div class="management-row"><span class="management-icon"><Icon name="settings" size={17} /></span><div><strong>{profile.name}{profile.active ? " · Active" : ""}</strong><span>{profile.settings_patch.max_active ?? "Default"} active downloads{profile.default_preset_id ? ` · ${presets.find((preset) => preset.id === profile.default_preset_id)?.name ?? "Preset"}` : ""}</span></div>{#if !profile.active}<Button variant="subtle" disabled={profileBusy} onclick={() => void activateProfile(profile)}>Activate</Button>{/if}<IconButton icon="trash" label="Delete profile" variant="subtle" disabled={profile.active} onclick={() => { deleteError = null; deleteTarget = { kind: "profile", id: profile.id, name: profile.name }; }} /></div>{/each}{/if}
+            <div class="management-heading"><div><strong>Settings profiles</strong><span>Switch download concurrency, bandwidth, and default preset together.</span></div><Button onclick={() => openProfileEditor(null)}><Icon name="add" size={15} /> New profile</Button></div>
+            {#if profiles.length === 0}<p class="management-empty">No profiles created.</p>{:else}{#each profiles as profile (profile.id)}<div class="management-row"><span class="management-icon"><Icon name="settings" size={17} /></span><div><strong>{profile.name}{profile.active ? " · Active" : ""}</strong><span>{profile.settings_patch.max_active ?? "Default"} active downloads{profile.default_preset_id ? ` · ${presets.find((preset) => preset.id === profile.default_preset_id)?.name ?? "Preset"}` : ""}</span></div>{#if !profile.active}<Button variant="subtle" disabled={profileBusy} onclick={() => void activateProfile(profile)}>Activate</Button>{/if}<IconButton icon="edit" label="Edit profile" variant="subtle" onclick={() => openProfileEditor(profile)} /><IconButton icon="trash" label="Delete profile" variant="subtle" disabled={profile.active} onclick={() => { deleteError = null; deleteTarget = { kind: "profile", id: profile.id, name: profile.name }; }} /></div>{/each}{/if}
+          </Surface>
+          <Surface padding="none" class="management-card">
+            <div class="management-heading"><div><strong>Tags</strong><span>Labels applied to downloads by hand or through automation rules.</span></div></div>
+            {#if tags.length === 0}<p class="management-empty">No tags in use.</p>{:else}{#each tags as tag (tag.id)}<div class="management-row"><span class="management-icon"><Icon name="tag" size={17} /></span><div><strong>{tag.name}</strong><span>{tag.job_count} download{tag.job_count === 1 ? "" : "s"}</span></div><IconButton icon="trash" label={`Delete tag ${tag.name}`} variant="subtle" disabled={tagDeleteBusy !== null} onclick={() => void deleteTag(tag)} /></div>{/each}{/if}
           </Surface>
         </div>
       </section>
@@ -672,7 +731,7 @@
   </div>
 </div>
 
-<Dialog open={presetOpen} title="New download preset" onClose={() => !presetBusy && (presetOpen = false)} preventClose={presetBusy}>
+<Dialog open={presetOpen} title={editingPreset ? "Edit download preset" : "New download preset"} onClose={() => !presetBusy && (presetOpen = false)} preventClose={presetBusy}>
   <div class="dialog-form">
     <TextField bind:value={presetName} label="Preset name" placeholder="Fast downloads" />
     <PathPicker bind:value={presetDestination} label="Destination" placeholder="Use the default destination" />
@@ -684,12 +743,12 @@
     {/if}
     <div class="two-column"><TextField bind:value={presetPriority} inputmode="numeric" label="Priority" /><TextField bind:value={presetSpeed} inputmode="decimal" label="Speed limit (Mbit/s)" placeholder="0 for unlimited" /></div>
   </div>
-  {#snippet footer()}<Button disabled={presetBusy} onclick={() => (presetOpen = false)}>Cancel</Button><Button variant="accent" disabled={presetBusy || !presetName.trim()} onclick={() => void createPreset()}>{presetBusy ? "Creating…" : "Create preset"}</Button>{/snippet}
+  {#snippet footer()}<Button disabled={presetBusy} onclick={() => (presetOpen = false)}>Cancel</Button><Button variant="accent" disabled={presetBusy || !presetName.trim()} onclick={() => void savePreset()}>{presetBusy ? "Saving…" : editingPreset ? "Save preset" : "Create preset"}</Button>{/snippet}
 </Dialog>
 
-<Dialog open={profileOpen} title="New settings profile" onClose={() => !profileBusy && (profileOpen = false)} preventClose={profileBusy}>
+<Dialog open={profileOpen} title={editingProfile ? "Edit settings profile" : "New settings profile"} onClose={() => !profileBusy && (profileOpen = false)} preventClose={profileBusy}>
   <div class="dialog-form"><TextField bind:value={profileName} label="Profile name" placeholder="Limited bandwidth" /><div class="two-column"><TextField bind:value={profileMaxActive} inputmode="numeric" label="Active downloads" /><TextField bind:value={profileSpeed} inputmode="decimal" label="Global speed limit (Mbit/s)" placeholder="0 for unlimited" /></div><div class="dropdown-field"><span>Default download preset</span><Dropdown options={presetOptions} bind:value={profilePresetId} label="Default download preset" /></div></div>
-  {#snippet footer()}<Button disabled={profileBusy} onclick={() => (profileOpen = false)}>Cancel</Button><Button variant="accent" disabled={profileBusy || !profileName.trim()} onclick={() => void createProfile()}>{profileBusy ? "Creating…" : "Create profile"}</Button>{/snippet}
+  {#snippet footer()}<Button disabled={profileBusy} onclick={() => (profileOpen = false)}>Cancel</Button><Button variant="accent" disabled={profileBusy || !profileName.trim()} onclick={() => void saveProfile()}>{profileBusy ? "Saving…" : editingProfile ? "Save profile" : "Create profile"}</Button>{/snippet}
 </Dialog>
 
 <Dialog open={secretOpen} title={secrets.some((item) => item.name === secretName) ? "Replace secret value" : "Store a secret"} onClose={() => !secretBusy && resetSecretEditor()} preventClose={secretBusy}>

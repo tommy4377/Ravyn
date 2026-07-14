@@ -40,6 +40,7 @@
   let ruleBusy = $state(false);
 
   let scheduleOpen = $state(false);
+  let editingSchedule = $state<ScheduleRecord | null>(null);
   let scheduleSource = $state("");
   let scheduleDestination = $state("");
   let scheduleKind = $state("http");
@@ -147,36 +148,50 @@
     }
   }
 
-  async function createSchedule(): Promise<void> {
+  function openScheduleEditor(schedule: ScheduleRecord | null): void {
+    editingSchedule = schedule;
+    scheduleSource = schedule?.source ?? "";
+    scheduleDestination = schedule?.destination ?? "";
+    scheduleKind = schedule?.kind ?? "http";
+    scheduleMinutes = String(schedule?.interval_seconds ? Math.max(1, Math.round(schedule.interval_seconds / 60)) : 60);
+    scheduleEnabled = schedule?.enabled ?? true;
+    scheduleOpen = true;
+  }
+
+  async function saveSchedule(): Promise<void> {
     if (!connection.client || !scheduleSource.trim() || !scheduleDestination.trim()) return;
     scheduleBusy = true;
     try {
       const minutes = Math.max(1, Number(scheduleMinutes) || 60);
+      // Fields this dialog does not edit (mode, cron, policies, options)
+      // carry over from the existing record when editing.
       const input: ScheduleInput = {
         enabled: scheduleEnabled,
         source: scheduleSource.trim(),
         kind: scheduleKind as JobKind,
         destination: scheduleDestination.trim(),
-        mode: "download",
+        mode: editingSchedule?.mode ?? "download",
         automation: null,
-        interval_seconds: minutes * 60,
-        cron_expression: null,
+        interval_seconds: editingSchedule?.cron_expression ? editingSchedule.interval_seconds : minutes * 60,
+        cron_expression: editingSchedule?.cron_expression ?? null,
         next_run_at: null,
-        timezone_offset_minutes: -new Date().getTimezoneOffset(),
-        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
-        overlap_policy: "queue",
-        missed_run_policy: "run_once",
-        max_catch_up_runs: 1,
-        paused_until: null,
-        options: {},
+        timezone_offset_minutes: editingSchedule?.timezone_offset_minutes ?? -new Date().getTimezoneOffset(),
+        timezone_name: editingSchedule?.timezone_name ?? (Intl.DateTimeFormat().resolvedOptions().timeZone || null),
+        overlap_policy: editingSchedule?.overlap_policy ?? "queue",
+        missed_run_policy: editingSchedule?.missed_run_policy ?? "run_once",
+        max_catch_up_runs: editingSchedule?.max_catch_up_runs ?? 1,
+        paused_until: editingSchedule?.paused_until ?? null,
+        options: editingSchedule?.options ?? {},
       };
-      await connection.client.createSchedule(input);
-      notifications.success("Schedule created");
+      if (editingSchedule) await connection.client.updateSchedule(editingSchedule.id, input);
+      else await connection.client.createSchedule(input);
+      notifications.success(editingSchedule ? "Schedule updated" : "Schedule created");
       scheduleOpen = false;
       scheduleSource = "";
+      editingSchedule = null;
       await load();
     } catch (cause) {
-      notifications.error("Couldn't create the schedule", describeError(cause));
+      notifications.error(editingSchedule ? "Couldn't update the schedule" : "Couldn't create the schedule", describeError(cause));
     } finally {
       scheduleBusy = false;
     }
@@ -302,7 +317,7 @@
       {#if tab === "rules"}
         <Button variant="standard" onclick={openRulePreview}><Icon name="search" size={16} /> Test rules</Button>
       {/if}
-      <Button variant="accent" onclick={() => tab === "rules" ? openRule() : (scheduleOpen = true)}><Icon name="add" size={16} /> {tab === "rules" ? "New rule" : "New schedule"}</Button>
+      <Button variant="accent" onclick={() => tab === "rules" ? openRule() : openScheduleEditor(null)}><Icon name="add" size={16} /> {tab === "rules" ? "New rule" : "New schedule"}</Button>
     {/snippet}
   </PageHeader>
 
@@ -337,14 +352,14 @@
         {/if}
       {:else}
         {#if visibleSchedules.length === 0}
-          <EmptyState icon="calendar" title="No schedules" message={search ? "No schedules match the current search." : "Create a schedule to start a download automatically at a recurring interval."}><Button variant="accent" onclick={() => (scheduleOpen = true)}>Create a schedule</Button></EmptyState>
+          <EmptyState icon="calendar" title="No schedules" message={search ? "No schedules match the current search." : "Create a schedule to start a download automatically at a recurring interval."}><Button variant="accent" onclick={() => openScheduleEditor(null)}>Create a schedule</Button></EmptyState>
         {:else}
           <div class="item-list">
             {#each visibleSchedules as schedule (schedule.id)}
               <article class="automation-item">
                 <span class="item-icon"><Icon name="calendar" size={19} /></span>
                 <div class="item-copy"><div><strong>{schedule.source}</strong><StatusBadge label={schedule.enabled ? "Enabled" : "Disabled"} severity={schedule.enabled ? "success" : "neutral"} /></div><span>{schedule.kind} · {schedule.destination}</span><small>Next run {formatAbsoluteTime(schedule.next_run_at)}{schedule.interval_seconds ? ` · every ${Math.round(schedule.interval_seconds / 60)} min` : schedule.cron_expression ? ` · ${schedule.cron_expression}` : ""}</small>{#if schedule.last_error}<small class="last-error">{schedule.last_error}</small>{/if}</div>
-                <div class="item-actions"><Button variant="subtle" onclick={() => void openHistory(schedule)}><Icon name="clock" size={14} /> History</Button><Button variant="subtle" onclick={() => void runNow(schedule)}><Icon name="play" size={14} /> Run now</Button><Button variant="subtle" onclick={() => void toggleSchedule(schedule)}>{schedule.enabled ? "Disable" : "Enable"}</Button><IconButton icon="trash" label="Delete schedule" variant="subtle" onclick={() => requestDelete("schedule", schedule.id)} /></div>
+                <div class="item-actions"><Button variant="subtle" onclick={() => void openHistory(schedule)}><Icon name="clock" size={14} /> History</Button><Button variant="subtle" onclick={() => void runNow(schedule)}><Icon name="play" size={14} /> Run now</Button><Button variant="subtle" onclick={() => void toggleSchedule(schedule)}>{schedule.enabled ? "Disable" : "Enable"}</Button><IconButton icon="edit" label="Edit schedule" variant="subtle" onclick={() => openScheduleEditor(schedule)} /><IconButton icon="trash" label="Delete schedule" variant="subtle" onclick={() => requestDelete("schedule", schedule.id)} /></div>
               </article>
             {/each}
           </div>
@@ -365,14 +380,14 @@
   {#snippet footer()}<Button disabled={ruleBusy} onclick={() => (ruleOpen = false)}>Cancel</Button><Button variant="accent" disabled={ruleBusy || !ruleName.trim()} onclick={() => void saveRule()}>{ruleBusy ? "Saving…" : "Save rule"}</Button>{/snippet}
 </Dialog>
 
-<Dialog open={scheduleOpen} title="New schedule" onClose={() => !scheduleBusy && (scheduleOpen = false)} preventClose={scheduleBusy}>
+<Dialog open={scheduleOpen} title={editingSchedule ? "Edit schedule" : "New schedule"} onClose={() => !scheduleBusy && (scheduleOpen = false)} preventClose={scheduleBusy}>
   <div class="form">
     <TextField bind:value={scheduleSource} label="Source URL" placeholder="https://example.com/file.zip" />
     <PathPicker bind:value={scheduleDestination} label="Destination" placeholder="Choose a download folder" />
     <div class="two-column"><div class="field"><span>Download type</span><Dropdown options={kindOptions} bind:value={scheduleKind} label="Download type" /></div><TextField bind:value={scheduleMinutes} label="Repeat every (minutes)" placeholder="60" /></div>
     <ToggleSwitch bind:checked={scheduleEnabled} label="Enable immediately" description="The schedule can be disabled later without deleting it." />
   </div>
-  {#snippet footer()}<Button disabled={scheduleBusy} onclick={() => (scheduleOpen = false)}>Cancel</Button><Button variant="accent" disabled={scheduleBusy || !scheduleSource.trim() || !scheduleDestination.trim()} onclick={() => void createSchedule()}>{scheduleBusy ? "Creating…" : "Create schedule"}</Button>{/snippet}
+  {#snippet footer()}<Button disabled={scheduleBusy} onclick={() => (scheduleOpen = false)}>Cancel</Button><Button variant="accent" disabled={scheduleBusy || !scheduleSource.trim() || !scheduleDestination.trim()} onclick={() => void saveSchedule()}>{scheduleBusy ? "Saving…" : editingSchedule ? "Save schedule" : "Create schedule"}</Button>{/snippet}
 </Dialog>
 
 <Dialog open={!!historySchedule} title="Schedule history" size="large" onClose={() => (historySchedule = null)}>

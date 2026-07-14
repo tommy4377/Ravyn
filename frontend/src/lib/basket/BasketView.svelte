@@ -13,6 +13,7 @@
   import PathPicker from "../components/PathPicker.svelte";
   import Surface from "../components/Surface.svelte";
   import TextArea from "../components/TextArea.svelte";
+  import TextField from "../components/TextField.svelte";
   import { connection } from "../stores/connection.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
@@ -26,6 +27,12 @@
   let destination = $state("");
   let kind = $state("http");
   let addBusy = $state(false);
+  let editingItem = $state<BasketItem | null>(null);
+  let editSource = $state("");
+  let editDestination = $state("");
+  let editFilename = $state("");
+  let editKind = $state("http");
+  let editBusy = $state(false);
   let clearOpen = $state(false);
   let clearBusy = $state(false);
   let clearError = $state<string | null>(null);
@@ -80,6 +87,40 @@
       await load();
     } else if (failures.length) {
       notifications.error("Couldn't add items to the basket", failures[0]);
+    }
+  }
+
+  function openEditor(item: BasketItem): void {
+    editingItem = item;
+    editSource = item.request.source;
+    editDestination = item.request.destination ?? "";
+    editFilename = item.request.filename ?? "";
+    editKind = item.request.kind;
+  }
+
+  async function saveItem(): Promise<void> {
+    if (!connection.client || !editingItem || !editSource.trim() || editBusy) return;
+    editBusy = true;
+    try {
+      // Carry over request fields the editor does not surface.
+      const updated = await connection.client.updateBasketItem(
+        editingItem.id,
+        {
+          ...editingItem.request,
+          kind: editKind as JobKind,
+          source: editSource.trim(),
+          destination: editDestination.trim() || null,
+          filename: editFilename.trim() || null,
+        },
+        editingItem.preset_id,
+      );
+      items = items.map((item) => (item.id === updated.id ? updated : item));
+      editingItem = null;
+      notifications.success("Basket item updated");
+    } catch (cause) {
+      notifications.error("Couldn't update the basket item", describeError(cause));
+    } finally {
+      editBusy = false;
     }
   }
 
@@ -186,6 +227,7 @@
               <div class="row-actions">
                 <IconButton icon="chevron-up" label="Move item up" variant="subtle" disabled={reorderBusy || index === 0} onclick={() => void moveItem(index, -1)} />
                 <IconButton icon="chevron-down" label="Move item down" variant="subtle" disabled={reorderBusy || index === items.length - 1} onclick={() => void moveItem(index, 1)} />
+                <IconButton icon="edit" label="Edit basket item" variant="subtle" onclick={() => openEditor(item)} />
                 <IconButton icon="trash" label="Remove from basket" variant="subtle" onclick={() => void removeItem(item.id)} />
               </div>
             </article>
@@ -205,6 +247,19 @@
   {#snippet footer()}
     <Button disabled={addBusy} onclick={() => (addOpen = false)}>Cancel</Button>
     <Button variant="accent" disabled={addBusy || sourceLines.length === 0} onclick={() => void addItems()}>{addBusy ? "Adding…" : `Add ${sourceLines.length || "items"}`}</Button>
+  {/snippet}
+</Dialog>
+
+<Dialog open={!!editingItem} title="Edit basket item" onClose={() => !editBusy && (editingItem = null)} preventClose={editBusy}>
+  <div class="form">
+    <TextArea bind:value={editSource} label="Source" rows={2} />
+    <div class="field"><span>Download type</span><Dropdown options={kindOptions} bind:value={editKind} label="Download type" /></div>
+    <PathPicker bind:value={editDestination} label="Destination" placeholder="Use the library default" />
+    <TextField bind:value={editFilename} label="File name" placeholder="Detected automatically" />
+  </div>
+  {#snippet footer()}
+    <Button disabled={editBusy} onclick={() => (editingItem = null)}>Cancel</Button>
+    <Button variant="accent" disabled={editBusy || !editSource.trim()} onclick={() => void saveItem()}>{editBusy ? "Saving…" : "Save item"}</Button>
   {/snippet}
 </Dialog>
 

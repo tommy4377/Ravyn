@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { DuplicatePolicy, Job, JobKind, MediaProbe, SecretReference, TorrentProbe } from "../api/types";
+  import type { CreateJob, DuplicatePolicy, Job, JobKind, MediaProbe, SecretReference, TorrentProbe, TrustReport } from "../api/types";
   import Button from "../components/Button.svelte";
   import Dialog from "../components/Dialog.svelte";
   import Dropdown, { type DropdownOption } from "../components/Dropdown.svelte";
@@ -28,7 +28,7 @@
     onClose: () => void;
   } = $props();
 
-  type DialogKind = JobKind | "metalink";
+  type DialogKind = JobKind | "metalink" | "batch";
 
   let kind = $state<DialogKind>("http");
   let source = $state("");
@@ -60,6 +60,10 @@
   let cookiesSecretId = $state("");
   let authenticationHeaderSecretId = $state("");
   let overwriteExisting = $state(false);
+  let batchResults = $state<{ source: string; error: string }[] | null>(null);
+  let trustReport = $state<TrustReport | null>(null);
+  let trustCheckedUrl = $state("");
+  let trustBusy = $state(false);
   let metalinkFileName = $state("");
   let metalinkFileInput = $state<HTMLInputElement | null>(null);
 
@@ -75,10 +79,28 @@
 
   const lines = $derived(source.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("//")));
   const lineCount = $derived(lines.length);
+  const parsedBatch = $derived.by((): { jobs: CreateJob[]; error: string | null } => {
+    if (kind !== "batch" || !source.trim()) return { jobs: [], error: null };
+    try {
+      const value: unknown = JSON.parse(source);
+      if (!Array.isArray(value)) return { jobs: [], error: "The batch document must be a JSON array of jobs." };
+      if (value.length === 0) return { jobs: [], error: "The batch array is empty." };
+      for (const [index, entry] of value.entries()) {
+        if (typeof entry !== "object" || entry === null || typeof (entry as CreateJob).source !== "string" || !(entry as CreateJob).source) {
+          return { jobs: [], error: `Entry ${index + 1} must be an object with a non-empty "source".` };
+        }
+      }
+      return { jobs: value as CreateJob[], error: null };
+    } catch (cause) {
+      return { jobs: [], error: cause instanceof Error ? cause.message : "Invalid JSON." };
+    }
+  });
   const canSubmit = $derived(
     kind === "metalink"
       ? source.trim().length > 0
-      : lineCount > 0 && (kind === "http" || lineCount === 1),
+      : kind === "batch"
+        ? parsedBatch.jobs.length > 0
+        : lineCount > 0 && (kind === "http" || lineCount === 1),
   );
   const allTorrentFilesSelected = $derived(!!torrentProbe?.files.length && selectedTorrentFiles.length === torrentProbe.files.length);
   const kindOptions: DropdownOption[] = [
@@ -86,6 +108,7 @@
     { value: "media", label: "Video or audio" },
     { value: "torrent", label: "Torrent or magnet" },
     { value: "metalink", label: "Metalink document" },
+    { value: "batch", label: "Batch (JSON)" },
   ];
   const duplicateOptions: DropdownOption[] = [
     { value: "allow", label: "Allow duplicates" },
@@ -137,6 +160,25 @@
     probeError = null;
     mediaFormat = "";
     selectedTorrentFiles = [];
+    trustReport = null;
+    trustCheckedUrl = "";
+  }
+
+  async function checkTrust(): Promise<void> {
+    if (!connection.client || lineCount !== 1 || trustBusy) return;
+    const url = lines[0]!;
+    trustBusy = true;
+    try {
+      trustReport = await connection.client.previewTrust({
+        source_url: url,
+        checksum_available: !!expectedSha256.trim(),
+      });
+      trustCheckedUrl = url;
+    } catch (cause) {
+      notifications.error("Couldn't evaluate this source", describeError(cause));
+    } finally {
+      trustBusy = false;
+    }
   }
 
   function reset(): void {
@@ -161,6 +203,7 @@
     authenticationHeaderSecretId = "";
     overwriteExisting = false;
     metalinkFileName = "";
+    batchResults = null;
     clearProbe();
   }
 
@@ -185,6 +228,28 @@
     reader.onerror = () => notifications.error("Couldn't read this Metalink file");
     reader.readAsText(file);
     input.value = "";
+  }
+
+  async function submitBatch(): Promise<void> {
+    if (!connection.client) return;
+    const result = await connection.client.createBatchJobs(parsedBatch.jobs);
+    for (const item of result.items) if (item.job) jobsStore.upsert(item.job);
+    const failures = result.items
+      .filter((item) => item.error)
+      .map((item) => ({ source: item.source, error: item.error as string }));
+    if (result.accepted > 0) {
+      notifications.success(
+        `${result.accepted} download${result.accepted === 1 ? "" : "s"} added`,
+        failures.length ? `${failures.length} entr${failures.length === 1 ? "y" : "ies"} rejected.` : undefined,
+      );
+    }
+    if (failures.length > 0) {
+      batchResults = failures;
+      if (result.accepted === 0) error = "No downloads were created.";
+    } else {
+      reset();
+      onClose();
+    }
   }
 
   async function submitMetalink(service: JobsService): Promise<void> {
@@ -244,6 +309,10 @@
         await submitMetalink(service);
         return;
       }
+      if (kind === "batch") {
+        await submitBatch();
+        return;
+      }
       const result = await service.addFromInput({
         source,
         destination: destination || undefined,
@@ -293,10 +362,33 @@
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void submit();
 }} />
 
-<Dialog {open} title={kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : "Add download"} size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
+<Dialog {open} title={kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : kind === "batch" ? "Batch import" : "Add download"} size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
   <div class="form">
     <div class="kind-field"><span>Download type</span><Dropdown options={kindOptions} bind:value={kind} label="Download type" /></div>
-    {#if kind === "metalink"}
+    {#if kind === "batch"}
+      <TextArea
+        bind:value={source}
+        label="Batch document"
+        placeholder={'[\n  { "kind": "http", "source": "https://example.com/a.zip", "destination": null, "priority": 5 },\n  { "kind": "http", "source": "https://example.com/b.zip", "expected_sha256": "…" }\n]'}
+        rows={10}
+        hint={'JSON array of job objects. Each entry needs "kind" and "source"; destination, filename, priority, speed_limit_bps, expected_sha256, duplicate_policy, and options are optional.'}
+      />
+      {#if parsedBatch.error && source.trim()}
+        <InlineError title="Invalid batch document" message={parsedBatch.error} />
+      {:else if parsedBatch.jobs.length > 0}
+        <p class="batch-summary">{parsedBatch.jobs.length} job{parsedBatch.jobs.length === 1 ? "" : "s"} ready to submit.</p>
+      {/if}
+      {#if batchResults}
+        <div class="batch-failures">
+          <strong>Rejected entries</strong>
+          <ul>
+            {#each batchResults as failure (failure.source + failure.error)}
+              <li><span class="failure-source" title={failure.source}>{failure.source}</span><span class="failure-error">{failure.error}</span></li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    {:else if kind === "metalink"}
       <div class="metalink-pick">
         <Button variant="standard" onclick={pickMetalinkFile}><Icon name="folder-open" size={16} /> Choose .metalink file…</Button>
         {#if metalinkFileName}<span class="metalink-name">{metalinkFileName}</span>{/if}
@@ -325,13 +417,24 @@
       />
     {/if}
     {#if kind !== "http" && kind !== "metalink" && lineCount > 1}<InlineError title="Use one source" message="Media and torrent downloads must be added one at a time." />{/if}
-    <PathPicker bind:value={destination} label="Destination" placeholder="Use the library default" />
+    {#if kind === "http" && lineCount === 1}
+      <div class="trust-row">
+        <Button variant="subtle" disabled={trustBusy} onclick={() => void checkTrust()}><Icon name="shield" size={14} /> {trustBusy ? "Checking…" : "Check source"}</Button>
+        {#if trustReport && trustCheckedUrl === lines[0]}
+          <span class="trust-result trust-{trustReport.level}">Trust {trustReport.score}/100 · {trustReport.level}</span>
+          <span class="trust-hint">{trustReport.factors.filter((factor) => !factor.satisfied && factor.points > 0).map((factor) => factor.label).slice(0, 2).join(" · ") || "No missing safeguards detected"}</span>
+        {/if}
+      </div>
+    {/if}
+    {#if kind !== "batch"}
+      <PathPicker bind:value={destination} label="Destination" placeholder="Use the library default" />
+    {/if}
 
     {#if kind === "metalink"}
       <ToggleSwitch bind:checked={overwriteExisting} label="Overwrite existing files" description="Replace files that already exist at the destination." />
     {/if}
 
-    {#if kind !== "http" && kind !== "metalink"}
+    {#if kind !== "http" && kind !== "metalink" && kind !== "batch"}
       <div class="analyze-row">
         <div><strong>{kind === "media" ? "Inspect available formats" : "Inspect torrent contents"}</strong><small>{kind === "media" ? "Uses yt-dlp to read title, playlist, and quality information." : "Uses the managed torrent engine to read metadata and file names."}</small></div>
         <Button disabled={probing || lineCount !== 1} onclick={() => void analyze()}><Icon name={probing ? "spinner" : "search"} size={16} /> {probing ? "Analyzing…" : mediaProbe || torrentProbe ? "Analyze again" : "Analyze"}</Button>
@@ -366,7 +469,7 @@
       <ToggleSwitch bind:checked={seedAfterDownload} label="Seed after download" description="Keep the torrent active after all selected files are complete." />
     {/if}
 
-    {#if kind !== "metalink"}
+    {#if kind !== "metalink" && kind !== "batch"}
     <details class="advanced">
       <summary>Advanced options</summary>
       <div class="advanced-body">
@@ -394,7 +497,7 @@
   {#snippet footer()}
     <Button variant="standard" disabled={busy || probing} onclick={close}>Cancel</Button>
     <Button variant="accent" disabled={busy || probing || !canSubmit || (kind === "torrent" && !!torrentProbe && selectedTorrentFiles.length === 0)} onclick={() => void submit()}>
-      {busy ? "Adding…" : kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : lineCount > 1 ? `Add ${lineCount} downloads` : "Add download"}
+      {busy ? "Adding…" : kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : kind === "batch" ? `Submit ${parsedBatch.jobs.length || "batch"}` : lineCount > 1 ? `Add ${lineCount} downloads` : "Add download"}
     </Button>
   {/snippet}
 </Dialog>
@@ -424,6 +527,15 @@
   .file-row strong, .file-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
   .metalink-pick { display: flex; align-items: center; gap: var(--space-3); }
+  .trust-row { display: flex; align-items: center; gap: var(--space-3); min-height: 30px; }
+  .batch-summary { margin: calc(var(--space-3) * -1) 0 0; color: var(--text-secondary); font-size: var(--text-caption); }
+  .batch-failures { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); }
+  .batch-failures ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); max-height: 180px; overflow: auto; }
+  .batch-failures li { display: flex; flex-direction: column; font-size: var(--text-caption); }
+  .failure-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Consolas", ui-monospace, monospace; }
+  .failure-error { color: var(--status-error); }
+  .trust-result { font-weight: 600; font-size: var(--text-caption); }
+  .trust-hint { color: var(--text-tertiary); font-size: var(--text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .metalink-name { color: var(--text-secondary); font-size: var(--text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .advanced summary { cursor: default; font-size: var(--text-body); font-weight: 600; color: var(--text-primary); padding: var(--space-1) 0; }
   .advanced-body { display: flex; flex-direction: column; gap: var(--space-4); padding-top: var(--space-3); }
