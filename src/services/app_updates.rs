@@ -1,6 +1,7 @@
 //! Signed application-update metadata shared by the release tool and the
 //! desktop shell. The private signing key is never linked into the app.
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -58,6 +59,14 @@ impl AppUpdateManifest {
                 "app update publication timestamp is missing or too long".into(),
             ));
         }
+        let published_at = DateTime::parse_from_rfc3339(&self.published_at)
+            .map_err(|_| RavynError::Invalid("app update publication timestamp is invalid".into()))?
+            .with_timezone(&Utc);
+        if published_at > Utc::now() + ChronoDuration::minutes(10) {
+            return Err(RavynError::Invalid(
+                "app update publication timestamp is too far in the future".into(),
+            ));
+        }
         if self.artifact.target != "windows-x86_64" {
             return Err(RavynError::Invalid(
                 "app update artifact target must be windows-x86_64".into(),
@@ -66,9 +75,14 @@ impl AppUpdateManifest {
         validate_filename(&self.artifact.filename)?;
         let url = url::Url::parse(&self.artifact.url)
             .map_err(|_| RavynError::Invalid("app update URL is invalid".into()))?;
-        if url.scheme() != "https" || url.host_str().is_none() {
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
             return Err(RavynError::Invalid(
-                "app update URL must use HTTPS".into(),
+                "app update URL must use HTTPS without credentials or fragments".into(),
             ));
         }
         if self.artifact.size_bytes == 0 || self.artifact.size_bytes > MAX_APP_UPDATE_BYTES {
@@ -200,6 +214,14 @@ mod tests {
         let mut invalid = manifest(bytes);
         invalid.artifact.url = "http://example.invalid/setup.exe".into();
         assert!(invalid.validate().is_err());
+
+        let mut credentialed = manifest(bytes);
+        credentialed.artifact.url = "https://user@example.invalid/setup.exe".into();
+        assert!(credentialed.validate().is_err());
+
+        let mut invalid_timestamp = manifest(bytes);
+        invalid_timestamp.published_at = "not-a-timestamp".into();
+        assert!(invalid_timestamp.validate().is_err());
 
         let mut valid = manifest(bytes);
         valid.artifact.sha256 = "00".repeat(32);

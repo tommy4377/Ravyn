@@ -18,6 +18,58 @@ pub struct SecretReference {
     pub updated_at: DateTime<Utc>,
 }
 
+fn validate_secret_value(secret_type: &str, secret: &str) -> Result<()> {
+    if secret.is_empty() || secret.chars().all(char::is_whitespace) {
+        return Err(RavynError::Invalid("secret value must not be empty".into()));
+    }
+    match secret_type {
+        "proxy_credentials" => {
+            reqwest::Proxy::all(secret.trim()).map_err(|error| {
+                RavynError::Invalid(format!("proxy secret must contain a valid proxy URL: {error}"))
+            })?;
+        }
+        "rqbit_credentials" => {
+            #[derive(serde::Deserialize)]
+            struct Credentials {
+                username: String,
+                password: String,
+            }
+            let credentials: Credentials = serde_json::from_str(secret).map_err(|_| {
+                RavynError::Invalid(
+                    "rqbit credential secret must be JSON with username and password".into(),
+                )
+            })?;
+            if credentials.username.trim().is_empty() || credentials.password.is_empty() {
+                return Err(RavynError::Invalid(
+                    "rqbit credential secret contains an empty username or password".into(),
+                ));
+            }
+        }
+        "cookies" => {
+            let cookies: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(secret).map_err(|_| {
+                    RavynError::Invalid(
+                        "cookie secret must be a JSON object of string name/value pairs".into(),
+                    )
+                })?;
+            if cookies.keys().any(|name| name.trim().is_empty()) {
+                return Err(RavynError::Invalid(
+                    "cookie secret contains an empty cookie name".into(),
+                ));
+            }
+        }
+        "authentication_header" => {
+            axum::http::HeaderValue::try_from(secret).map_err(|_| {
+                RavynError::Invalid(
+                    "authorization header secret contains invalid header characters".into(),
+                )
+            })?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl Repository {
     pub async fn put_secret_reference(
         &self,
@@ -38,6 +90,7 @@ impl Repository {
         if name.is_empty() || name.len() > 160 || !TYPES.contains(&secret_type) {
             return Err(RavynError::Invalid("invalid secret name or type".into()));
         }
+        validate_secret_value(secret_type, &secret)?;
         let existing = sqlx::query("SELECT id,keyring_account FROM secret_references WHERE name=?")
             .bind(name)
             .fetch_optional(self.pool())
@@ -106,6 +159,31 @@ impl Repository {
             .fetch_optional(self.pool())
             .await?
             .ok_or_else(|| RavynError::NotFound(format!("secret reference {id}")))?;
+        let needle = format!("%{id}%");
+        let mut usages = Vec::new();
+        for (label, table, column) in [
+            ("runtime settings", "runtime_settings", "settings_json"),
+            ("download jobs", "jobs", "options_json"),
+            ("schedules", "schedules", "options_json"),
+            ("download presets", "download_presets", "payload_json"),
+            ("user profiles", "user_profiles", "settings_patch_json"),
+            ("basket items", "basket_items", "request_json"),
+        ] {
+            let query = format!("SELECT COUNT(*) FROM {table} WHERE {column} LIKE ?");
+            let count: i64 = sqlx::query_scalar(&query)
+                .bind(&needle)
+                .fetch_one(self.pool())
+                .await?;
+            if count > 0 {
+                usages.push(format!("{label} ({count})"));
+            }
+        }
+        if !usages.is_empty() {
+            return Err(RavynError::Conflict(format!(
+                "secret reference {id} is still used by {}; remove those references first",
+                usages.join(", ")
+            )));
+        }
         let account: String = row.try_get("keyring_account")?;
         crate::services::secrets::delete(account).await?;
         sqlx::query("DELETE FROM secret_references WHERE id=?")
@@ -124,4 +202,38 @@ pub(crate) fn row_to_secret_reference(row: SqliteRow) -> Result<SecretReference>
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_secret_value;
+
+    #[test]
+    fn validates_structured_secret_payloads() {
+        assert!(validate_secret_value(
+            "rqbit_credentials",
+            r#"{"username":"ravyn","password":"secret"}"#,
+        )
+        .is_ok());
+        assert!(validate_secret_value("cookies", r#"{"session":"value"}"#).is_ok());
+        assert!(
+            validate_secret_value("proxy_credentials", "http://user:pass@127.0.0.1:8080")
+                .is_ok()
+        );
+        assert!(validate_secret_value("authentication_header", "Bearer token").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_structured_secret_payloads() {
+        assert!(validate_secret_value("rqbit_credentials", "{}").is_err());
+        assert!(validate_secret_value("cookies", "[]").is_err());
+        assert!(validate_secret_value("proxy_credentials", "not a URL").is_err());
+        assert!(
+            validate_secret_value(
+                "authentication_header",
+                "Bearer value\r\nInjected: true",
+            )
+            .is_err()
+        );
+    }
 }

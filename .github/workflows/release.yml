@@ -62,18 +62,74 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --locked --workspace --all-targets
 
-      - name: Validate application-update signing configuration
+      - name: Validate release signing configuration
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           UPDATE_PRIVATE_KEY: ${{ secrets.RAVYN_APP_UPDATE_PRIVATE_KEY }}
           UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+          COMPONENT_PRIVATE_KEY: ${{ secrets.RAVYN_ENGINE_MANIFEST_PRIVATE_KEY }}
+          COMPONENT_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.RAVYN_AUTHENTICODE_TIMESTAMP_URL }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:UPDATE_PRIVATE_KEY)) {
             throw 'RAVYN_APP_UPDATE_PRIVATE_KEY is required for tagged releases.'
           }
           if ([string]::IsNullOrWhiteSpace($env:UPDATE_PUBLIC_KEY)) {
             throw 'RAVYN_APP_UPDATE_PUBLIC_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:COMPONENT_PRIVATE_KEY)) {
+            throw 'RAVYN_ENGINE_MANIFEST_PRIVATE_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:COMPONENT_PUBLIC_KEY)) {
+            throw 'RAVYN_ENGINE_MANIFEST_PUBLIC_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            throw 'RAVYN_WINDOWS_CERTIFICATE is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw 'RAVYN_WINDOWS_CERTIFICATE_PASSWORD is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            throw 'RAVYN_AUTHENTICODE_TIMESTAMP_URL is required for tagged releases.'
+          }
+
+      - name: Import Authenticode certificate and configure Tauri
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.RAVYN_AUTHENTICODE_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'ravyn-authenticode.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes(
+              $certificatePath,
+              [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+            )
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate `
+              -FilePath $certificatePath `
+              -CertStoreLocation 'Cert:\CurrentUser\My' `
+              -Password $password
+            if (-not $certificate.Thumbprint) {
+              throw 'The Authenticode certificate did not expose a thumbprint after import.'
+            }
+            $thumbprint = $certificate.Thumbprint.ToUpperInvariant()
+            "RAVYN_AUTHENTICODE_THUMBPRINT=$thumbprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            $configurationPath = 'src-tauri\tauri.conf.json'
+            $configuration = Get-Content $configurationPath -Raw | ConvertFrom-Json
+            $configuration.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $thumbprint -Force
+            $configuration.bundle.windows | Add-Member -NotePropertyName digestAlgorithm -NotePropertyValue 'sha256' -Force
+            $configuration.bundle.windows | Add-Member -NotePropertyName timestampUrl -NotePropertyValue $env:WINDOWS_TIMESTAMP_URL -Force
+            $configuration | ConvertTo-Json -Depth 100 | Set-Content -Encoding utf8 $configurationPath
+          } finally {
+            Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue
           }
 
       - name: Build Tauri desktop bundles
@@ -82,6 +138,8 @@ jobs:
         env:
           RAVYN_APP_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ravyn-app-update.json
           RAVYN_APP_UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+          RAVYN_COMPONENT_MANIFEST_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ravyn-component-manifest.json
+          RAVYN_ENGINE_MANIFEST_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
         with:
           projectPath: src-tauri
           retryAttempts: 1
@@ -111,6 +169,38 @@ jobs:
           Compress-Archive -Path 'dist\Ravyn-portable.exe' -DestinationPath 'dist\ravyn-windows-x86_64-portable.zip'
           Remove-Item 'dist\Ravyn-portable.exe'
 
+      - name: Verify Authenticode signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            Get-Item 'target\release\Ravyn.exe'
+            Get-ChildItem 'target\release\bundle' -Recurse -File |
+              Where-Object { $_.Extension -in '.exe', '.msi' }
+            Get-ChildItem 'dist' -File |
+              Where-Object { $_.Extension -in '.exe', '.msi' }
+          ) | Sort-Object FullName -Unique
+          if ($files.Count -lt 5) {
+            throw 'Expected the application executable, NSIS/MSI bundles, and their publishable copies before signature verification.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RAVYN_AUTHENTICODE_THUMBPRINT)) {
+            throw 'The imported Authenticode certificate thumbprint is unavailable.'
+          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.FullName): $($signature.StatusMessage)"
+            }
+            if ($null -eq $signature.SignerCertificate -or
+                $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $env:RAVYN_AUTHENTICODE_THUMBPRINT) {
+              throw "Unexpected Authenticode signer for $($file.FullName)."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "The Authenticode signature for $($file.FullName) is not timestamped."
+            }
+          }
+
       - name: Generate signed application-update metadata
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -135,6 +225,28 @@ jobs:
             --signed 'dist\ravyn-app-update.json' `
             --artifact $installer.FullName `
             --public-key $env:RAVYN_APP_UPDATE_PUBLIC_KEY
+
+      - name: Generate signed component manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          RAVYN_ENGINE_MANIFEST_PRIVATE_KEY: ${{ secrets.RAVYN_ENGINE_MANIFEST_PRIVATE_KEY }}
+          RAVYN_ENGINE_MANIFEST_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content 'assets\engines\stable.json' -Raw | ConvertFrom-Json
+          $now = [DateTimeOffset]::UtcNow
+          $manifest | Add-Member -NotePropertyName manifest_version -NotePropertyValue $now.ToUnixTimeSeconds() -Force
+          $manifest | Add-Member -NotePropertyName generated_at -NotePropertyValue $now.ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+          $manifest | Add-Member -NotePropertyName expires_at -NotePropertyValue $now.AddDays(30).ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+          $manifest | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 'dist\ravyn-component-manifest-unsigned.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- sign `
+            --manifest 'dist\ravyn-component-manifest-unsigned.json' `
+            --out 'dist\ravyn-component-manifest.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- verify `
+            'dist\ravyn-component-manifest.json' `
+            $env:RAVYN_ENGINE_MANIFEST_PUBLIC_KEY
+          Remove-Item 'dist\ravyn-component-manifest-unsigned.json'
 
       - name: Smoke-test NSIS installation
         shell: pwsh
@@ -213,6 +325,14 @@ jobs:
           name: ravyn-windows-desktop-x86_64
           path: dist/*
           if-no-files-found: error
+
+      - name: Remove imported Authenticode certificate
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:RAVYN_AUTHENTICODE_THUMBPRINT)) {
+            Remove-Item "Cert:\CurrentUser\My\$env:RAVYN_AUTHENTICODE_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
 
   backend-portable:
     strategy:

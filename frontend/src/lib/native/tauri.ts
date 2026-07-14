@@ -35,6 +35,14 @@ export type AppUpdatePhase =
   | "installing"
   | "error";
 
+export interface AppUpdateResult {
+  outcome: "succeeded" | "rolled_back" | "failed" | string;
+  from_version: string;
+  to_version: string;
+  completed_at_unix_ms: number;
+  message: string;
+}
+
 export interface AppUpdateStatus {
   configured: boolean;
   automatic: boolean;
@@ -46,6 +54,8 @@ export interface AppUpdateStatus {
   notes: string | null;
   last_error: string | null;
   install_on_exit: boolean;
+  repair_mode: boolean;
+  last_result: AppUpdateResult | null;
 }
 
 export interface IntegrationRequest {
@@ -114,13 +124,32 @@ export function checkAppUpdate(): Promise<AppUpdateStatus> {
   return invoke<AppUpdateStatus>("check_app_update");
 }
 
+export function repairApplication(): Promise<AppUpdateStatus> {
+  return invoke<AppUpdateStatus>("repair_application");
+}
+
 /** Native folder picker; returns the chosen absolute path or null. */
 export async function pickFolder(defaultPath?: string): Promise<string | null> {
   const result = await open({
     directory: true,
     multiple: false,
     defaultPath,
-    title: "Choose the Ravyn library folder",
+    title: "Choose a folder",
+  });
+  return typeof result === "string" ? result : null;
+}
+
+/** Native executable picker; returns the chosen absolute path or null. */
+export async function pickExecutable(defaultPath?: string): Promise<string | null> {
+  const result = await open({
+    directory: false,
+    multiple: false,
+    defaultPath,
+    title: "Choose an executable",
+    filters: [
+      { name: "Executable files", extensions: ["exe", "cmd", "bat", "com"] },
+      { name: "All files", extensions: ["*"] },
+    ],
   });
   return typeof result === "string" ? result : null;
 }

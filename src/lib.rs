@@ -30,6 +30,7 @@ pub struct Ravyn {
     pub manager: Arc<JobManager>,
     pub provisioning_cancellation: services::components::ProvisioningCancellation,
     pub component_manifest: Arc<dyn services::components::ManifestProvider>,
+    pub component_manifest_refresh: Option<Arc<services::manifest_refresh::RemoteManifestRefresher>>,
     _rqbit_process: Option<services::rqbit_process::RqbitProcessManager>,
 }
 
@@ -66,10 +67,17 @@ impl Ravyn {
             settings.apply_to(&mut config)?;
         }
         config.prepare_directories().await?;
-        let component_manifest = services::components::default_manifest_provider(&config.data_dir)?;
+        let component_manifest_refresh =
+            services::manifest_refresh::RemoteManifestRefresher::from_config(&config)?;
+        // Startup never waits on the network. The provider can immediately use
+        // a verified cache or the embedded catalogue while the refresher checks
+        // for a newer signed release in the background.
+        let component_manifest = services::components::default_manifest_provider(&config)?;
+        // Preserve the operator's configured command paths before managed
+        // engine activation replaces built-in command-name defaults.
+        let configured_config = Arc::new(config.clone());
         apply_managed_engine_paths(&mut config).await?;
         let rqbit_process = start_managed_rqbit_if_required(&mut config, &repository).await?;
-        let configured_config = Arc::new(config.clone());
         let provisioning_cancellation = services::components::ProvisioningCancellation::new();
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);
@@ -101,6 +109,10 @@ impl Ravyn {
             });
         }
 
+        if let Some(refresh) = &component_manifest_refresh {
+            refresh.spawn();
+        }
+
         Ok(Self {
             config,
             base_config,
@@ -109,6 +121,7 @@ impl Ravyn {
             manager,
             provisioning_cancellation,
             component_manifest,
+            component_manifest_refresh,
             _rqbit_process: rqbit_process,
         })
     }

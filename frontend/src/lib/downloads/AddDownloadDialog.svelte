@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { DuplicatePolicy, Job, JobKind, MediaProbe, TorrentProbe } from "../api/types";
+  import type { DuplicatePolicy, Job, JobKind, MediaProbe, SecretReference, TorrentProbe } from "../api/types";
   import Button from "../components/Button.svelte";
   import Dialog from "../components/Dialog.svelte";
   import Dropdown, { type DropdownOption } from "../components/Dropdown.svelte";
@@ -52,6 +52,11 @@
   let embedMetadata = $state(true);
   let seedAfterDownload = $state(true);
   let selectedTorrentFiles = $state<number[]>([]);
+  let secretReferences = $state<SecretReference[]>([]);
+  let secretsError = $state<string | null>(null);
+  let proxySecretId = $state("");
+  let cookiesSecretId = $state("");
+  let authenticationHeaderSecretId = $state("");
 
   $effect(() => {
     if (open) {
@@ -59,6 +64,7 @@
       kind = initialKind;
       error = null;
       clearProbe();
+      void loadSecretReferences();
     }
   });
 
@@ -91,6 +97,29 @@
       ].filter(Boolean).join(" · ") || format.format_id,
     })),
   ]);
+  const proxySecretOptions = $derived(secretOptions("proxy_credentials", "No stored proxy credentials"));
+  const cookieSecretOptions = $derived(secretOptions("cookies", "No stored cookie set"));
+  const authenticationSecretOptions = $derived(secretOptions("authentication_header", "No stored authorization header"));
+
+  function secretOptions(type: SecretReference["secret_type"], emptyLabel: string): DropdownOption[] {
+    return [
+      { value: "", label: emptyLabel },
+      ...secretReferences
+        .filter((reference) => reference.secret_type === type)
+        .map((reference) => ({ value: reference.id, label: reference.name })),
+    ];
+  }
+
+  async function loadSecretReferences(): Promise<void> {
+    if (!connection.client) return;
+    secretsError = null;
+    try {
+      secretReferences = (await connection.client.listSecrets({ limit: 100 })).items;
+    } catch (cause) {
+      secretsError = describeError(cause);
+      secretReferences = [];
+    }
+  }
 
   function clearProbe(): void {
     mediaProbe = null;
@@ -117,6 +146,9 @@
     thumbnail = false;
     embedMetadata = true;
     seedAfterDownload = true;
+    proxySecretId = "";
+    cookiesSecretId = "";
+    authenticationHeaderSecretId = "";
     clearProbe();
   }
 
@@ -176,6 +208,9 @@
         tags: tagsInput ? tagsInput.split(",").map((tag) => tag.trim()).filter(Boolean) : undefined,
         userAgent: userAgent || undefined,
         referer: referer || undefined,
+        proxySecretId: proxySecretId || undefined,
+        cookiesSecretId: cookiesSecretId || undefined,
+        authenticationHeaderSecretId: authenticationHeaderSecretId || undefined,
         media: kind === "media" ? {
           format: mediaFormat || null,
           audio_only: audioOnly,
@@ -270,6 +305,14 @@
         <TextField bind:value={tagsInput} label="Tags" placeholder="comma, separated, tags" />
         <TextField bind:value={userAgent} label="User agent" placeholder="Optional" />
         <TextField bind:value={referer} label="Referer" placeholder="Optional" />
+        {#if kind !== "torrent"}
+          <div class="secret-grid">
+            <div class="dropdown-field"><span class="dropdown-label">Proxy credentials</span><Dropdown options={proxySecretOptions} bind:value={proxySecretId} label="Proxy credentials" /></div>
+            <div class="dropdown-field"><span class="dropdown-label">Cookies</span><Dropdown options={cookieSecretOptions} bind:value={cookiesSecretId} label="Cookie secret" /></div>
+            <div class="dropdown-field"><span class="dropdown-label">Authorization header</span><Dropdown options={authenticationSecretOptions} bind:value={authenticationHeaderSecretId} label="Authorization header secret" /></div>
+          </div>
+          {#if secretsError}<p class="secret-note warning">Stored credentials could not be loaded: {secretsError}</p>{:else}<p class="secret-note">Create or replace secret values from Settings. Values are never read back into this dialog.</p>{/if}
+        {/if}
       </div>
     </details>
 
@@ -310,5 +353,9 @@
   .file-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
   .advanced summary { cursor: default; font-size: var(--text-body); font-weight: 600; color: var(--text-primary); padding: var(--space-1) 0; }
   .advanced-body { display: flex; flex-direction: column; gap: var(--space-4); padding-top: var(--space-3); }
-  @media (max-width: 680px) { .option-grid { grid-template-columns: 1fr; } .analyze-row { align-items: stretch; flex-direction: column; } .media-card { align-items: flex-start; } .probe-card img { width: 112px; height: 74px; } }
+  .secret-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+  .secret-grid :global(.dropdown), .secret-grid :global(select) { width: 100%; }
+  .secret-note { margin: calc(var(--space-2) * -1) 0 0; color: var(--text-secondary); font-size: var(--text-caption); }
+  .secret-note.warning { color: var(--status-warning); }
+  @media (max-width: 680px) { .option-grid, .secret-grid { grid-template-columns: 1fr; } .analyze-row { align-items: stretch; flex-direction: column; } .media-card { align-items: flex-start; } .probe-card img { width: 112px; height: 74px; } }
 </style>

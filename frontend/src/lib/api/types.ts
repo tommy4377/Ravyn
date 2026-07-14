@@ -28,7 +28,9 @@ export type ComponentState =
   | "update_available"
   | "failed"
   | "unsupported"
-  | "custom_path";
+  | "cancelled"
+  | "custom_path"
+  | "custom_path_invalid";
 
 export interface FeatureStatus {
   feature: FeatureId;
@@ -77,6 +79,31 @@ export interface ComponentOverview {
   manifest_provider: string;
 }
 
+export type ManifestRefreshPhase =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "current"
+  | "stale"
+  | "error";
+
+export interface ComponentManifestStatus {
+  configured: boolean;
+  phase: ManifestRefreshPhase;
+  channel: string;
+  endpoint: string | null;
+  source: string;
+  manifest_version: number | null;
+  generated_at: string | null;
+  expires_at: string | null;
+  stale: boolean;
+  etag: string | null;
+  last_checked_at: string | null;
+  last_updated_at: string | null;
+  last_error: string | null;
+}
+
+
 export interface FeatureSelection {
   feature: FeatureId;
   enabled: boolean;
@@ -99,6 +126,28 @@ export interface SetupInstallationState {
   integration_completed: boolean;
   integration_errors: string[];
   relaunch_pending: boolean;
+}
+
+export interface SetupIntegrationConsent {
+  id: string;
+  installation_mode: InstallationMode;
+  install_application: boolean;
+  register_installed_app: boolean;
+  start_menu_shortcut: boolean;
+  desktop_shortcut: boolean;
+  launch_at_startup: boolean;
+  launch_after_setup: boolean;
+  consented_at: string;
+}
+
+export interface SaveIntegrationConsentRequest {
+  installation_mode: InstallationMode;
+  install_application: boolean;
+  register_installed_app: boolean;
+  start_menu_shortcut: boolean;
+  desktop_shortcut: boolean;
+  launch_at_startup: boolean;
+  launch_after_setup: boolean;
 }
 
 export interface ReportInstallationRequest {
@@ -126,6 +175,7 @@ export interface SetupState {
   library_prepared: boolean;
   data_dir: string;
   installation: SetupInstallationState | null;
+  integration_consent: SetupIntegrationConsent | null;
 }
 
 export interface PrepareLibraryResult {
@@ -962,6 +1012,30 @@ export interface SettingsValidationResponse {
   valid: boolean;
   restart_required: boolean;
   issues: SettingsIssue[];
+}
+
+export type SecretType =
+  | "api_token"
+  | "proxy_credentials"
+  | "rqbit_credentials"
+  | "cookies"
+  | "authentication_header"
+  | "tls_certificate"
+  | "private_key";
+
+/** Metadata only. Secret values never leave the platform credential store. */
+export interface SecretReference {
+  id: string;
+  name: string;
+  secret_type: SecretType;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PutSecretRequest {
+  name: string;
+  secret_type: SecretType;
+  secret: string;
 }
 
 export interface ReadinessStatus {

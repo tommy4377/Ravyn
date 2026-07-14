@@ -6,15 +6,15 @@
   --text-caption: 12px;
   --text-body: 14px;
   --text-body-strong: 14px;
-  --text-subtitle: 20px;
-  --text-title: 30px;
+  --text-subtitle: 18px;
+  --text-title: 24px;
   --line-height-body: 20px;
 
-  --radius-small: 3px;
-  --radius-control: 5px;
-  --radius-medium: 7px;
-  --radius-layer: 10px;
-  --radius-large: 14px;
+  --radius-small: 2px;
+  --radius-control: 4px;
+  --radius-medium: 6px;
+  --radius-layer: 8px;
+  --radius-large: 12px;
   --radius-pill: 999px;
 
   --space-1: 4px;
@@ -27,7 +27,7 @@
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
-  --page-padding: clamp(18px, 3vw, 36px);
+  --page-padding: clamp(18px, 2.4vw, 28px);
 
   --control-compact: 28px;
   --control-default: 32px;
@@ -62,8 +62,8 @@
 
   --surface-navigation: rgba(247, 249, 252, 0.74);
   --surface-content: rgba(255, 255, 255, 0.84);
-  --surface-card: rgba(255, 255, 255, 0.7);
-  --surface-card-hover: rgba(255, 255, 255, 0.9);
+  --surface-card: rgba(255, 255, 255, 0.62);
+  --surface-card-hover: rgba(255, 255, 255, 0.84);
   --surface-flyout: rgba(255, 255, 255, 0.82);
   --surface-overlay: rgba(255, 255, 255, 0.93);
 
@@ -88,16 +88,13 @@
   --status-info: #005fb8;
   --status-info-bg: #e8f2fb;
 
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.035), 0 6px 22px rgba(15, 23, 42, 0.025);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.055);
   --shadow-flyout: 0 16px 40px rgba(15, 23, 42, 0.16), 0 2px 8px rgba(15, 23, 42, 0.08);
 
   --material-intensity: 0.76;
   --backdrop-base: #eef3f8;
-  --backdrop-fallback:
-    radial-gradient(circle at 15% 4%, rgba(66, 153, 225, 0.35), transparent 34%),
-    radial-gradient(circle at 88% 92%, rgba(132, 94, 247, 0.2), transparent 36%),
-    linear-gradient(145deg, #f8fbff 0%, #e9f0f7 46%, #f4f7fb 100%);
-  --backdrop-tint: linear-gradient(145deg, rgba(255, 255, 255, 0.66), rgba(246, 249, 252, 0.82));
+  --backdrop-fallback: linear-gradient(145deg, #edf2f6 0%, #f8fafc 100%);
+  --backdrop-tint: linear-gradient(145deg, rgba(255, 255, 255, 0.7), rgba(246, 249, 252, 0.84));
   --backdrop-glow-a: #57a7e8;
   --backdrop-glow-b: #aa90e8;
   --backdrop-blur: 42px;
@@ -123,8 +120,8 @@
 
   --surface-navigation: rgba(10, 12, 15, 0.8);
   --surface-content: rgba(15, 17, 21, 0.86);
-  --surface-card: rgba(24, 27, 32, 0.72);
-  --surface-card-hover: rgba(29, 33, 39, 0.9);
+  --surface-card: rgba(20, 23, 28, 0.68);
+  --surface-card-hover: rgba(27, 31, 37, 0.86);
   --surface-flyout: rgba(25, 28, 33, 0.88);
   --surface-overlay: rgba(19, 22, 26, 0.96);
 
@@ -157,14 +154,11 @@
   --status-info: #6bcbff;
   --status-info-bg: rgba(28, 65, 87, 0.62);
 
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.18), 0 10px 28px rgba(0, 0, 0, 0.08);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28);
   --shadow-flyout: 0 20px 48px rgba(0, 0, 0, 0.5), 0 2px 10px rgba(0, 0, 0, 0.28);
 
   --backdrop-base: #080a0d;
-  --backdrop-fallback:
-    radial-gradient(circle at 14% 6%, rgba(12, 91, 145, 0.36), transparent 34%),
-    radial-gradient(circle at 90% 90%, rgba(80, 53, 148, 0.22), transparent 38%),
-    linear-gradient(145deg, #0a0d11 0%, #10151b 48%, #080a0d 100%);
+  --backdrop-fallback: linear-gradient(145deg, #090b0e 0%, #11151a 100%);
   --backdrop-tint: linear-gradient(145deg, rgba(4, 6, 8, 0.76), rgba(10, 12, 15, 0.88));
   --backdrop-glow-a: #0d6b9e;
   --backdrop-glow-b: #5e3f96;
@@ -179,7 +173,7 @@
 :root[data-density="compact"] {
   --row-height: 36px;
   --row-padding-v: var(--space-1);
-  --page-padding: clamp(14px, 2.4vw, 28px);
+  --page-padding: clamp(14px, 2.2vw, 24px);
 }
 
 * { box-sizing: border-box; }
@@ -229,3 +223,10 @@ button { color: inherit; }
     --stroke-surface: CanvasText;
   }
 }
+
+
+/* Shared structural primitives keep screens visually consistent. */
+.page-stack { height: 100%; min-width: 0; display: flex; flex-direction: column; }
+.content-panel { border: 1px solid var(--stroke-surface); border-radius: var(--radius-layer); background: var(--surface-card); box-shadow: var(--shadow-card); overflow: hidden; }
+.control-cluster { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.muted-label { color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; letter-spacing: .02em; }

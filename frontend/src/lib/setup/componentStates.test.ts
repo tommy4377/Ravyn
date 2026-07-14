@@ -19,7 +19,9 @@ describe("componentStates", () => {
       "update_available",
       "failed",
       "unsupported",
+      "cancelled",
       "custom_path",
+      "custom_path_invalid",
     ];
     for (const state of states) {
       expect(COMPONENT_STATE_UI[state].label).toBeTruthy();

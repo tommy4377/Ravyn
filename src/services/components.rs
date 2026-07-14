@@ -508,6 +508,9 @@ impl BuiltInManifestProvider {
             manifest: crate::services::engines::EngineManifest {
                 schema_version: 1,
                 channel: "stable".into(),
+                manifest_version: None,
+                generated_at: None,
+                expires_at: None,
                 artifacts: Vec::new(),
             },
         }
@@ -564,26 +567,96 @@ impl ManifestProvider for FileManifestProvider {
     }
 }
 
-/// Uses the first available manifest and falls back to the embedded release
-/// catalogue when the optional local override is absent.
+/// Verified remote-cache provider. Unlike an operator override, cache
+/// corruption or expiry is recoverable and therefore falls back to the
+/// embedded release catalogue instead of blocking application startup.
+pub struct CachedManifestProvider {
+    path: PathBuf,
+    public_key: Option<[u8; 32]>,
+    channel: String,
+    stale_grace: chrono::Duration,
+}
+
+impl CachedManifestProvider {
+    pub fn new(
+        path: PathBuf,
+        public_key: Option<[u8; 32]>,
+        channel: String,
+        stale_grace: chrono::Duration,
+    ) -> Self {
+        Self {
+            path,
+            public_key,
+            channel,
+            stale_grace,
+        }
+    }
+}
+
+impl ManifestProvider for CachedManifestProvider {
+    fn load(&self) -> Result<Option<crate::services::engines::EngineManifest>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let public_key = self.public_key.ok_or_else(|| {
+            RavynError::provisioning(
+                ProvisioningErrorCode::ManifestUnavailable,
+                "cached component manifests cannot be verified because this build has no release public key",
+            )
+        })?;
+        crate::services::manifest_refresh::validate_cached_manifest(
+            &self.path,
+            &public_key,
+            &self.channel,
+            chrono::Utc::now(),
+            self.stale_grace,
+        )
+        .map(Some)
+    }
+
+    fn name(&self) -> &'static str {
+        "remote-cache"
+    }
+}
+
+/// Uses an explicit operator override first, then a verified remote cache,
+/// and finally the embedded release catalogue. Invalid operator overrides are
+/// treated as configuration errors; invalid cache entries are quarantined by
+/// falling back so Ravyn remains usable offline.
 pub struct HybridManifestProvider {
-    primary: FileManifestProvider,
+    operator_override: FileManifestProvider,
+    remote_cache: CachedManifestProvider,
     fallback: BuiltInManifestProvider,
 }
 
 impl HybridManifestProvider {
-    pub fn for_data_dir(data_dir: &Path) -> Result<Self> {
+    pub fn for_config(config: &crate::config::Config) -> Result<Self> {
+        let public_key = embedded_manifest_public_key()?;
+        let stale_grace = chrono::Duration::seconds(
+            i64::try_from(config.component_manifest_stale_grace_secs).map_err(|_| {
+                RavynError::Invalid("component manifest stale grace is too large".into())
+            })?,
+        );
         Ok(Self {
-            primary: FileManifestProvider::new(
-                data_dir.join("engines").join("manifest.json"),
-                embedded_manifest_public_key()?,
+            operator_override: FileManifestProvider::new(
+                config.data_dir.join("engines").join("manifest.json"),
+                public_key,
+            ),
+            remote_cache: CachedManifestProvider::new(
+                crate::services::manifest_refresh::cache_manifest_path(
+                    &config.data_dir,
+                    &config.component_manifest_channel,
+                ),
+                public_key,
+                config.component_manifest_channel.clone(),
+                stale_grace,
             ),
             fallback: BuiltInManifestProvider::embedded()?,
         })
     }
 }
 
-fn embedded_manifest_public_key() -> Result<Option<[u8; 32]>> {
+pub(crate) fn embedded_manifest_public_key() -> Result<Option<[u8; 32]>> {
     let Some(value) = ENGINE_MANIFEST_PUBLIC_KEY_HEX else {
         return Ok(None);
     };
@@ -600,19 +673,28 @@ fn embedded_manifest_public_key() -> Result<Option<[u8; 32]>> {
 
 impl ManifestProvider for HybridManifestProvider {
     fn load(&self) -> Result<Option<crate::services::engines::EngineManifest>> {
-        match self.primary.load()? {
-            Some(manifest) => Ok(Some(manifest)),
-            None => self.fallback.load(),
+        if let Some(manifest) = self.operator_override.load()? {
+            return Ok(Some(manifest));
+        }
+        match self.remote_cache.load() {
+            Ok(Some(manifest)) => Ok(Some(manifest)),
+            Ok(None) => self.fallback.load(),
+            Err(error) => {
+                tracing::warn!(%error, "cached component manifest is unusable; using the embedded catalogue");
+                self.fallback.load()
+            }
         }
     }
 
     fn name(&self) -> &'static str {
-        "local-file+built-in"
+        "operator+remote-cache+built-in"
     }
 }
 
-pub fn default_manifest_provider(data_dir: &Path) -> Result<Arc<dyn ManifestProvider>> {
-    Ok(Arc::new(HybridManifestProvider::for_data_dir(data_dir)?))
+pub fn default_manifest_provider(
+    config: &crate::config::Config,
+) -> Result<Arc<dyn ManifestProvider>> {
+    Ok(Arc::new(HybridManifestProvider::for_config(config)?))
 }
 
 /// Result of a successful managed component activation.
@@ -1815,6 +1897,9 @@ mod tests {
         let manifest = crate::services::engines::EngineManifest {
             schema_version: 1,
             channel: "stable".into(),
+            manifest_version: None,
+            generated_at: None,
+            expires_at: None,
             artifacts: Vec::new(),
         };
         let signature = signing_key.sign(&serde_json::to_vec(&manifest).unwrap());

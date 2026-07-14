@@ -23,6 +23,38 @@ pub(super) struct ComponentOverviewResponse {
     manifest_provider: &'static str,
 }
 
+pub(super) async fn component_manifest_status(
+    State(s): State<ApiState>,
+) -> Result<Json<crate::services::manifest_refresh::ManifestRefreshStatus>> {
+    let status = match &s.component_manifest_refresh {
+        Some(refresh) => refresh.status().await,
+        None => crate::services::manifest_refresh::ManifestRefreshStatus::disabled(
+            s.configured_config.component_manifest_channel.clone(),
+            "remote component manifest refresh is not configured for this build",
+        ),
+    };
+    Ok(Json(status))
+}
+
+pub(super) async fn refresh_component_manifest(
+    State(s): State<ApiState>,
+) -> Result<Json<crate::services::manifest_refresh::ManifestRefreshStatus>> {
+    let refresh = s.component_manifest_refresh.as_ref().ok_or_else(|| {
+        crate::error::RavynError::Unavailable(
+            "remote component manifest refresh is not configured for this build".into(),
+        )
+    })?;
+    let status = audited(
+        &s.repository,
+        "component_manifest_refresh",
+        "component_manifest",
+        None,
+        refresh.refresh(true).await,
+    )
+    .await?;
+    Ok(Json(status))
+}
+
 pub(super) async fn list_components(
     State(s): State<ApiState>,
 ) -> Result<Json<ComponentOverviewResponse>> {

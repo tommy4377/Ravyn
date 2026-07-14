@@ -221,6 +221,8 @@ mod tests {
             ("get", "/v1/system/cleanup-policies"),
             ("get", "/v1/statistics"),
             ("get", "/v1/components"),
+            ("get", "/v1/components/manifest"),
+            ("post", "/v1/components/manifest"),
             ("post", "/v1/components/features"),
         ] {
             assert!(

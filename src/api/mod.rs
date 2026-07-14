@@ -67,6 +67,7 @@ pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) 
         base_config: app.base_config.clone(),
         configured_config: app.configured_config.clone(),
         component_manifest: app.component_manifest.clone(),
+        component_manifest_refresh: app.component_manifest_refresh.clone(),
         protection: protection.clone(),
         library_import_status: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::services::library::LibraryImportStatus::default(),

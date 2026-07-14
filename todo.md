@@ -1,250 +1,92 @@
-
-# What is still missing exactly
-
-## ✅ IMPLEMENTED — items resolved since the original audit
-
-### ~~2. Installed engines are not activated in the current backend~~
-
-`finish_setup_handoff()` (`src-tauri/src/lib.rs:47-77`) now launches the installed copy via `std::process::Command::new(&expected)` and exits the original process. The spawned copy boots a fresh backend, so engine paths are deterministically applied.
-
-### ~~3. rqbit is installed but not truly managed~~
-
-`src/services/rqbit_process.rs` implements a full `RqbitProcessManager` with a six-state lifecycle (`Stopped`, `Starting`, `Ready`, `Degraded`, `Restarting`, `Failed`, `Stopping`). It binds a loopback port, spawns rqbit, waits for HTTP readiness, verifies required API endpoints, handles port collisions with retry, and stops cleanly on shutdown.
-
-### ~~4. Setup does not launch the installed copy~~
-
-`finish_setup_handoff()` spawns the executable at `%LOCALAPPDATA%\Ravyn\Ravyn.exe`, then exits via `app.exit(0)`. The installed copy boots its own backend before opening the main window.
-
-### ~~5. Registered uninstallation does not exist~~
-
-`src-tauri/src/uninstall.rs` provides `try_handle_command_line()` parsing `--uninstall`, registry cleanup, shortcut removal, data-directory purge (with `--purge-data`), and self-delete via PowerShell.
-
-### ~~9. Version comparison is just string inequality~~
-
-`version_cmp()` in `src/services/components.rs:1103-1126` compares numeric runs of dotted and date-style versions correctly (e.g. `2025.10.1 > 2025.9.30`), with non-numeric suffixes as tie-breaker.
-
-### ~~10. The health check does not validate the expected version~~
-
-`install_component_with_progress()` (`src/services/components.rs:890-993`) extracts `detected_version` from the binary's `--version` output and compares it against `artifact.version`. A mismatch deactivates the component and returns an error.
-
-### ~~13. A global limit on API-requested installations is missing~~
-
-`ProvisioningCancellation` (`src/services/components.rs:385-471`) includes a `tokio::sync::Semaphore::new(2)` limiting concurrent installations. The `acquire()` method blocks until a permit is available, and cancellation remains responsive.
-
-### ~~14. Cancellation still has a race condition near activation~~
-
-Token checks are inserted before `set_executable()`, before `atomic_replace()`, and after the download block in `download_and_install()` (`src/services/engines.rs:374-400`).
-
-### ~~16. Executable installation is not fully transactional~~
-
-`install_executable()` (`src-tauri/src/integration.rs:203-236`) copies to `.ravyn.install.tmp`, verifies SHA-256, renames the old target to `.ravyn.previous.exe`, activates the staged file, and restores from backup on failure. `confirm_installed_copy_ready()` removes the backup after a successful startup.
-
-### ~~21. The embedded API does not mandatorily use a per-process token~~
-
-The desktop shell (`src-tauri/src/backend.rs:101`) generates a `uuid::Uuid::new_v4()` token per process and passes it only through Tauri IPC. The `require_token` middleware in `src/api/mod.rs` enforces it for every API call.
-
----
-
-## 🔶 PARTIALLY IMPLEMENTED — exists but needs finishing
-
-### 7. The signed manifest system exists but is not connected
-
-`SignedEngineManifest` and Ed25519 verification are present in `src/services/engines.rs:132-151`. The `FileManifestProvider` in `components.rs:527-565` loads and verifies a signed manifest from the data directory. The `HybridManifestProvider` uses it as the primary source, falling back to the built-in.
-
-**Still missing:**
-* public key embedded in the app (env var only: `RAVYN_ENGINE_MANIFEST_PUBLIC_KEY`);
-* no operational **remote** provider uses the signed manifest;
-* no periodic remote refresh with ETag/channel identification;
-* no downgrade/replay protection (manifest version/timestamp/expiration);
-* no controlled remote refresh with fallback to last verified.
-
-~~Manifest generation/checksum/signing pipeline (item 2)~~ ✅ — see below.
-
-### 8. There is no real remote engine update
-
-`update_available` (`components.rs:751-758`) correctly compares manifest version vs active version via `version_cmp`. But the manifest only changes when a new Ravyn binary ships with a different embedded manifest, or when the user places a local signed file.
-
-**Still missing:**
-* periodic manifest download from a remote URL;
-* cache with ETag/Last-Modified;
-* effectively updatable stable/beta channel switching;
-* new version notification;
-* refresh retry and fallback to the last verified manifest.
-
-### ~~11. Declared capabilities are not truly verified~~ ✅
-
-`rqbit_api_health()`, `ffmpeg_capability_check()`, `seven_zip_capability_check()`, and `ytdlp_capability_check()` (`src/services/components.rs`) each run a real functional probe from `ComponentManager::health_check`, not just a version banner:
-* FFmpeg runs a minimal `lavfi` color source through a null muxer (`-f lavfi -i color=... -f null -`), proving encode/decode actually works;
-* 7-Zip is handed a hand-built minimal ZIP archive and asked to `t` (test) it, proving real archive I/O;
-* yt-dlp's `--help` output is checked for the option flags the adapter layer depends on (`--dump-single-json`, `--download-archive`, `--ffmpeg-location`, `--progress-template`).
-
-A failed capability check now fails the health check (`healthy: false`) with a descriptive message, exactly like the existing rqbit check.
-
-### ~~15. Cleaning and retention of engine versions are missing~~ ✅
-
-`EngineManager::cleanup_versions()` (`src/services/engines.rs`) deletes every versioned directory for an engine except the active version and the single previous version kept for rollback/diagnostics (satisfying the max-one-diagnostic retention policy — this also covers failed-download versioned directories, since a failed `download_and_install` leaves its version directory un-adopted by `active.json`/`previous.json`), and separately deletes stale `.download` partial-download temp files even from directories that are kept. `ComponentManager::cleanup_component()` wraps it per component and is called automatically (best-effort, logged on failure, never fails the parent operation) after every successful install and rollback. It's also exposed directly via `POST /v1/components/{id}/cleanup`, which returns an `EngineCleanupReport` (removed versions, removed temp files, bytes freed).
-
-### 17. In case of failed copy, the wrong executable may be registered
-
-`integration.rs:111-128` guards against registering when `install_application` is true but `installed_exe` is None (copy failed). However, `effective_exe = installed_exe.clone().or(source_exe)` at line 130 can still fall back to the source executable when `install_application` was not requested but other steps were.
-
-**Still missing:**
-* explicit blocking of all dependent registrations when the copy step did not succeed for any reason.
-
-### 🔶 19. Portable mode is explicit, but portable data isolation is still incomplete
-
-Setup now requires an explicit installed, portable, or development choice and persists that mode before completion. Portable/development builds are intentionally excluded from the installed-app updater.
-
-**Still missing:**
-* a data-directory mode alongside the portable executable or an explicit portable data path;
-* migration rules that never move portable data into `%LOCALAPPDATA%` implicitly;
-* a separately designed portable update flow, if one is wanted later.
-
-### 🔶 22. Provisioning errors are now structured, most call sites converted
-
-`RavynError::Provisioning { code, message, details, retryable }` (`src/error.rs`) carries a `ProvisioningErrorCode` (`MANIFEST_UNAVAILABLE`, `PLATFORM_UNSUPPORTED`, `INVALID_MANIFEST_SIGNATURE`, `CHECKSUM_MISMATCH`, `INSUFFICIENT_SPACE`, `DOWNLOAD_INTERRUPTED`, `QUARANTINED`, `HEALTH_CHECK_FAILED`, `ROLLBACK_FAILED`, `INVALID_CUSTOM_PATH`, `APP_INSTALL_FAILED` — each with its own `api_code()`, HTTP status, `FailureClass`, and default `retryable`) plus a `ProvisioningErrorDetails` struct (`component`, `stage`, `expected_version`, `detected_version`, `path`, `target`) that is now serialized into the API error response's `details` field (previously always `{}`). Built with a fluent `RavynError::provisioning(code, message).with_component(...).with_stage(...)` builder.
-
-Converted call sites: `EngineManifest::artifact()` (platform unsupported), `SignedEngineManifest::verify()` (invalid signature), `EngineManager::install_verified()`/`download_and_install()` (checksum mismatch vs. download interrupted, now distinguished), `FileManifestProvider::load()` (manifest unavailable), `ComponentManager::install_component_with_progress()` and `rollback_component()` (health check / rollback failed, with component + stage + expected/detected version attached).
-
-**Still missing:**
-* insufficient space is only reachable indirectly via the existing OS `ENOSPC` → `FailureClass::DiskFull` IO-error path, not a proactive free-space precheck before download;
-* antivirus/quarantine detection (no OS-level signal is currently probed);
-* invalid custom path and failed app install are desktop/Tauri-layer concerns (`src-tauri/`), not yet wired to this backend error type.
-
-### 🔶 24. End-to-end provisioning tests: some added, the HTTP-mock-server ones are blocked by design
-
-`tests/http_integration.rs` (795 lines) covers HTTP download scenarios with a mock server, but for the *main* download engine, not managed-engine provisioning. Newly added this pass:
-* `provisioning_limiter_caps_simultaneous_installations_at_two` / `provisioning_limiter_acquire_is_cancellable_while_queued` (`src/services/components.rs`) — the concurrency-limiting semaphore (item 13's global limit) had **zero** test coverage before this; now both the cap and cancel-while-queued behavior are verified;
-* `artifact_validation_rejects_unsafe_urls_and_archive_members` (`src/services/engines.rs`) — plain-HTTP URLs, embedded credentials, URL fragments, and unsafe (`..`/absolute) `archive_member` paths are all confirmed rejected, and a valid archive-member artifact is confirmed accepted;
-* `installs_the_verified_member_of_an_archive_artifact` / `rejects_an_archive_member_whose_content_fails_checksum_verification` / `cleanup_keeps_only_the_active_and_previous_versions` (added alongside items 1/15) exercise install → extract → activate → cleanup end to end;
-* `installation_report_round_trips_independently_of_completion` (added alongside item 18) exercises the setup-completion/installation-report interaction end to end.
-
-**Investigated and deliberately not built:** a mock-HTTP-server test of `EngineManager::download_and_install()` itself (real download, incorrect checksum, insecure redirect, cancellation-at-every-stage, restart/activation via the network path). `EngineArtifact::validate()` unconditionally requires `https://` — this is intentional defense-in-depth for automatically-downloaded engine binaries (stricter than the main download engine, which only gates private-network access behind `--allow-private-network`) — and `download_and_install()` builds its own internal `reqwest::Client` with no way to inject a trusted root CA for a self-signed test server. Testing the real network path honestly would require either weakening that HTTPS invariant (rejected — it's a real security boundary, not test friction) or adding TLS test-certificate infrastructure (a new dependency and non-trivial harness) to exercise it against a local HTTPS mock. Left for a follow-up that explicitly decides to take on that infrastructure.
-
-**Still out of backend scope** (desktop/Tauri, `src-tauri/`): application installation, copy failure, launch of the installed copy, uninstall, rqbit spawn/readiness/crash under real OS process supervision.
-
----
-
-## ❌ NOT IMPLEMENTED — still needs to be built
-
-### 🔶 1. The embedded manifest is now populated for 3 of 4 engines
-
-`assets/engines/stable.json` now carries real, independently verified `x86_64-pc-windows-msvc` artifacts for `yt-dlp` (2026.07.04, raw `yt-dlp.exe` from the official GitHub release), `rqbit` (9.0.0-beta.2, raw `rqbit.exe`), and `ffmpeg` (a pinned BtbN static-build release, `autobuild-2026-07-13-14-11`, not the rolling `latest` tag). Every URL, size, and SHA-256 was checked against the real download (GitHub's server-computed asset digest, cross-checked with a local `Get-FileHash` after download) before being written into the manifest, and `embedded_manifest_parses_validates_and_covers_every_windows_engine` (`src/services/components.rs`) asserts the embedded manifest actually parses, validates, and resolves an artifact for each of these three engines on the Windows target at test time.
-
-**Resolved:** the FFmpeg/archive distribution question — `EngineArtifact` gained `archive_member`/`member_sha256` fields (`src/services/engines.rs`), and `EngineManager::install_verified()`/`download_and_install()` now extract and checksum-verify a single named member out of a downloaded ZIP (via the new `zip` crate dependency, run on a blocking task) instead of requiring the artifact to already be a bare executable. The activation checksum stored in `active.json` is the *member's* hash, not the archive's. FFmpeg's manifest entry uses this: the artifact `sha256`/`size_bytes` describe the 158 MB build archive, and `archive_member`/`member_sha256` point at and verify the extracted `bin/ffmpeg.exe` (138 MB) inside it.
-
-**Still missing:**
-* 7-Zip has no manifest entry. The official distribution offers no single-file Windows binary that both (a) requires no separate 7-Zip installation to unpack and (b) supports the ZIP format used by the item-11 capability probe: `7zr.exe` (the one genuinely raw GitHub release asset) only reads `.7z` archives, while the full `7za.exe` (which reads ZIP) ships only inside a `.7z`-compressed "Extra" package — a circular dependency until this crate can also read `.7z`, or the capability probe is changed to hand-build a minimal `.7z` test archive instead of a `.zip` one.
-
----
-
-### 🔶 6. Desktop release and installer pipeline are implemented; Authenticode is still missing
-
-`.github/workflows/release.yml` now validates the frontend, tests the Rust workspace, builds the Tauri desktop, publishes NSIS/MSI/portable artifacts, generates checksums/SBOM/attestations, silently installs and launches the NSIS build, then silently uninstalls it and verifies cleanup. Release tags are required to match every project version.
-
-**Still missing:**
-* Authenticode signing for the executable and installers;
-* a full UI-driven clean-machine setup/download/update test rather than the current process-level startup smoke test.
-
----
-
-### ~~12. Manual rollback does not execute a full health check~~ ✅
-
-The low-level `EngineManager::rollback()` (`engines.rs:471-495`) still only verifies the checksum, but `ComponentManager::rollback_component()` (`src/services/components.rs`) — the method actually used by `POST /v1/components/{id}/rollback` and by the automatic rollback-on-failed-install path — now runs the checksum swap, then the same `health_check()` used after a fresh install (process launch, version detection, and capability verification, including the rqbit HTTP check). If the restored version fails, it is deactivated instead of being reported as the active/verified version.
-
----
-
-### ~~18. The backend does not know the result of the Windows installation~~ ✅
-
-`setup_state` (migration `0024_setup_installation.sql`) now carries `installation_mode`, `installed_exe`, `installed_version`, `installed_sha256`, `integration_completed`, `integration_errors` (JSON array), and `relaunch_pending`. `Repository::save_installation_report()`/`load_setup_state()` (`src/storage/setup.rs`) persist and round-trip an `InstallationRecord` independently of `completed`/`completed_at`, so reporting installation before setup finishes doesn't mark it complete, and completing setup afterward doesn't erase the installation report (covered by `installation_report_round_trips_independently_of_completion`).
-
-A new `POST /v1/setup/installation` endpoint (`src/api/routes/setup.rs`) accepts the report — validating `installation_mode` against `{installed, portable, development}`, `installed_sha256` as 64 hex characters, and bounding field lengths and the number/size of `integration_errors` — and `GET /v1/setup` returns the persisted result under `installation`. The setup frontend now calls this endpoint, and both frontend policy and backend completion validation reject an unverified installation state.
-
----
-
-### 🔶 20. Signed silent application updates are implemented; health-confirmed rollback and repair remain
-
-Installed Windows builds now check a compile-time HTTPS feed, verify Ed25519-signed metadata, stream the NSIS installer into a private staging directory, enforce signed size/SHA-256, expose passive status in Settings, reverify the staged file on close, run the current-user installer silently after the process exits, and relaunch Ravyn. Tagged releases generate and verify `ravyn-app-update.json` automatically. Portable/development builds do not self-update.
-
-**Still missing:**
-* confirmation that the newly installed version reaches backend/UI readiness before the previous version is considered disposable;
-* automatic rollback to a retained previous application binary after failed readiness;
-* a persisted updater result/error marker across process restarts;
-* repair of missing or corrupted application files;
-* a full two-version updater E2E test on Windows.
-
----
-
-### 🔶 23. Tauri commands are isolated, backend-authorized, and process-idempotent; persisted consent remains
-
-Setup and main use separate capability files, each sensitive command validates the caller window label in Rust, release builds do not grant the debug MCP bridge, and a production CSP is active. Setup-native commands now verify the authenticated database-backed `/v1/setup` state, and an in-process command guard serializes integration, restart, and handoff transitions so duplicate successful calls are rejected. Setup API mutations are rejected after completion.
-
-**Still missing:**
-* a persisted one-shot native nonce/consent record that survives a process restart;
-* durable idempotency records for each individual Windows integration operation;
-* UI-driven hostile-order/race tests against a real WebView2 build.
-
----
-
-### 🔶 25. CI verifies and packages the desktop; full clean-machine product E2E remains
-
-The Windows workflow now runs `npm ci`, frontend check/test/build, `cargo test --locked --workspace --all-targets`, Tauri bundling, signed update-feed generation, NSIS install/startup smoke testing, uninstall verification, SBOM, checksums, and attestations.
-
-**Still missing:**
-* UI automation through first-run setup;
-* a real download test in the installed app;
-* update from version N to N+1 with readiness confirmation;
-* rollback validation;
-* DPI, accessibility, and WebView2 clean-machine coverage.
-
----
-
-### ✅ 26. Synthetic Windows wallpaper/accent bridge and Explorer actions
-
-The main window now receives a cached copy of the current Windows wallpaper, standard wallpaper positioning metadata, monitor/virtual-desktop geometry, DPI/frame offsets, DWM colorization color, and transparency preference through a capability-restricted Tauri command. Svelte keeps the desktop plane aligned during window movement, derives separate accessible light/dark accent palettes, and retains a custom-image override. Output paths can be opened or revealed through validated absolute-path native commands.
-
-**Remaining edge case:** separate wallpaper images assigned independently to different monitors require a future `IDesktopWallpaper` provider; current positioning supports the active wallpaper and Span geometry.
-
-# Exact order to complete it
-
-The correct order now is:
-
-1. ~~Populate the embedded manifest with real artifacts.~~ ✅ (partial: yt-dlp/rqbit/ffmpeg done, 7-Zip still blocked on a format decision)
-2. ~~Add manifest generation, checksum, and signing pipeline.~~ ✅ — `src/bin/manifest_tool.rs` (`cargo run --bin manifest_tool`): `checksum <file>` prints sha256/size for an artifact; `keygen` generates an Ed25519 keypair via the OS CSPRNG (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix — no new RNG dependency); `sign --manifest <file> --key <hex-or-$RAVYN_ENGINE_MANIFEST_PRIVATE_KEY> --out <file>` validates and signs a plain manifest, self-verifying the signature before writing; `verify <signed> --public-key <hex>` checks a signed manifest exactly as the backend does. Manually exercised end to end against the real `assets/engines/stable.json` (signs, verifies with the right key, correctly rejects the wrong key).
-3. ~~Correct engine activation after provisioning via controlled restart.~~ ✅
-4. ~~Implement `RqbitProcessManager` and HTTP health check.~~ ✅
-5. ~~Actually launch the installed copy and close the original setup.~~ ✅
-6. ~~Implement `--uninstall`.~~ ✅
-7. 🔶 **Make Ravyn executable install/update/rollback transactional.** — install and signed install-on-close update are implemented; readiness-confirmed rollback/repair remain.
-8. ~~Persist desktop installation mode and result in the setup backend.~~ ✅
-9. ~~Correct version comparison, detected version, and capability checks.~~ ✅
-10. ~~Add global limit, cleanup, and close cancellation race conditions.~~ ✅ (partial for cleanup)
-11. ~~Build the desktop in CI and publish it in the release.~~ ✅
-12. 🔶 Add end-to-end tests on Windows. (Backend-testable provisioning gaps closed — concurrency limiter, archive-member/URL validation, install/rollback/cleanup, setup-installation report — the mock-HTTPS-server download path is a deliberate follow-up; desktop-side install/uninstall/launch tests remain.)
-13. 🔶 Apply per-process authentication and restrict Tauri commands. — process token, capabilities, CSP, and caller checks are implemented; one-shot persisted consent remains.
-14. 🔶 **Update documentation and capability matrix.** — desktop release/updater documents are current; the broader historical matrix still needs periodic reconciliation.
-
----
-
-# Realistic final state
-
-**The download backend core is not the main problem.** Scheduler, library, API, storage, reliability, and adapters are already very advanced.
-
-The real remaining blocks are:
-
-```text
-remote component manifest + 7-Zip decision
-+ Authenticode signing
-+ updater readiness confirmation / rollback / repair
-+ one-shot native setup consent
-+ full Windows product E2E tests
-```
-
-Until these blocks are resolved, Ravyn may have a powerful backend but not an installable and reliable desktop beta.
-
-I also verified all migrations present in the ZIP:
-
-* **24 migrations present**;
-* **32 tables**;
-* **44 indexes**;
-* `PRAGMA integrity_check: ok`.
+# Ravyn Remaining Work
+
+Last reconciled with source: 2026-07-14
+
+This is the current roadmap. Browser-extension work is intentionally excluded.
+
+## Completed in the current source
+
+- Managed artifacts and transactional activation for yt-dlp, FFmpeg, and rqbit,
+  including checksum/version/capability validation, cancellation, update,
+  cleanup, and rollback.
+- Signed remote component manifests with HTTPS conditional refresh, bounded
+  reads, expiry, replay/downgrade protection, atomic activation, and LKG cache.
+- Rqbit process supervision and loopback API health checks.
+- Installed/portable/development setup modes, installation reporting, installed
+  copy handoff, shortcuts/registry/startup integration, and uninstallation.
+- Persisted setup integration consent, exact request validation in backend and
+  Tauri, restart-safe idempotency, and verified installation reports.
+- Main/setup capability separation, API process token, CSP, caller checks, and
+  process transition guards.
+- Multipage frontend for downloads, library, media, torrents, basket,
+  automation, components, settings, diagnostics, and secure secrets.
+- Executable-path configuration for yt-dlp, FFmpeg, rqbit, and 7-Zip plus the
+  rqbit API URL and credential reference.
+- Signed silent installed-app updates with persisted staging, readiness
+  acknowledgement, retained executable rollback, failed-version retry blocking,
+  repair staging, and persisted result display.
+- Windows release workflow for test/build/package, Authenticode signing and
+  verification, NSIS smoke checks, signed manifests, checksums, SBOM, and
+  attestations.
+
+## Release-critical remaining work
+
+### 1. Native Windows compile and runtime pass
+
+Run:
+
+- `cargo test --locked --workspace --all-targets`;
+- Tauri debug and release builds;
+- NSIS and MSI bundles;
+- installed, portable, and development startup;
+- real component provisioning and real direct/media/torrent downloads.
+
+### 2. Production release credentials and first signed release
+
+The workflow is implemented. Supply and validate:
+
+- Authenticode PFX and password;
+- trusted timestamp URL;
+- application-update signing key pair;
+- component-manifest signing key pair;
+- expected certificate publisher identity.
+
+### 3. Full updater recovery and Windows E2E
+
+Still required:
+
+- rollback/recovery for every installed file and registry/uninstaller state;
+- startup recovery after an interrupted detached helper;
+- clean-machine update from N to N+1;
+- forced readiness timeout/crash and automatic rollback;
+- persisted-result verification after relaunch;
+- power-loss/interruption tests.
+
+### 4. Full WebView2 product automation
+
+Automate setup, navigation, keyboard operation, DPI/scaling, light/dark/high
+contrast, reduced motion, screen-reader labels, real downloads, failures,
+retries, repair, and updater rollback on a clean Windows VM.
+
+## Secondary product work
+
+- Richer Metalink and large batch-import UX.
+- Dedicated tag management and filename-template preview.
+- Automation-rule preview.
+- Deeper DHT, peer, host, and diagnostic tables.
+- Structured editors for each secret type; generic secure storage is connected.
+- Per-monitor different-wallpaper selection through `IDesktopWallpaper`.
+- Optional native `.7z` extraction or managed 7-Zip provisioning.
+
+## Product decisions
+
+- Ravyn 0.2 uses a system or user-selected `7z.exe`/`7za.exe`.
+- Browser-extension capture is outside this pass.
+
+## Recommended order
+
+1. Windows Rust/Tauri compile, tests, and clean install.
+2. Production signed tagged release.
+3. Updater/repair and rollback E2E.
+4. Full installed-state recovery.
+5. Advanced frontend surfaces.

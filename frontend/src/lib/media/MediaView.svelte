@@ -258,7 +258,7 @@
   .rows { flex: 1; min-height: 0; overflow: auto; }
   .job-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); color: var(--text-primary); background: transparent; text-align: left; }
   .job-row:hover, .archive-row:hover { background: var(--bg-subtle-hover); }
-  .job-row.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent-default); }
+  .job-row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .name-cell { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
   .name-cell > span:last-child, .archive-row > span:first-child { display: flex; min-width: 0; flex-direction: column; }
   .name-cell strong, .name-cell small, .archive-row strong, .archive-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

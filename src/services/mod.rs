@@ -17,6 +17,7 @@ pub mod sniffer;
 pub mod schedules;
 
 pub mod imports;
+pub mod manifest_refresh;
 pub mod library;
 pub mod metalink;
 pub mod presets;

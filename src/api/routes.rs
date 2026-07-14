@@ -53,6 +53,8 @@ pub struct ApiState {
     pub base_config: Arc<crate::config::Config>,
     pub configured_config: Arc<crate::config::Config>,
     pub component_manifest: Arc<dyn crate::services::components::ManifestProvider>,
+    pub component_manifest_refresh:
+        Option<Arc<crate::services::manifest_refresh::RemoteManifestRefresher>>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
     pub provisioning_cancellation: crate::services::components::ProvisioningCancellation,
@@ -277,6 +279,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/browser/sniff", post(sniff_page))
         .route("/v1/browser/import", post(import_browser_resources))
         .route("/v1/components", get(list_components))
+        .route(
+            "/v1/components/manifest",
+            get(component_manifest_status).post(refresh_component_manifest),
+        )
         .route("/v1/components/features", post(save_feature_selections))
         .route(
             "/v1/components/{id}",
@@ -290,6 +296,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/setup", get(get_setup_state))
         .route("/v1/setup/library", post(prepare_library))
+        .route(
+            "/v1/setup/integration-consent",
+            post(save_integration_consent),
+        )
         .route("/v1/setup/installation", post(report_installation))
         .route("/v1/setup/complete", post(complete_setup))
         .route("/v1/events", get(events))

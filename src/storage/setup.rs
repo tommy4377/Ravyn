@@ -1,6 +1,7 @@
 //! Persistent storage for the one-row setup completion state.
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::{error::Result, storage::Repository};
@@ -13,6 +14,23 @@ pub struct SetupStateRecord {
     pub app_version: Option<String>,
     pub library_root: Option<String>,
     pub installation: Option<InstallationRecord>,
+    pub integration_consent: Option<IntegrationConsentRecord>,
+}
+
+/// User-approved native integration plan persisted before any Windows shell
+/// changes are applied. The identifier lets retries prove that they are using
+/// the same consented request after a process restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationConsentRecord {
+    pub id: uuid::Uuid,
+    pub installation_mode: String,
+    pub install_application: bool,
+    pub register_installed_app: bool,
+    pub start_menu_shortcut: bool,
+    pub desktop_shortcut: bool,
+    pub launch_at_startup: bool,
+    pub launch_after_setup: bool,
+    pub consented_at: chrono::DateTime<Utc>,
 }
 
 /// Persisted result of the desktop shell's Windows installation/integration
@@ -36,7 +54,8 @@ impl Repository {
         let row = sqlx::query(
             "SELECT completed, completed_at, app_version, library_root, installation_mode,
                     installed_exe, installed_version, installed_sha256, integration_completed,
-                    integration_errors, relaunch_pending
+                    integration_errors, relaunch_pending, integration_consent_id,
+                    integration_consent, integration_consented_at
              FROM setup_state WHERE id=1",
         )
         .fetch_optional(self.pool())
@@ -49,6 +68,10 @@ impl Repository {
             let library_root: Option<String> = row.try_get("library_root")?;
             let installation_mode: Option<String> = row.try_get("installation_mode")?;
             let integration_errors_json: Option<String> = row.try_get("integration_errors")?;
+            let consent_id: Option<String> = row.try_get("integration_consent_id")?;
+            let consent_json: Option<String> = row.try_get("integration_consent")?;
+            let consented_at: Option<chrono::DateTime<Utc>> =
+                row.try_get("integration_consented_at")?;
             let installation = installation_mode.map(|installation_mode| {
                 let integration_errors = integration_errors_json
                     .as_deref()
@@ -70,6 +93,19 @@ impl Repository {
                 app_version,
                 library_root,
                 installation: installation.transpose()?,
+                integration_consent: match (consent_id, consent_json, consented_at) {
+                    (Some(id), Some(json), Some(consented_at)) => {
+                        let mut consent: IntegrationConsentRecord = serde_json::from_str(&json)?;
+                        consent.id = uuid::Uuid::parse_str(&id).map_err(|error| {
+                            crate::error::RavynError::Internal(format!(
+                                "stored setup consent id is invalid: {error}"
+                            ))
+                        })?;
+                        consent.consented_at = consented_at;
+                        Some(consent)
+                    }
+                    _ => None,
+                },
             })
         })
         .transpose()
@@ -134,6 +170,51 @@ impl Repository {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    /// Persist or replace the current setup integration consent. Repeating the
+    /// same request keeps its identifier, while changing any choice creates a
+    /// new identifier so stale native calls can no longer be accepted.
+    pub async fn save_integration_consent(
+        &self,
+        mut consent: IntegrationConsentRecord,
+    ) -> Result<IntegrationConsentRecord> {
+        let existing = self
+            .load_setup_state()
+            .await?
+            .and_then(|state| state.integration_consent);
+        if let Some(existing) = existing.filter(|existing| {
+            existing.installation_mode == consent.installation_mode
+                && existing.install_application == consent.install_application
+                && existing.register_installed_app == consent.register_installed_app
+                && existing.start_menu_shortcut == consent.start_menu_shortcut
+                && existing.desktop_shortcut == consent.desktop_shortcut
+                && existing.launch_at_startup == consent.launch_at_startup
+                && existing.launch_after_setup == consent.launch_after_setup
+        }) {
+            consent.id = existing.id;
+            consent.consented_at = existing.consented_at;
+        }
+        let now = Utc::now();
+        let json = serde_json::to_string(&consent)?;
+        sqlx::query(
+            "INSERT INTO setup_state(
+                id, completed, integration_consent_id, integration_consent,
+                integration_consented_at, updated_at)
+             VALUES(1,0,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               integration_consent_id=excluded.integration_consent_id,
+               integration_consent=excluded.integration_consent,
+               integration_consented_at=excluded.integration_consented_at,
+               updated_at=excluded.updated_at",
+        )
+        .bind(consent.id.to_string())
+        .bind(json)
+        .bind(consent.consented_at)
+        .bind(now)
+        .execute(self.pool())
+        .await?;
+        Ok(consent)
     }
 }
 
@@ -214,5 +295,50 @@ mod tests {
         let state = repository.load_setup_state().await.unwrap().unwrap();
         assert!(state.completed, "completion must survive a later report");
         assert_eq!(state.installation, Some(corrected));
+    }
+
+    #[tokio::test]
+    async fn integration_consent_survives_restart_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", temp.path().join("test.sqlite3").display());
+        let repository = Repository::connect(&url).await.unwrap();
+        let consent = IntegrationConsentRecord {
+            id: uuid::Uuid::new_v4(),
+            installation_mode: "installed".into(),
+            install_application: true,
+            register_installed_app: true,
+            start_menu_shortcut: true,
+            desktop_shortcut: false,
+            launch_at_startup: false,
+            launch_after_setup: true,
+            consented_at: Utc::now(),
+        };
+        let first = repository
+            .save_integration_consent(consent.clone())
+            .await
+            .unwrap();
+        let replay = repository
+            .save_integration_consent(IntegrationConsentRecord {
+                id: uuid::Uuid::new_v4(),
+                consented_at: Utc::now(),
+                ..consent.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.id, replay.id);
+        assert_eq!(first.consented_at, replay.consented_at);
+
+        let changed = repository
+            .save_integration_consent(IntegrationConsentRecord {
+                id: uuid::Uuid::new_v4(),
+                desktop_shortcut: true,
+                consented_at: Utc::now(),
+                ..consent
+            })
+            .await
+            .unwrap();
+        assert_ne!(first.id, changed.id);
+        let state = repository.load_setup_state().await.unwrap().unwrap();
+        assert_eq!(state.integration_consent, Some(changed));
     }
 }

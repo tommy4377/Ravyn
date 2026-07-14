@@ -31,30 +31,30 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-6);
-    padding: var(--space-7) var(--page-padding) var(--space-4);
+    padding: var(--space-5) var(--page-padding) var(--space-4);
   }
   .copy {
     min-width: 0;
   }
   .eyebrow {
     display: block;
-    margin-bottom: 2px;
+    margin-bottom: 4px;
     color: var(--text-tertiary);
     font-size: var(--text-caption);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
   h1 {
     margin: 0;
     font-family: var(--font-family-display);
     font-size: var(--text-title);
-    font-weight: 600;
+    font-weight: 620;
     line-height: 1.2;
-    letter-spacing: -0.015em;
+    letter-spacing: -0.01em;
   }
   p {
-    max-width: 760px;
+    max-width: 680px;
     margin: var(--space-1) 0 0;
     color: var(--text-secondary);
   }

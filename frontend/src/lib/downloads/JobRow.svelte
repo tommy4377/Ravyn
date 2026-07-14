@@ -74,12 +74,12 @@
 </ContextMenu>
 
 <style>
-  .row { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(180px, 1.25fr) minmax(115px, .72fr) minmax(82px, .55fr) minmax(96px, .64fr); align-items: center; gap: var(--space-3); width: 100%; height: 100%; padding: 0 var(--space-4); border-bottom: 1px solid var(--stroke-divider); cursor: default; transition: background var(--motion-fast) var(--motion-easing); }
-  .row:hover { background: var(--bg-subtle-hover); }
-  .row.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent-default); }
+  .row { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(180px, 1.25fr) minmax(115px, .72fr) minmax(82px, .55fr) minmax(96px, .64fr); align-items: center; gap: var(--space-3); width: 100%; height: 100%; padding: 0 var(--space-4); border-bottom: 1px solid var(--stroke-divider); cursor: default; transition: background var(--motion-fast) var(--motion-easing), box-shadow var(--motion-fast) var(--motion-easing); }
+  .row:hover { background: color-mix(in srgb, var(--bg-subtle-hover) 74%, transparent); }
+  .row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .row.focused { outline: 2px solid var(--stroke-focus); outline-offset: -2px; }
   .name-cell { min-width: 0; display: flex; align-items: center; gap: var(--space-3); }
-  .file-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
+  .file-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: var(--radius-medium); color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--stroke-divider); }
   .name-copy, .transfer-cell { min-width: 0; display: flex; flex-direction: column; }
   .name-copy strong, .name-copy span, .transfer-cell strong, .transfer-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .name-copy strong, .transfer-cell strong { font-size: var(--text-body); font-weight: 600; }
@@ -87,7 +87,7 @@
   .status-cell { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .status-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
   .status-line > span { flex: none; color: var(--text-secondary); font-size: var(--text-caption); }
-  .bar { height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-subtle); }
+  .bar { height: 3px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-subtle); }
   .fill { height: 100%; min-width: 0; border-radius: inherit; background: var(--accent-default); transition: width 160ms linear; }
   .size-cell, .added-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--text-caption); }
   @media (max-width: 980px) {

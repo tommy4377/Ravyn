@@ -42,6 +42,9 @@ export interface AddDownloadInput {
   userAgent?: string;
   referer?: string;
   proxy?: string;
+  proxySecretId?: string;
+  cookiesSecretId?: string;
+  authenticationHeaderSecretId?: string;
   media?: MediaOptions;
   torrent?: TorrentOptions;
 }
@@ -68,6 +71,11 @@ function buildOptions(input: AddDownloadInput): DownloadOptions {
   if (input.userAgent) options.user_agent = input.userAgent;
   if (input.referer) options.referer = input.referer;
   if (input.proxy) options.proxy = input.proxy;
+  if (input.proxySecretId) options.proxy_secret_id = input.proxySecretId;
+  if (input.cookiesSecretId) options.cookies_secret_id = input.cookiesSecretId;
+  if (input.authenticationHeaderSecretId) {
+    options.authentication_header_secret_id = input.authenticationHeaderSecretId;
+  }
   if (input.media) options.media = input.media;
   if (input.torrent) options.torrent = input.torrent;
   return options;

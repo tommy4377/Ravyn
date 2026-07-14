@@ -453,6 +453,25 @@ pub(super) fn schemas() -> Value {
                 "manifest_provider": {"type": "string"}
             }
         },
+        "ComponentManifestStatus": {
+            "type": "object",
+            "required": ["configured", "phase", "channel", "source", "stale"],
+            "properties": {
+                "configured": {"type": "boolean"},
+                "phase": {"type": "string", "enum": ["disabled", "idle", "checking", "current", "stale", "error"]},
+                "channel": {"type": "string"},
+                "endpoint": {"type": ["string", "null"], "format": "uri"},
+                "source": {"type": "string", "enum": ["built-in", "remote-cache"]},
+                "manifest_version": {"type": ["integer", "null"], "minimum": 1},
+                "generated_at": {"type": ["string", "null"], "format": "date-time"},
+                "expires_at": {"type": ["string", "null"], "format": "date-time"},
+                "stale": {"type": "boolean"},
+                "etag": {"type": ["string", "null"]},
+                "last_checked_at": {"type": ["string", "null"], "format": "date-time"},
+                "last_updated_at": {"type": ["string", "null"], "format": "date-time"},
+                "last_error": {"type": ["string", "null"]}
+            }
+        },
         "FeatureStatus": {
             "type": "object",
             "required": ["feature", "enabled", "satisfied", "required_components"],
@@ -502,7 +521,7 @@ pub(super) fn schemas() -> Value {
         },
         "SetupState": {
             "type": "object",
-            "required": ["completed", "lifecycle", "ready_to_complete", "restart_required", "app_version", "platform", "features_selected", "library_prepared", "data_dir"],
+            "required": ["completed", "lifecycle", "ready_to_complete", "restart_required", "app_version", "platform", "features_selected", "library_prepared", "data_dir", "integration_consent"],
             "properties": {
                 "completed": {"type": "boolean"},
                 "lifecycle": {"type": "string", "enum": ["not_started", "in_progress", "restart_required", "ready_to_complete", "completed"]},
@@ -525,7 +544,41 @@ pub(super) fn schemas() -> Value {
                     "integration_completed": {"type": "boolean"},
                     "integration_errors": {"type": "array", "items": {"type": "string"}},
                     "relaunch_pending": {"type": "boolean"}
-                }}
+                }},
+                "integration_consent": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/SetupIntegrationConsent"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        },
+        "SetupIntegrationConsent": {
+            "type": "object",
+            "required": ["id", "installation_mode", "install_application", "register_installed_app", "start_menu_shortcut", "desktop_shortcut", "launch_at_startup", "launch_after_setup", "consented_at"],
+            "properties": {
+                "id": {"type": "string", "format": "uuid"},
+                "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                "install_application": {"type": "boolean"},
+                "register_installed_app": {"type": "boolean"},
+                "start_menu_shortcut": {"type": "boolean"},
+                "desktop_shortcut": {"type": "boolean"},
+                "launch_at_startup": {"type": "boolean"},
+                "launch_after_setup": {"type": "boolean"},
+                "consented_at": {"type": "string", "format": "date-time"}
+            }
+        },
+        "SaveIntegrationConsent": {
+            "type": "object",
+            "required": ["installation_mode", "install_application", "register_installed_app", "start_menu_shortcut", "desktop_shortcut", "launch_at_startup", "launch_after_setup"],
+            "properties": {
+                "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                "install_application": {"type": "boolean"},
+                "register_installed_app": {"type": "boolean"},
+                "start_menu_shortcut": {"type": "boolean"},
+                "desktop_shortcut": {"type": "boolean"},
+                "launch_at_startup": {"type": "boolean"},
+                "launch_after_setup": {"type": "boolean"}
             }
         },
         "PrepareLibraryResult": {

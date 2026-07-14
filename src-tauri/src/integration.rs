@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IntegrationRequest {
     pub install_application: bool,
     pub register_installed_app: bool,
@@ -156,25 +156,33 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         steps.push(skipped("install_application", "not requested"));
     }
 
-    // An explicitly requested installation is transactional from the caller's
-    // perspective: never register or shortcut the source executable when the
-    // copy step failed or was intentionally skipped for a development build.
-    if request.install_application && installed_exe.is_none() {
-        for step in [
-            "register_installed_app",
-            "start_menu_shortcut",
-            "desktop_shortcut",
-            "launch_at_startup",
+    // Native registrations must always target a verified installed executable.
+    // Never fall back to the setup, portable, or development binary because
+    // those paths can disappear and would leave broken Windows registrations.
+    let dependent_registration_requested = request.register_installed_app
+        || request.start_menu_shortcut
+        || request.desktop_shortcut
+        || request.launch_at_startup;
+    if dependent_registration_requested && installed_exe.is_none() {
+        for (step, requested) in [
+            ("register_installed_app", request.register_installed_app),
+            ("start_menu_shortcut", request.start_menu_shortcut),
+            ("desktop_shortcut", request.desktop_shortcut),
+            ("launch_at_startup", request.launch_at_startup),
         ] {
             steps.push(skipped(
                 step,
-                "application installation did not produce an installed executable",
+                if requested {
+                    "no verified installed executable is available"
+                } else {
+                    "not requested"
+                },
             ));
         }
         return finish_report(steps, install_dir, None, request.register_installed_app);
     }
 
-    let effective_exe = installed_exe.clone().or(source_exe);
+    let effective_exe = installed_exe.clone();
 
     // 2. Installed Apps registration.
     if request.register_installed_app {

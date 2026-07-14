@@ -24,7 +24,6 @@
     border: 1px solid var(--stroke-surface);
     border-radius: var(--radius-layer);
     background: var(--surface-card);
-    box-shadow: var(--shadow-card);
   }
   .surface[data-padding="small"] { padding: var(--space-3); }
   .surface[data-padding="normal"] { padding: var(--space-5); }

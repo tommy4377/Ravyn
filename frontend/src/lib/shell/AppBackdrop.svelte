@@ -66,7 +66,7 @@
     aspect-ratio: 1;
     border-radius: 50%;
     filter: blur(80px);
-    opacity: calc(var(--material-intensity) * 0.18);
+    opacity: calc(var(--material-intensity) * 0.08);
   }
   .glow-a { top: -38%; left: -12%; background: var(--backdrop-glow-a); }
   .glow-b { right: -22%; bottom: -48%; background: var(--backdrop-glow-b); }
@@ -76,6 +76,10 @@
     opacity: var(--noise-opacity);
     mix-blend-mode: soft-light;
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.72'/%3E%3C/svg%3E");
+  }
+  :global(:root[data-system-backdrop="true"]) .glow,
+  :global(:root[data-has-backdrop-image]) .glow {
+    display: none;
   }
   :global(:root[data-material="solid"]) .wallpaper,
   :global(:root[data-material="solid"]) .glow,

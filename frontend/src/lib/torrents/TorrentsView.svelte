@@ -337,7 +337,7 @@
   .rows { min-height: 0; overflow: auto; }
   .torrent-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); background: transparent; color: var(--text-primary); text-align: left; cursor: default; }
   .torrent-row:hover { background: var(--bg-subtle-hover); }
-  .torrent-row.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent-default); }
+  .torrent-row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .torrent-name { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
   .torrent-icon, .detail-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
   .torrent-name > span:last-child { display: flex; flex-direction: column; min-width: 0; }

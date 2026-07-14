@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import Icon, { type IconName } from "../components/Icon.svelte";
   import Tooltip from "../components/Tooltip.svelte";
   import { navigation, type NavSection } from "../stores/navigation.svelte";
@@ -18,12 +19,27 @@
     { id: "diagnostics", label: "Diagnostics", icon: "diagnostics" },
   ];
 
+  let compactViewport = $state(false);
+  const effectivelyCollapsed = $derived(
+    navigation.navigationCollapsed || compactViewport,
+  );
+
+  onMount(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const update = (): void => {
+      compactViewport = query.matches;
+    };
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  });
+
   function activate(section: NavSection): void {
     navigation.section = section;
   }
 </script>
 
-<nav class:collapsed={navigation.navigationCollapsed} class="nav" aria-label="Primary navigation">
+<nav class:collapsed={effectivelyCollapsed} class="nav" aria-label="Primary navigation">
   <div class="brand-row">
     <button
       class="pane-toggle"
@@ -40,10 +56,11 @@
   </div>
 
   <div class="nav-scroll">
+    <span class="group-label">Workspace</span>
     <ul class="sections">
       {#each primary as section (section.id)}
         <li>
-          <Tooltip text={section.label} disabled={!navigation.navigationCollapsed}>
+          <Tooltip text={section.label} disabled={!effectivelyCollapsed}>
             <button
               type="button"
               class="section"
@@ -60,10 +77,11 @@
     </ul>
   </div>
 
+  <span class="group-label secondary-label">System</span>
   <ul class="sections secondary">
     {#each secondary as section (section.id)}
       <li>
-        <Tooltip text={section.label} disabled={!navigation.navigationCollapsed}>
+        <Tooltip text={section.label} disabled={!effectivelyCollapsed}>
           <button
             type="button"
             class="section"
@@ -86,9 +104,9 @@
     z-index: 2;
     display: flex;
     flex-direction: column;
-    width: 224px;
-    min-width: 224px;
-    padding: var(--space-2);
+    width: 216px;
+    min-width: 216px;
+    padding: var(--space-2) var(--space-2) var(--space-3);
     border-right: 1px solid var(--stroke-divider);
     background: var(--surface-navigation);
     backdrop-filter: blur(34px) saturate(118%);
@@ -116,10 +134,9 @@
     width: 30px;
     height: 30px;
     flex: none;
-    border-radius: 8px;
+    border-radius: var(--radius-medium);
     color: var(--text-on-accent);
-    background: linear-gradient(145deg, var(--accent-default), color-mix(in srgb, var(--accent-default), #121b38 24%));
-    box-shadow: inset 0 1px rgba(255,255,255,.2), 0 2px 8px color-mix(in srgb, var(--accent-default), transparent 75%);
+    background: var(--accent-default);
     font-family: var(--font-family-display);
     font-size: 16px;
     font-weight: 700;
@@ -128,8 +145,10 @@
   .brand-copy strong { font-size: 14px; line-height: 17px; }
   .brand-copy small { color: var(--text-tertiary); font-size: 11px; line-height: 14px; }
   .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
-  .sections { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: var(--space-2) 0 0; padding: 0; }
-  .secondary { flex: none; padding-top: var(--space-2); border-top: 1px solid var(--stroke-divider); }
+  .group-label { display: block; margin: var(--space-4) var(--space-3) var(--space-1); color: var(--text-tertiary); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+  .secondary-label { margin-top: var(--space-2); }
+  .sections { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; padding: 0; }
+  .secondary { flex: none; }
   .sections li, .sections :global(.tooltip-wrapper) { width: 100%; }
   .section {
     position: relative;
@@ -149,7 +168,7 @@
   }
   .section:hover { color: var(--text-primary); background: var(--bg-subtle-hover); }
   .section:active { background: var(--bg-subtle-pressed); }
-  .section[aria-current="page"] { color: var(--text-primary); background: var(--surface-card-hover); font-weight: 600; }
+  .section[aria-current="page"] { color: var(--text-primary); background: var(--bg-subtle-hover); font-weight: 600; }
   .indicator {
     position: absolute;
     left: 0;
@@ -162,15 +181,9 @@
   }
   .section[aria-current="page"] .indicator { background: var(--accent-default); transform: scaleY(1); }
   .section-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .collapsed .brand { display: none; }
+  .collapsed .brand, .collapsed .group-label { display: none; }
   .collapsed .section { justify-content: center; padding: 0; gap: 0; }
   .collapsed .section-label { display: none; }
   .collapsed .sections { align-items: center; }
-  @media (max-width: 1040px) {
-    .nav:not(:hover):not(:focus-within) { width: 56px; min-width: 56px; }
-    .nav:not(:hover):not(:focus-within) .brand { display: none; }
-    .nav:not(:hover):not(:focus-within) .section { justify-content: center; padding: 0; gap: 0; }
-    .nav:not(:hover):not(:focus-within) .section-label { display: none; }
-  }
   @media (forced-colors: active) { .nav { backdrop-filter: none; } }
 </style>

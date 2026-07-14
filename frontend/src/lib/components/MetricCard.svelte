@@ -22,13 +22,12 @@
     border: 1px solid var(--stroke-surface);
     border-radius: var(--radius-layer);
     background: var(--surface-card);
-    box-shadow: var(--shadow-card);
   }
   .icon {
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     flex: none;
     border-radius: var(--radius-medium);
     color: var(--accent-text);

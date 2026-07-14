@@ -1,7 +1,7 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
   import { systemAppearance } from "../appearance/systemAppearance.svelte";
-  import type { DownloadPreset, PersistentSettings, PersistentSettingsPatch, UserProfile } from "../api/types";
+  import type { DownloadPreset, PersistentSettings, PersistentSettingsPatch, SecretReference, SecretType, UserProfile } from "../api/types";
   import Button from "../components/Button.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Dialog from "../components/Dialog.svelte";
@@ -12,6 +12,7 @@
   import PageHeader from "../components/PageHeader.svelte";
   import PathPicker from "../components/PathPicker.svelte";
   import Surface from "../components/Surface.svelte";
+  import SecretValueField from "../components/SecretValueField.svelte";
   import TextField from "../components/TextField.svelte";
   import ToggleSwitch from "../components/ToggleSwitch.svelte";
   import { connection } from "../stores/connection.svelte";
@@ -20,6 +21,7 @@
   import {
     appUpdateStatus as readAppUpdateStatus,
     checkAppUpdate,
+    repairApplication,
     type AppUpdateStatus,
   } from "../native/tauri";
 
@@ -48,8 +50,19 @@
   let deleteTarget = $state<{ kind: "preset" | "profile"; id: string; name: string } | null>(null);
   let deleteBusy = $state(false);
   let deleteError = $state<string | null>(null);
+  let secrets = $state<SecretReference[]>([]);
+  let secretOpen = $state(false);
+  let secretName = $state("");
+  let secretType = $state<SecretType>("api_token");
+  let secretValue = $state("");
+  let secretBusy = $state(false);
+  let secretError = $state<string | null>(null);
+  let secretDeleteTarget = $state<SecretReference | null>(null);
+  let secretDeleteBusy = $state(false);
+  let secretDeleteError = $state<string | null>(null);
   let updateStatus = $state<AppUpdateStatus | null>(null);
   let updateBusy = $state(false);
+  let repairBusy = $state(false);
 
   let downloadDir = $state("");
   let libraryRoot = $state("");
@@ -62,6 +75,12 @@
   let connectTimeout = $state("15");
   let readTimeout = $state("60");
   let autoProvision = $state(true);
+  let ytdlpPath = $state("yt-dlp");
+  let ffmpegPath = $state("ffmpeg");
+  let rqbitPath = $state("rqbit");
+  let rqbitApi = $state("http://127.0.0.1:3030");
+  let rqbitCredentialsSecretId = $state("");
+  let sevenZipPath = $state("7z");
   let backdropImageDraft = $state("");
   let intensityDraft = $state("76");
 
@@ -69,6 +88,21 @@
     { value: "", label: "No default preset" },
     ...presets.map((preset) => ({ value: preset.id, label: preset.name })),
   ]);
+  const rqbitCredentialOptions = $derived<DropdownOption[]>([
+    { value: "", label: "No rqbit credentials" },
+    ...secrets
+      .filter((secret) => secret.secret_type === "rqbit_credentials")
+      .map((secret) => ({ value: secret.id, label: secret.name })),
+  ]);
+  const secretTypeOptions: DropdownOption[] = [
+    { value: "api_token", label: "API token" },
+    { value: "proxy_credentials", label: "Proxy credentials" },
+    { value: "rqbit_credentials", label: "rqbit credentials" },
+    { value: "cookies", label: "Cookie JSON" },
+    { value: "authentication_header", label: "Authorization header" },
+    { value: "tls_certificate", label: "TLS certificate" },
+    { value: "private_key", label: "Private key" },
+  ];
 
   function sync(settings: PersistentSettings): void {
     values = settings;
@@ -83,6 +117,12 @@
     connectTimeout = String(settings.connect_timeout_secs);
     readTimeout = String(settings.read_timeout_secs);
     autoProvision = settings.auto_provision;
+    ytdlpPath = settings.ytdlp;
+    ffmpegPath = settings.ffmpeg;
+    rqbitPath = settings.rqbit;
+    rqbitApi = settings.rqbit_api;
+    rqbitCredentialsSecretId = settings.rqbit_credentials_secret_id ?? "";
+    sevenZipPath = settings.seven_zip;
     backdropImageDraft = navigation.backdropImage;
     intensityDraft = String(navigation.materialIntensity);
   }
@@ -92,14 +132,16 @@
     loading = true;
     error = null;
     try {
-      const [response, loadedPresets, loadedProfiles] = await Promise.all([
+      const [response, loadedPresets, loadedProfiles, loadedSecrets] = await Promise.all([
         connection.client.getSettings(),
         connection.client.listPresets(),
         connection.client.listProfiles(),
+        connection.client.listSecrets({ limit: 100 }),
       ]);
       sync(response.values);
       presets = loadedPresets;
       profiles = loadedProfiles;
+      secrets = loadedSecrets.items;
     } catch (cause) {
       error = describeError(cause);
     } finally {
@@ -139,7 +181,29 @@
     }
   }
 
+  async function repairInstalledApplication(): Promise<void> {
+    if (updateBusy || repairBusy) return;
+    repairBusy = true;
+    try {
+      updateStatus = await repairApplication();
+      if (updateStatus.phase === "ready") {
+        notifications.success(
+          updateStatus.repair_mode ? "Repair package is ready" : `Ravyn ${updateStatus.available_version ?? "update"} is ready`,
+          "The signed installer will run after you close Ravyn.",
+        );
+      }
+    } catch (cause) {
+      notifications.error("Couldn't prepare application repair", describeError(cause));
+      await loadUpdateStatus();
+    } finally {
+      repairBusy = false;
+    }
+  }
+
   function updateHeading(status: AppUpdateStatus): string {
+    if (status.repair_mode && status.phase === "downloading") return "Downloading repair package…";
+    if (status.repair_mode && status.phase === "ready") return `Ravyn ${status.current_version} repair is ready`;
+    if (status.repair_mode && status.phase === "installing") return "Repairing Ravyn…";
     switch (status.phase) {
       case "checking": return "Checking for updates…";
       case "downloading": return `Downloading Ravyn ${status.available_version ?? "update"}…`;
@@ -152,9 +216,28 @@
     }
   }
 
+  function updateResultHeading(status: AppUpdateStatus): string {
+    const result = status.last_result;
+    if (!result) return "";
+    if (result.outcome === "succeeded" && result.from_version === result.to_version) return `Repaired Ravyn ${result.to_version}`;
+    if (result.outcome === "succeeded") return `Updated to Ravyn ${result.to_version}`;
+    if (result.outcome === "rolled_back") return `Ravyn ${result.to_version} was rolled back`;
+    return `Ravyn ${result.to_version} could not be installed`;
+  }
+
+  function updateResultDescription(status: AppUpdateStatus): string {
+    const result = status.last_result;
+    if (!result) return "";
+    const completed = new Date(result.completed_at_unix_ms);
+    const timestamp = Number.isNaN(completed.getTime()) ? "" : ` · ${completed.toLocaleString()}`;
+    return `${result.message}${timestamp}`;
+  }
+
   function updateDescription(status: AppUpdateStatus): string {
     if (status.phase === "ready") {
-      return "The signed installer has been verified and will run silently after you close Ravyn.";
+      return status.repair_mode
+        ? "The signed installer for the current version has been verified and will reinstall Ravyn after a normal close."
+        : "The signed installer has been verified and will run silently after you close Ravyn.";
     }
     if (status.phase === "downloading") {
       const total = status.total_bytes ?? 0;
@@ -189,6 +272,12 @@
       max_retries: Math.round(positive(maxRetries, values?.max_retries ?? 4)),
       connect_timeout_secs: Math.max(1, Math.round(positive(connectTimeout, values?.connect_timeout_secs ?? 15))),
       read_timeout_secs: Math.max(1, Math.round(positive(readTimeout, values?.read_timeout_secs ?? 60))),
+      ytdlp: ytdlpPath.trim() || "yt-dlp",
+      ffmpeg: ffmpegPath.trim() || "ffmpeg",
+      rqbit: rqbitPath.trim() || "rqbit",
+      rqbit_api: rqbitApi.trim() || "http://127.0.0.1:3030",
+      rqbit_credentials_secret_id: rqbitCredentialsSecretId || null,
+      seven_zip: sevenZipPath.trim() || "7z",
       auto_provision: autoProvision,
     };
   }
@@ -316,6 +405,65 @@
     }
   }
 
+  function secretTypeLabel(type: SecretType): string {
+    return secretTypeOptions.find((option) => option.value === type)?.label ?? type;
+  }
+
+  function resetSecretEditor(): void {
+    secretOpen = false;
+    secretName = "";
+    secretType = "api_token";
+    secretValue = "";
+    secretError = null;
+  }
+
+  async function saveSecret(): Promise<void> {
+    if (!connection.client || secretBusy || !secretName.trim() || !secretValue) return;
+    secretBusy = true;
+    secretError = null;
+    try {
+      const reference = await connection.client.putSecret({
+        name: secretName.trim(),
+        secret_type: secretType,
+        secret: secretValue,
+      });
+      secrets = [reference, ...secrets.filter((item) => item.id !== reference.id && item.name !== reference.name)]
+        .sort((left, right) => left.name.localeCompare(right.name));
+      resetSecretEditor();
+      notifications.success("Secret stored", "The value was written to the platform credential store.");
+    } catch (cause) {
+      secretError = describeError(cause);
+    } finally {
+      secretBusy = false;
+    }
+  }
+
+  function editSecret(reference: SecretReference): void {
+    secretName = reference.name;
+    secretType = reference.secret_type;
+    secretValue = "";
+    secretError = null;
+    secretOpen = true;
+  }
+
+  async function deleteSecret(): Promise<void> {
+    if (!connection.client || !secretDeleteTarget || secretDeleteBusy) return;
+    secretDeleteBusy = true;
+    secretDeleteError = null;
+    try {
+      await connection.client.deleteSecret(secretDeleteTarget.id);
+      const deletedId = secretDeleteTarget.id;
+      secrets = secrets.filter((item) => item.id !== deletedId);
+      if (rqbitCredentialsSecretId === deletedId) rqbitCredentialsSecretId = "";
+      secretDeleteTarget = null;
+      notifications.info("Secret removed");
+    } catch (cause) {
+      secretDeleteError = describeError(cause);
+    } finally {
+      secretDeleteBusy = false;
+    }
+  }
+
   function chooseTheme(theme: ThemePreference): void { navigation.setTheme(theme); }
   function chooseDensity(density: Density): void { navigation.setDensity(density); }
   function chooseMaterial(material: MaterialPreference): void { navigation.setMaterial(material); }
@@ -357,6 +505,52 @@
       </section>
 
       <section class="settings-section">
+        <div class="section-copy"><span class="section-icon"><Icon name="wrench" size={20} /></span><div><h2>Components and tools</h2><p>Override managed or system executables without changing environment variables.</p></div></div>
+        <Surface padding="normal" class="form-card">
+          <div class="two-column">
+            <PathPicker mode="executable" bind:value={ytdlpPath} label="yt-dlp executable" placeholder="yt-dlp" hint="Use a command name for PATH resolution or select a specific executable." />
+            <PathPicker mode="executable" bind:value={ffmpegPath} label="FFmpeg executable" placeholder="ffmpeg" hint="Used for media probing, merging, and conversion." />
+            <PathPicker mode="executable" bind:value={rqbitPath} label="rqbit executable" placeholder="rqbit" hint="Used when Ravyn provisions or launches the local torrent engine." />
+            <PathPicker mode="executable" bind:value={sevenZipPath} label="7-Zip executable" placeholder="7z" hint="Ravyn 0.2 uses an existing system or custom 7z/7za executable." />
+          </div>
+          <div class="two-column">
+            <TextField bind:value={rqbitApi} label="rqbit API URL" placeholder="http://127.0.0.1:3030" hint="Keep this on loopback unless the endpoint is intentionally remote." />
+            <label class="select-field">
+              <span>rqbit credentials</span>
+              <Dropdown bind:value={rqbitCredentialsSecretId} options={rqbitCredentialOptions} label="rqbit credentials" />
+              <small>Select a stored rqbit credentials secret. The value is never returned to this page.</small>
+            </label>
+          </div>
+          <p class="form-note"><Icon name="info" size={15} /> Executable and API changes are validated now and take effect after the backend restarts.</p>
+        </Surface>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-copy"><span class="section-icon"><Icon name="shield" size={20} /></span><div><h2>Credentials and secrets</h2><p>Store tokens, cookies, certificates, and credentials in the operating-system keyring.</p></div></div>
+        <Surface padding="none" class="management-card">
+          <div class="management-heading">
+            <div><strong>Secret references</strong><span>Ravyn stores only metadata in its database. Existing values are never returned to the frontend.</span></div>
+            <Button onclick={() => { secretError = null; secretOpen = true; }}><Icon name="add" size={15} /> New secret</Button>
+          </div>
+          {#if secrets.length === 0}
+            <p class="management-empty">No secrets stored.</p>
+          {:else}
+            {#each secrets as secret (secret.id)}
+              <div class="management-row">
+                <span class="management-icon"><Icon name="shield" size={17} /></span>
+                <div>
+                  <strong>{secret.name}</strong>
+                  <span>{secretTypeLabel(secret.secret_type)} · Updated {new Date(secret.updated_at).toLocaleString()}</span>
+                </div>
+                <Button variant="subtle" onclick={() => editSecret(secret)}><Icon name="edit" size={14} /> Replace value</Button>
+                <IconButton icon="trash" label={`Delete ${secret.name}`} variant="subtle" onclick={() => { secretDeleteError = null; secretDeleteTarget = secret; }} />
+              </div>
+            {/each}
+          {/if}
+        </Surface>
+      </section>
+
+      <section class="settings-section">
         <div class="section-copy"><span class="section-icon"><Icon name="speed" size={20} /></span><div><h2>Performance</h2><p>Control concurrency, segmented downloads, and the global transfer limit.</p></div></div>
         <Surface padding="normal" class="form-card">
           <div class="field-grid"><TextField bind:value={maxActive} label="Active downloads" /><TextField bind:value={maxSegments} label="Maximum segments" /><TextField bind:value={maxConnections} label="Connections per host" /><TextField bind:value={speedLimitMbps} label="Global speed limit (Mbit/s)" placeholder="0 for unlimited" /></div>
@@ -385,14 +579,33 @@
                   </div>
                 {/if}
               </div>
-              <Button
-                disabled={updateBusy || updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing" || !updateStatus.configured || !updateStatus.automatic}
-                onclick={() => void recheckApplicationUpdate()}
-              >
-                <Icon name={updateBusy || updateStatus.phase === "checking" ? "spinner" : "refresh"} size={15} />
-                {updateBusy ? "Checking…" : "Check now"}
-              </Button>
+              <div class="update-actions">
+                <Button
+                  disabled={updateBusy || repairBusy || updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing" || !updateStatus.configured || !updateStatus.automatic}
+                  onclick={() => void recheckApplicationUpdate()}
+                >
+                  <Icon name={updateBusy || (updateStatus.phase === "checking" && !repairBusy) ? "spinner" : "refresh"} size={15} />
+                  {updateBusy ? "Checking…" : "Check now"}
+                </Button>
+                <Button
+                  variant="subtle"
+                  disabled={updateBusy || repairBusy || updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing" || !updateStatus.configured || !updateStatus.automatic}
+                  onclick={() => void repairInstalledApplication()}
+                >
+                  <Icon name={repairBusy ? "spinner" : "restore"} size={15} />
+                  {repairBusy ? "Preparing…" : "Repair"}
+                </Button>
+              </div>
             </div>
+            {#if updateStatus.last_result}
+              <div class="setting-row update-result" class:warning={updateStatus.last_result.outcome !== "succeeded"}>
+                <span class="result-icon"><Icon name={updateStatus.last_result.outcome === "succeeded" ? "check-circle" : "warning"} size={16} /></span>
+                <div>
+                  <strong>{updateResultHeading(updateStatus)}</strong>
+                  <span>{updateResultDescription(updateStatus)}</span>
+                </div>
+              </div>
+            {/if}
           </Surface>
         </section>
       {/if}
@@ -424,7 +637,25 @@
   {#snippet footer()}<Button disabled={profileBusy} onclick={() => (profileOpen = false)}>Cancel</Button><Button variant="accent" disabled={profileBusy || !profileName.trim()} onclick={() => void createProfile()}>{profileBusy ? "Creating…" : "Create profile"}</Button>{/snippet}
 </Dialog>
 
+<Dialog open={secretOpen} title={secrets.some((item) => item.name === secretName) ? "Replace secret value" : "Store a secret"} onClose={() => !secretBusy && resetSecretEditor()} preventClose={secretBusy}>
+  <div class="dialog-form">
+    <TextField bind:value={secretName} label="Reference name" placeholder="Work proxy" disabled={secretBusy} hint="Names are unique. Reusing a name replaces its value without exposing the old one." />
+    <div class="dropdown-field">
+      <span>Secret type</span>
+      <Dropdown options={secretTypeOptions} bind:value={secretType} label="Secret type" />
+    </div>
+    <SecretValueField bind:value={secretValue} label="Secret value" disabled={secretBusy} hint="The value is sent once to the local backend and stored through the operating-system credential manager." />
+    {#if secretError}<InlineError title="Couldn't store the secret" message={secretError} />{/if}
+  </div>
+  {#snippet footer()}
+    <Button disabled={secretBusy} onclick={resetSecretEditor}>Cancel</Button>
+    <Button variant="accent" disabled={secretBusy || !secretName.trim() || !secretValue} onclick={() => void saveSecret()}>{secretBusy ? "Storing…" : "Store secret"}</Button>
+  {/snippet}
+</Dialog>
+
 <ConfirmDialog open={!!deleteTarget} title={`Delete ${deleteTarget?.kind ?? "item"}?`} message={`${deleteTarget?.name ?? "This item"} will be removed permanently.`} confirmLabel="Delete" destructive busy={deleteBusy} error={deleteError} onConfirm={() => void confirmManagementDelete()} onClose={() => !deleteBusy && (deleteTarget = null)} />
+
+<ConfirmDialog open={!!secretDeleteTarget} title="Delete secret?" message={`${secretDeleteTarget?.name ?? "This secret"} will be removed from the platform credential store. Downloads or integrations that reference it may stop working.`} confirmLabel="Delete secret" destructive busy={secretDeleteBusy} error={secretDeleteError} onConfirm={() => void deleteSecret()} onClose={() => !secretDeleteBusy && (secretDeleteTarget = null)} />
 
 <ConfirmDialog open={resetOpen} title="Reset backend settings?" message="All persisted backend settings will return to their defaults. Local appearance preferences are not affected." confirmLabel="Reset settings" destructive busy={resetBusy} error={resetError} onConfirm={() => void resetSettings()} onClose={() => !resetBusy && (resetOpen = false)} />
 
@@ -444,6 +675,11 @@
   .setting-row strong { font-weight: 500; }
   .setting-row span { color: var(--text-secondary); font-size: var(--text-caption); }
   .update-row > div:first-child { flex: 1; }
+  .update-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+  .update-result { justify-content: flex-start; min-height: 58px; }
+  .update-result > div { max-width: none; }
+  .result-icon { display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 50%; color: var(--success-text); background: var(--success-subtle); }
+  .update-result.warning .result-icon { color: var(--warning-text); background: var(--warning-subtle); }
   .update-notes { margin-top: var(--space-2); white-space: pre-line; }
   .update-progress { width: min(440px, 100%); height: 3px; margin-top: var(--space-3); overflow: hidden; border-radius: 99px; background: var(--stroke-divider); }
   .update-progress span { display: block; height: 100%; min-width: 8px; border-radius: inherit; background: var(--accent-default); transition: width 180ms linear; }
@@ -471,7 +707,28 @@
   .management-empty { margin: 0; padding: var(--space-5); }
   .dialog-form { display: flex; flex-direction: column; gap: var(--space-4); }
   .dropdown-field { display: flex; flex-direction: column; gap: var(--space-1); }
+  .select-field {
+    display: grid;
+    gap: var(--space-2);
+    align-content: start;
+  }
+  .select-field > span {
+    color: var(--text-primary);
+    font-size: var(--text-body);
+    font-weight: 600;
+  }
+  .select-field :global(.dropdown),
+  .select-field :global(select) {
+    width: 100%;
+  }
+  .select-field small {
+    color: var(--text-tertiary);
+    font-size: var(--text-caption);
+    line-height: 1.45;
+  }
+  .form-note { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; padding-top: var(--space-1); color: var(--text-secondary); font-size: var(--text-caption); line-height: 1.45; }
+  .form-note :global(.icon) { margin-top: 1px; color: var(--accent-text); }
   @media (max-width: 1000px) { .settings-section { grid-template-columns: 1fr; gap: var(--space-3); } .section-copy { position: static; } .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 700px) { .setting-row { align-items: stretch; flex-direction: column; gap: var(--space-3); } .choice-group, .range-control, .inline-field { width: 100%; } .two-column, .field-grid, .field-grid.three { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .setting-row { align-items: stretch; flex-direction: column; gap: var(--space-3); } .choice-group, .range-control, .inline-field, .update-actions { width: 100%; } .update-actions :global(button) { flex: 1; } .two-column, .field-grid, .field-grid.three { grid-template-columns: 1fr; } }
   .setting-warning { display: block; margin-top: var(--space-1); color: var(--status-warning); }
 </style>

@@ -19,6 +19,7 @@ import type {
   BulkJobActionResult,
   ComponentHealth,
   ComponentId,
+  ComponentManifestStatus,
   ComponentOverview,
   CleanupPolicies,
   CleanupReport,
@@ -55,6 +56,8 @@ import type {
   PutUserProfile,
   PrepareLibraryResult,
   ReadinessStatus,
+  SecretReference,
+  PutSecretRequest,
   ReportInstallationRequest,
   RestoreStatus,
   RetryFailedMediaItemsResponse,
@@ -63,6 +66,7 @@ import type {
   ScheduleExecutionRecord,
   ScheduleInput,
   ScheduleRecord,
+  SaveIntegrationConsentRequest,
   SegmentRecord,
   SettingsResponse,
   SettingsValidationResponse,
@@ -117,6 +121,12 @@ export class RavynClient {
     return this.request("POST", "/v1/setup/library", { path });
   }
 
+  saveIntegrationConsent(
+    request: SaveIntegrationConsentRequest,
+  ): Promise<SetupState> {
+    return this.request("POST", "/v1/setup/integration-consent", request);
+  }
+
   reportInstallation(request: ReportInstallationRequest): Promise<SetupState> {
     return this.request("POST", "/v1/setup/installation", request);
   }
@@ -129,6 +139,14 @@ export class RavynClient {
 
   getComponents(signal?: AbortSignal): Promise<ComponentOverview> {
     return this.request("GET", "/v1/components", undefined, signal);
+  }
+
+  getComponentManifestStatus(signal?: AbortSignal): Promise<ComponentManifestStatus> {
+    return this.request("GET", "/v1/components/manifest", undefined, signal);
+  }
+
+  refreshComponentManifest(): Promise<ComponentManifestStatus> {
+    return this.request("POST", "/v1/components/manifest");
   }
 
   saveFeatureSelections(
@@ -575,6 +593,18 @@ export class RavynClient {
 
   verifyAuditChain(signal?: AbortSignal): Promise<AuditChainStatus> {
     return this.request("GET", "/v1/audit/verify", undefined, signal);
+  }
+
+  listSecrets(params?: PageQueryParams, signal?: AbortSignal): Promise<Page<SecretReference>> {
+    return this.request("GET", "/v1/secrets", undefined, signal, { ...params });
+  }
+
+  putSecret(request: PutSecretRequest): Promise<SecretReference> {
+    return this.request("POST", "/v1/secrets", request);
+  }
+
+  deleteSecret(id: string): Promise<void> {
+    return this.request("DELETE", `/v1/secrets/${id}`);
   }
 
   getDependencies(signal?: AbortSignal): Promise<DependenciesStatus> {

@@ -12,6 +12,7 @@
     "allow-main-window-ready",
     "allow-app-update-status",
     "allow-check-app-update",
+    "allow-repair-application",
     "allow-desktop-appearance",
     "allow-open-native-path",
     "allow-reveal-native-path"

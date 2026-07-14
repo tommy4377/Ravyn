@@ -39,6 +39,11 @@ description = "Allows the main Ravyn window to manually recheck and stage a sign
 commands.allow = ["check_app_update"]
 
 [[permission]]
+identifier = "allow-repair-application"
+description = "Allows the main Ravyn window to stage a signed repair installer for the installed application."
+commands.allow = ["repair_application"]
+
+[[permission]]
 identifier = "allow-desktop-appearance"
 description = "Allows the main Ravyn window to read cached Windows wallpaper geometry and accent metadata for its synthetic backdrop."
 commands.allow = ["desktop_appearance"]

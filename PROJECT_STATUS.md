@@ -4,56 +4,77 @@ Last source audit: 2026-07-14
 
 ## Implemented in source
 
-- Advanced download backend, library, media, torrent, automation, component,
-  backup, diagnostics, and loopback API layers.
-- Multipage Svelte frontend connected to the existing backend APIs.
-- Responsive Downloads shell, contextual actions, resizable details, and typed
-  direct/media/torrent creation flows.
-- Bright light theme, substantially darker dark theme, High Contrast and reduced
-  motion fallbacks, density controls, and persistent shell preferences.
-- Synthetic Fluent material driven by the Windows wallpaper, wallpaper layout,
-  monitor/window geometry, DPI, and DWM accent color.
-- Native open-file, open-folder, and Explorer reveal actions for validated local
-  output paths.
-- Setup installation reporting and backend-authoritative completion validation.
+- Advanced direct-download, library, media, torrent, automation, component,
+  backup, diagnostics, and authenticated loopback API layers.
+- Multipage Svelte 5 frontend connected to the primary backend workflows.
+- Refined shell hierarchy, calmer transfer rows, restrained surfaces, clearer
+  navigation groups, responsive layouts, and persistent light/dark/density
+  preferences.
+- Typed direct, media, torrent, basket, library, automation, component,
+  diagnostics, presets, profiles, settings, and secure-secret flows.
+- Settings exposes validated executable overrides for yt-dlp, FFmpeg, rqbit,
+  and 7-Zip plus the rqbit API URL and an optional credential reference.
+- Synthetic Fluent material driven by the Windows wallpaper, layout, virtual
+  desktop/window geometry, DPI, and DWM accent color.
+- Native open-file, open-folder, Explorer reveal, installation reporting, and
+  backend-authoritative setup completion.
+- Persisted, restart-safe setup integration consent with exact backend/Tauri
+  request matching and idempotent installation reporting.
 - Separate setup/main Tauri capabilities, caller validation, CSP, restricted
-  asset-protocol scope, and process-level setup transition guard.
+  asset-protocol scope, and setup transition guards.
 - Tauri NSIS/MSI/portable release pipeline with install/start/uninstall smoke
   checks.
-- Signed silent installed-app updates staged in the background and applied after
-  normal application close.
+- Production signed component-catalog refresh with HTTPS-only conditional GET,
+  ETag/Last-Modified, bounded reads, expiry, replay/downgrade protection,
+  rollback-capable cache activation, last-known-good recovery, API status, UI
+  refresh, and tagged-release generation.
+- Signed installed-app updates staged in the background and applied after a
+  normal close, with persisted staging, new-version backend/webview readiness,
+  retained previous-binary rollback, failed-version retry suppression, current
+  version repair, and a persisted result shown in Settings.
+- Authenticode signing configuration and signature/timestamp verification in
+  the tagged Windows release workflow.
+- Ravyn 0.2 archive-tool policy: use an existing system or custom `7z`/`7za`
+  executable. Managed 7-Zip provisioning is intentionally deferred.
 
 ## Locally verified in this environment
 
 - `svelte-check`: 0 errors, 0 warnings.
 - Vitest: 67/67 tests passed.
 - Vite production build: completed.
-- Tauri JSON, command-permission mapping, and workflow YAML: statically valid.
+- 126 Rust files parsed without syntax errors.
+- Tauri JSON, TOML, command-permission mapping, and workflow YAML parsed.
 
-Rust/Tauri compilation was not available in this Linux analysis environment
-because `cargo`, `rustc`, and `rustfmt` are not installed. Windows CI remains the
-native source of truth.
+Rust/Tauri compilation was not available because Cargo, rustc, rustfmt, the
+Windows SDK, and WebView2 are not installed. Windows CI remains the native
+source of truth.
 
-## Release blockers still open
+## Effective release blockers still open
 
-1. Authenticode signing for the executable, NSIS installer, and MSI.
-2. Production remote component-manifest provider with caching, ETag, expiry,
-   replay/downgrade protection, and last-known-good recovery.
-3. Final 7-Zip/archive extraction distribution decision.
-4. Application-update readiness confirmation, retained previous-version
-   rollback, persisted update result, and repair mode.
-5. Full clean-machine WebView2 UI automation through setup, a real download,
-   update N to N+1, rollback, DPI, keyboard, and accessibility scenarios.
-6. Persisted setup consent/idempotency records that survive process restart.
-7. Browser-extension capture and secure secret-entry product workflows.
-8. Monitor-specific different-wallpaper selection through `IDesktopWallpaper`;
-   current code supports the active wallpaper and virtual-desktop Span layout.
+1. Complete the Rust/Tauri workspace build and runtime pass on Windows.
+2. Supply the real Authenticode and manifest-signing credentials and complete a
+   successful tagged release; the signing workflow itself is implemented.
+3. Run clean-machine WebView2 automation through setup, real component
+   provisioning, a real download, update N to N+1, deliberate rollback, DPI,
+   keyboard, high contrast, and accessibility scenarios.
+4. Extend updater recovery beyond the retained main executable to all installed
+   files, registry/uninstaller state, and an interrupted-helper startup path.
+5. Add monitor-specific different-wallpaper selection through
+   `IDesktopWallpaper`.
+
+## Secondary work, not core beta blockers
+
+- Richer Metalink and large batch-import UX.
+- Tag management, filename-template preview, and automation-rule preview.
+- Deeper DHT/peer/host diagnostic tables.
+- Structured per-secret-type editors; the generic credential-store flow works.
+- Optional native `.7z` extraction or managed 7-Zip provisioning.
+- Browser extension, intentionally excluded from this pass.
 
 ## Recommended next implementation order
 
-1. Run and fix the complete Rust/Tauri build on Windows.
-2. Add Authenticode signing and verify signatures in CI.
-3. Add updater health confirmation, rollback, and repair.
-4. Finish remote component manifests and the 7-Zip decision.
-5. Add Windows product E2E automation.
-6. Complete browser capture, secrets, and remaining advanced API surfaces.
+1. Run the full Windows Rust/Tauri test and bundle pipeline.
+2. Execute the signed tagged-release pipeline with production credentials.
+3. Build clean-machine product and updater rollback E2E.
+4. Finish full installed-state updater recovery.
+5. Complete remaining advanced frontend surfaces.

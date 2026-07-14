@@ -300,6 +300,9 @@ pub(super) async fn create_preset(
     State(s): State<ApiState>,
     Json(input): Json<crate::storage::PutDownloadPreset>,
 ) -> Result<(StatusCode, Json<crate::storage::DownloadPreset>)> {
+    if let Some(options) = input.payload.options.as_ref() {
+        s.manager.validate_download_secret_references(options).await?;
+    }
     let result = s.repository.create_download_preset(input).await;
     Ok((
         StatusCode::CREATED,
@@ -319,6 +322,9 @@ pub(super) async fn update_preset(
     Path(id): Path<Uuid>,
     Json(input): Json<crate::storage::PutDownloadPreset>,
 ) -> Result<Json<crate::storage::DownloadPreset>> {
+    if let Some(options) = input.payload.options.as_ref() {
+        s.manager.validate_download_secret_references(options).await?;
+    }
     let result = s.repository.update_download_preset(id, input).await;
     let resource_id = id.to_string();
     Ok(Json(
@@ -364,6 +370,9 @@ pub(super) async fn add_basket_item(
     State(s): State<ApiState>,
     Json(input): Json<crate::storage::PutBasketItem>,
 ) -> Result<(StatusCode, Json<crate::storage::BasketItem>)> {
+    s.manager
+        .validate_download_secret_references(&input.request.options)
+        .await?;
     let result = s.repository.add_basket_item(input).await;
     let mut item = audited(&s.repository, "basket.add", "basket_item", None, result).await?;
     item.request = item.request.redacted();
@@ -375,6 +384,9 @@ pub(super) async fn update_basket_item(
     Path(id): Path<Uuid>,
     Json(input): Json<crate::storage::PutBasketItem>,
 ) -> Result<Json<crate::storage::BasketItem>> {
+    s.manager
+        .validate_download_secret_references(&input.request.options)
+        .await?;
     let result = s.repository.update_basket_item(id, input).await;
     let resource_id = id.to_string();
     let mut item = audited(
@@ -497,6 +509,23 @@ pub(super) async fn clear_basket(State(s): State<ApiState>) -> Result<Json<Value
     Ok(Json(serde_json::json!({"removed": removed})))
 }
 
+async fn validate_profile_secret_references(
+    repository: &crate::storage::Repository,
+    patch: &crate::config::PersistentSettingsPatch,
+) -> Result<()> {
+    let Some(Some(secret_id)) = patch.rqbit_credentials_secret_id else {
+        return Ok(());
+    };
+    let reference = repository.get_secret_reference(secret_id).await?;
+    if reference.secret_type != "rqbit_credentials" {
+        return Err(crate::error::RavynError::Invalid(format!(
+            "secret reference {secret_id} has type {}, expected rqbit_credentials",
+            reference.secret_type
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn list_profiles(
     State(s): State<ApiState>,
 ) -> Result<Json<Vec<crate::storage::UserProfile>>> {
@@ -507,6 +536,7 @@ pub(super) async fn create_profile(
     State(s): State<ApiState>,
     Json(input): Json<crate::storage::PutUserProfile>,
 ) -> Result<(StatusCode, Json<crate::storage::UserProfile>)> {
+    validate_profile_secret_references(&s.repository, &input.settings_patch).await?;
     let result = s.repository.create_user_profile(input).await;
     Ok((
         StatusCode::CREATED,
@@ -526,6 +556,7 @@ pub(super) async fn update_profile(
     Path(id): Path<Uuid>,
     Json(input): Json<crate::storage::PutUserProfile>,
 ) -> Result<Json<crate::storage::UserProfile>> {
+    validate_profile_secret_references(&s.repository, &input.settings_patch).await?;
     let result = s.repository.update_user_profile(id, input).await;
     let resource_id = id.to_string();
     Ok(Json(
@@ -568,6 +599,7 @@ pub(super) async fn activate_profile(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ActivateProfileResponse>> {
     let pending_profile = s.repository.get_user_profile(id).await?;
+    validate_profile_secret_references(&s.repository, &pending_profile.settings_patch).await?;
     // Profiles are deterministic overlays on the startup configuration, not on the
     // previously active profile. This prevents settings from accumulating across switches.
     let mut settings = crate::config::PersistentSettings::from_config(&s.base_config);

@@ -1,23 +1,47 @@
 # Ravyn Application Updates
 
-Ravyn uses a small signed update protocol owned by the desktop shell. It does
-not trust an installer URL or checksum unless the complete update manifest has
-first passed Ed25519 verification with the public key compiled into the app.
+Ravyn uses a signed update protocol owned by the desktop shell. Installer URLs,
+release notes, sizes, and checksums are trusted only after the complete update
+manifest passes Ed25519 verification with the public key compiled into Ravyn.
 
 ## User flow
 
 1. An installed Ravyn build checks the configured HTTPS endpoint after the
-   main window is ready.
-2. A newer signed release is downloaded silently to the application cache.
-3. The installer size and SHA-256 are verified while streaming to disk.
-4. Settings shows the passive update state. No modal interrupts the user.
-5. When the main window is closed normally, a detached Windows helper waits
-   for Ravyn to exit, runs the current-user NSIS installer with `/S`, and
-   relaunches the installed executable.
-6. Portable and development builds never self-update.
+   backend and main webview are ready.
+2. A newer signed NSIS release is streamed silently to the private application
+   cache with a strict signed-size limit and incremental SHA-256 verification.
+3. Settings exposes passive download and readiness state without interrupting
+   the user.
+4. On a normal close, Ravyn verifies the staged installer again and writes a
+   durable update transaction.
+5. A detached Windows helper waits for the old process to exit, retains the
+   previous application binary in the update cache, runs the current-user NSIS
+   installer with `/S`, and launches the installed executable.
+6. The new process confirms readiness only after both the embedded backend and
+   the main webview are operational.
+7. If readiness is not confirmed within 180 seconds, or the new process exits,
+   the helper stops it, restores the retained previous binary, and relaunches
+   the previous version.
+8. The helper persists a success, rollback, or failure result. Settings displays
+   that result on the next launch.
 
-The staged installer is verified again immediately before the helper starts.
-Redirects are limited, and every redirect must remain on HTTPS.
+Portable and development builds never self-update. Redirects are limited and
+must remain on HTTPS. Metadata reads are bounded before parsing.
+
+## Transaction files
+
+Update state lives below the Tauri application cache in `updates/`:
+
+- `ravyn-pending-update.exe` — verified staged NSIS installer;
+- `ravyn-update-transaction.json` — bounded transaction contract shared with
+  the detached helper;
+- `.ravyn.update.previous.exe` — retained previous application binary;
+- `ravyn-update-ready-<token>.marker` — one-shot readiness acknowledgement;
+- `ravyn-update-result.json` — persisted outcome displayed in Settings.
+
+The current rollback guarantee covers the main Ravyn executable. Full repair of
+all installed files, registry entries, and uninstall metadata remains a
+separate recovery feature and must be validated by Windows product E2E.
 
 ## Release keys
 
@@ -27,17 +51,9 @@ Generate a dedicated keypair with the existing release tool:
 cargo run --release --bin manifest_tool -- keygen --out app-update-key.txt
 ```
 
-Store the first value as the GitHub Actions environment secret:
-
-```text
-RAVYN_APP_UPDATE_PRIVATE_KEY
-```
-
-Store the second value as the GitHub Actions environment variable:
-
-```text
-RAVYN_APP_UPDATE_PUBLIC_KEY
-```
+Store the private key as the GitHub Actions environment secret
+`RAVYN_APP_UPDATE_PRIVATE_KEY`, and the public key as the environment variable
+`RAVYN_APP_UPDATE_PUBLIC_KEY`.
 
 Use a key dedicated to application updates rather than reusing the managed
 component-manifest key. Losing the private key means installed clients cannot
@@ -79,3 +95,6 @@ both to the immutable GitHub Release.
 - The NSIS installer must use `currentUser` mode so silent installation does
   not require elevation.
 - The update private/public key pair must match.
+- Windows CI must exercise a real N-to-N+1 update, readiness acknowledgement,
+  forced readiness failure, binary rollback, and result persistence before the
+  updater is considered release-qualified.

@@ -28,13 +28,30 @@ async fn backend_info(state: tauri::State<'_, BackendHandle>) -> Result<BackendI
 #[derive(serde::Deserialize)]
 struct BackendSetupState {
     completed: bool,
+    integration_consent: Option<BackendIntegrationConsent>,
+    installation: Option<BackendInstallationState>,
+}
+
+#[derive(serde::Deserialize)]
+struct BackendInstallationState {
+    integration_completed: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct BackendIntegrationConsent {
+    installation_mode: String,
+    install_application: bool,
+    register_installed_app: bool,
+    start_menu_shortcut: bool,
+    desktop_shortcut: bool,
+    launch_at_startup: bool,
 }
 
 /// Read the backend setup state through the same authenticated loopback API
 /// used by the webview. This keeps the database-backed lifecycle authoritative
 /// even when a compromised setup page attempts to call native commands out of
 /// order.
-async fn backend_setup_completed(state: &BackendHandle) -> Result<bool, String> {
+async fn backend_setup_state(state: &BackendHandle) -> Result<BackendSetupState, String> {
     let info = state.wait_ready(BACKEND_READY_TIMEOUT).await?;
     let response = reqwest::Client::new()
         .get(format!("{}/v1/setup", info.base_url))
@@ -51,8 +68,11 @@ async fn backend_setup_completed(state: &BackendHandle) -> Result<bool, String> 
     response
         .json::<BackendSetupState>()
         .await
-        .map(|state| state.completed)
         .map_err(|error| format!("failed to decode the backend setup state: {error}"))
+}
+
+async fn backend_setup_completed(state: &BackendHandle) -> Result<bool, String> {
+    Ok(backend_setup_state(state).await?.completed)
 }
 
 async fn require_backend_setup_state(
@@ -67,6 +87,38 @@ async fn require_backend_setup_state(
     } else {
         Err("setup has already been completed in the backend".into())
     }
+}
+
+async fn require_backend_integration_consent(
+    state: &BackendHandle,
+    request: &integration::IntegrationRequest,
+) -> Result<(), String> {
+    let setup = backend_setup_state(state).await?;
+    if setup.completed {
+        return Err("setup has already been completed in the backend".into());
+    }
+    if setup
+        .installation
+        .as_ref()
+        .is_some_and(|installation| installation.integration_completed)
+    {
+        return Err("Windows integration has already been verified for this setup".into());
+    }
+    let consent = setup
+        .integration_consent
+        .ok_or_else(|| "installation preferences must be confirmed before Windows integration".to_owned())?;
+    if consent.installation_mode != "installed"
+        || consent.install_application != request.install_application
+        || consent.register_installed_app != request.register_installed_app
+        || consent.start_menu_shortcut != request.start_menu_shortcut
+        || consent.desktop_shortcut != request.desktop_shortcut
+        || consent.launch_at_startup != request.launch_at_startup
+    {
+        return Err(
+            "the native integration request does not match the persisted setup consent".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Detect the installation state of the running executable.
@@ -94,7 +146,7 @@ async fn apply_windows_integration(
 ) -> Result<integration::IntegrationReport, String> {
     require_window(&window, "setup")?;
     guard.ensure_setup_window_allowed()?;
-    require_backend_setup_state(&backend, false).await?;
+    require_backend_integration_consent(&backend, &request).await?;
     guard.begin_integration()?;
 
     let result = tauri::async_runtime::spawn_blocking(move || integration::apply(&request))
@@ -280,6 +332,17 @@ async fn check_app_update(
     app_updates::check_now(app).await
 }
 
+/// Stage a signed installer for the current release so missing or corrupted
+/// installed files can be replaced on the next normal close.
+#[tauri::command]
+async fn repair_application(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<app_updates::AppUpdateStatus, String> {
+    require_window(&window, "main")?;
+    app_updates::repair_now(app).await
+}
+
 /// Called by the main window frontend once it has verified the backend
 /// connection. Shows the main window, focuses it, then closes setup.
 #[tauri::command]
@@ -296,6 +359,7 @@ async fn main_window_ready(
     if let Some(setup) = app.get_webview_window("setup") {
         setup.close().map_err(|e| e.to_string())?;
     }
+    app_updates::confirm_update_readiness(&app)?;
     app_updates::start_background_check(app);
     Ok(())
 }
@@ -361,6 +425,7 @@ pub fn run() {
             main_window_ready,
             app_update_status,
             check_app_update,
+            repair_application,
             desktop_appearance,
             open_native_path,
             reveal_native_path,

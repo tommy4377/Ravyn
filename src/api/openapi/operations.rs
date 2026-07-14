@@ -1312,6 +1312,28 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         Some("ComponentOverview")
     ),
     op!(
+        "get",
+        "/v1/components/manifest",
+        "getComponentManifestStatus",
+        "Components",
+        "Read signed component catalog refresh and cache status",
+        "200",
+        false,
+        false,
+        Some("ComponentManifestStatus")
+    ),
+    op!(
+        "post",
+        "/v1/components/manifest",
+        "refreshComponentManifest",
+        "Components",
+        "Refresh and verify the remote component catalog",
+        "200",
+        false,
+        false,
+        Some("ComponentManifestStatus")
+    ),
+    op!(
         "post",
         "/v1/components/features",
         "saveFeatureSelections",
@@ -1420,6 +1442,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         true,
         Some("PrepareLibraryResult")
+    ),
+    op!(
+        "post",
+        "/v1/setup/integration-consent",
+        "saveIntegrationConsent",
+        "Setup",
+        "Persist the exact user-approved Windows integration choices",
+        "200",
+        false,
+        true,
+        Some("SetupState")
     ),
     op!(
         "post",

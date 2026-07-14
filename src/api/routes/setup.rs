@@ -56,6 +56,36 @@ pub(super) struct SetupStateResponse {
     library_prepared: bool,
     data_dir: String,
     installation: Option<InstallationResponse>,
+    integration_consent: Option<IntegrationConsentResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct IntegrationConsentResponse {
+    id: uuid::Uuid,
+    installation_mode: String,
+    install_application: bool,
+    register_installed_app: bool,
+    start_menu_shortcut: bool,
+    desktop_shortcut: bool,
+    launch_at_startup: bool,
+    launch_after_setup: bool,
+    consented_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<crate::storage::IntegrationConsentRecord> for IntegrationConsentResponse {
+    fn from(record: crate::storage::IntegrationConsentRecord) -> Self {
+        Self {
+            id: record.id,
+            installation_mode: record.installation_mode,
+            install_application: record.install_application,
+            register_installed_app: record.register_installed_app,
+            start_menu_shortcut: record.start_menu_shortcut,
+            desktop_shortcut: record.desktop_shortcut,
+            launch_at_startup: record.launch_at_startup,
+            launch_after_setup: record.launch_after_setup,
+            consented_at: record.consented_at,
+        }
+    }
 }
 
 /// Result of the desktop shell's Windows installation/integration step, as
@@ -110,6 +140,85 @@ fn paths_equivalent(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
+fn expected_application_path(installation_mode: &str) -> Result<std::path::PathBuf> {
+    match installation_mode {
+        "portable" | "development" => std::env::current_exe().map_err(Into::into),
+        "installed" => {
+            #[cfg(windows)]
+            {
+                let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+                    crate::error::RavynError::Unavailable(
+                        "LOCALAPPDATA is unavailable, so the installed application cannot be verified"
+                            .into(),
+                    )
+                })?;
+                Ok(std::path::PathBuf::from(local_app_data)
+                    .join("Ravyn")
+                    .join("Ravyn.exe"))
+            }
+            #[cfg(not(windows))]
+            {
+                Err(crate::error::RavynError::Invalid(
+                    "installed mode can only be verified on Windows".into(),
+                ))
+            }
+        }
+        _ => Err(crate::error::RavynError::Invalid(
+            "unknown installation mode".into(),
+        )),
+    }
+}
+
+fn consent_matches_report(
+    consent: &crate::storage::IntegrationConsentRecord,
+    request: &ReportInstallationRequest,
+) -> bool {
+    consent.installation_mode == request.installation_mode
+        && request.relaunch_pending
+            == (request.installation_mode == "installed" && consent.launch_after_setup)
+}
+
+async fn verify_completed_installation(
+    request: &ReportInstallationRequest,
+    installed_exe: &str,
+    installed_version: &str,
+    installed_sha256: &str,
+) -> Result<String> {
+    if installed_version != env!("CARGO_PKG_VERSION") {
+        return Err(crate::error::RavynError::Conflict(format!(
+            "the reported application version {installed_version} does not match the running setup version {}",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+
+    crate::services::checksum::validate_sha256(installed_sha256)?;
+    let path = std::path::PathBuf::from(installed_exe);
+    if !path.is_absolute() || !path.is_file() {
+        return Err(crate::error::RavynError::Invalid(
+            "installed_exe must be an absolute path to an existing file".into(),
+        ));
+    }
+    let expected = expected_application_path(&request.installation_mode)?;
+    if !paths_equivalent(&path, &expected) {
+        return Err(crate::error::RavynError::Conflict(format!(
+            "the reported executable does not match the trusted {} application path",
+            request.installation_mode
+        )));
+    }
+
+    let actual = crate::services::checksum::sha256(
+        &path,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    if !actual.eq_ignore_ascii_case(installed_sha256) {
+        return Err(crate::error::RavynError::Conflict(
+            "the reported executable checksum does not match the file on disk".into(),
+        ));
+    }
+    Ok(actual)
+}
+
 fn installation_ready(installation: Option<&crate::storage::InstallationRecord>) -> bool {
     let Some(installation) = installation else {
         return false;
@@ -141,15 +250,24 @@ fn setup_lifecycle(
     features_selected: bool,
     library_prepared: bool,
     installation_ready: bool,
+    integration_consent_saved: bool,
     restart_required: bool,
 ) -> SetupLifecycleState {
     if restart_required {
         SetupLifecycleState::RestartRequired
     } else if completed {
         SetupLifecycleState::Completed
-    } else if features_selected && library_prepared && installation_ready {
+    } else if features_selected
+        && library_prepared
+        && installation_ready
+        && integration_consent_saved
+    {
         SetupLifecycleState::ReadyToComplete
-    } else if features_selected || library_prepared || installation_ready {
+    } else if features_selected
+        || library_prepared
+        || installation_ready
+        || integration_consent_saved
+    {
         SetupLifecycleState::InProgress
     } else {
         SetupLifecycleState::NotStarted
@@ -172,13 +290,21 @@ pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<Se
     let installation_is_ready = installation_ready(
         record.as_ref().and_then(|state| state.installation.as_ref()),
     );
-    let ready_to_complete =
-        features_selected && library_prepared && installation_is_ready && !restart_required;
+    let integration_consent_saved = record
+        .as_ref()
+        .and_then(|state| state.integration_consent.as_ref())
+        .is_some();
+    let ready_to_complete = features_selected
+        && library_prepared
+        && installation_is_ready
+        && integration_consent_saved
+        && !restart_required;
     let lifecycle = setup_lifecycle(
         completed,
         features_selected,
         library_prepared,
         installation_is_ready,
+        integration_consent_saved,
         restart_required,
     );
 
@@ -196,8 +322,72 @@ pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<Se
         library_root: library_root.map(|p| p.display().to_string()),
         library_prepared,
         data_dir: s.manager.config().data_dir.display().to_string(),
-        installation: record.and_then(|r| r.installation).map(Into::into),
+        installation: record
+            .as_ref()
+            .and_then(|r| r.installation.clone())
+            .map(Into::into),
+        integration_consent: record
+            .and_then(|r| r.integration_consent)
+            .map(Into::into),
     }))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct SaveIntegrationConsentRequest {
+    installation_mode: String,
+    install_application: bool,
+    register_installed_app: bool,
+    start_menu_shortcut: bool,
+    desktop_shortcut: bool,
+    launch_at_startup: bool,
+    launch_after_setup: bool,
+}
+
+/// Persist the exact native integration choices before the setup window is
+/// allowed to perform Windows side effects.
+pub(super) async fn save_integration_consent(
+    State(s): State<ApiState>,
+    Json(request): Json<SaveIntegrationConsentRequest>,
+) -> Result<Json<SetupStateResponse>> {
+    ensure_setup_mutable(&s).await?;
+    if !INSTALLATION_MODES.contains(&request.installation_mode.as_str()) {
+        return Err(crate::error::RavynError::Invalid(format!(
+            "installation_mode must be one of {INSTALLATION_MODES:?}"
+        )));
+    }
+    if request.installation_mode != "installed"
+        && (request.install_application
+            || request.register_installed_app
+            || request.start_menu_shortcut
+            || request.desktop_shortcut
+            || request.launch_at_startup)
+    {
+        return Err(crate::error::RavynError::Invalid(
+            "portable and development modes cannot request Windows installation integration"
+                .into(),
+        ));
+    }
+    let consent = crate::storage::IntegrationConsentRecord {
+        id: uuid::Uuid::new_v4(),
+        installation_mode: request.installation_mode,
+        install_application: request.install_application,
+        register_installed_app: request.register_installed_app,
+        start_menu_shortcut: request.start_menu_shortcut,
+        desktop_shortcut: request.desktop_shortcut,
+        launch_at_startup: request.launch_at_startup,
+        launch_after_setup: request.launch_after_setup,
+        consented_at: chrono::Utc::now(),
+    };
+    let result = s.repository.save_integration_consent(consent).await;
+    audited(
+        &s.repository,
+        "setup.save_integration_consent",
+        "setup",
+        None,
+        result,
+    )
+    .await?;
+    get_setup_state(State(s)).await
 }
 
 #[derive(Deserialize)]
@@ -325,13 +515,6 @@ pub(super) async fn report_installation(
             "installation_mode must be one of {INSTALLATION_MODES:?}"
         )));
     }
-    if let Some(sha256) = &request.installed_sha256 {
-        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(crate::error::RavynError::Invalid(
-                "installed_sha256 must contain exactly 64 hexadecimal characters".into(),
-            ));
-        }
-    }
     if request.integration_errors.len() > MAX_INTEGRATION_ERRORS
         || request
             .integration_errors
@@ -342,11 +525,53 @@ pub(super) async fn report_installation(
             "too many or too long integration error messages".into(),
         ));
     }
+    let consent = s
+        .repository
+        .load_setup_state()
+        .await?
+        .and_then(|record| record.integration_consent)
+        .ok_or_else(|| {
+            crate::error::RavynError::Conflict(
+                "installation preferences must be consented before reporting the result".into(),
+            )
+        })?;
+    if !consent_matches_report(&consent, &request) {
+        return Err(crate::error::RavynError::Conflict(
+            "the installation report does not match the persisted setup consent".into(),
+        ));
+    }
+
+    let installed_exe = bounded_field(request.installed_exe.clone())?;
+    let installed_version = bounded_field(request.installed_version.clone())?;
+    let submitted_sha256 = bounded_field(request.installed_sha256.clone())?;
+    let installed_sha256 = if request.integration_completed {
+        let executable = installed_exe.as_deref().ok_or_else(|| {
+            crate::error::RavynError::Invalid(
+                "a completed integration report requires installed_exe".into(),
+            )
+        })?;
+        let version = installed_version.as_deref().ok_or_else(|| {
+            crate::error::RavynError::Invalid(
+                "a completed integration report requires installed_version".into(),
+            )
+        })?;
+        let checksum = submitted_sha256.as_deref().ok_or_else(|| {
+            crate::error::RavynError::Invalid(
+                "a completed integration report requires installed_sha256".into(),
+            )
+        })?;
+        Some(verify_completed_installation(&request, executable, version, checksum).await?)
+    } else {
+        if let Some(checksum) = submitted_sha256.as_deref() {
+            crate::services::checksum::validate_sha256(checksum)?;
+        }
+        submitted_sha256.map(|checksum| checksum.to_ascii_lowercase())
+    };
     let installation = crate::storage::InstallationRecord {
         installation_mode: request.installation_mode,
-        installed_exe: bounded_field(request.installed_exe)?,
-        installed_version: bounded_field(request.installed_version)?,
-        installed_sha256: request.installed_sha256,
+        installed_exe,
+        installed_version,
+        installed_sha256,
         integration_completed: request.integration_completed,
         integration_errors: request.integration_errors,
         relaunch_pending: request.relaunch_pending,
@@ -366,6 +591,15 @@ pub(super) async fn report_installation(
 pub(super) async fn complete_setup(State(s): State<ApiState>) -> Result<Json<SetupStateResponse>> {
     ensure_setup_mutable(&s).await?;
     let setup_record = s.repository.load_setup_state().await?;
+    if setup_record
+        .as_ref()
+        .and_then(|record| record.integration_consent.as_ref())
+        .is_none()
+    {
+        return Err(crate::error::RavynError::Conflict(
+            "installation preferences must be consented before setup can be completed".into(),
+        ));
+    }
     if !installation_ready(
         setup_record
             .as_ref()
@@ -458,15 +692,15 @@ mod tests {
     #[test]
     fn lifecycle_requires_restart_before_completion() {
         assert_eq!(
-            setup_lifecycle(false, true, true, true, true),
+            setup_lifecycle(false, true, true, true, true, true),
             SetupLifecycleState::RestartRequired
         );
         assert_eq!(
-            setup_lifecycle(false, true, true, true, false),
+            setup_lifecycle(false, true, true, true, true, false),
             SetupLifecycleState::ReadyToComplete
         );
         assert_eq!(
-            setup_lifecycle(true, true, true, true, false),
+            setup_lifecycle(true, true, true, true, true, false),
             SetupLifecycleState::Completed
         );
     }
@@ -474,7 +708,11 @@ mod tests {
     #[test]
     fn lifecycle_stays_in_progress_until_installation_is_verified() {
         assert_eq!(
-            setup_lifecycle(false, true, true, false, false),
+            setup_lifecycle(false, true, true, false, true, false),
+            SetupLifecycleState::InProgress
+        );
+        assert_eq!(
+            setup_lifecycle(false, true, true, true, false, false),
             SetupLifecycleState::InProgress
         );
     }
@@ -520,5 +758,69 @@ mod tests {
     #[test]
     fn installation_modes_are_exactly_the_three_detected_by_the_desktop_shell() {
         assert_eq!(INSTALLATION_MODES, ["installed", "portable", "development"]);
+    }
+
+    #[test]
+    fn installation_report_must_match_the_persisted_mode_and_relaunch_choice() {
+        let consent = crate::storage::IntegrationConsentRecord {
+            id: uuid::Uuid::new_v4(),
+            installation_mode: "installed".into(),
+            install_application: true,
+            register_installed_app: true,
+            start_menu_shortcut: true,
+            desktop_shortcut: false,
+            launch_at_startup: false,
+            launch_after_setup: true,
+            consented_at: chrono::Utc::now(),
+        };
+        let matching = ReportInstallationRequest {
+            installation_mode: "installed".into(),
+            installed_exe: None,
+            installed_version: None,
+            installed_sha256: None,
+            integration_completed: false,
+            integration_errors: Vec::new(),
+            relaunch_pending: true,
+        };
+        assert!(consent_matches_report(&consent, &matching));
+        assert!(!consent_matches_report(
+            &consent,
+            &ReportInstallationRequest {
+                installation_mode: "portable".into(),
+                relaunch_pending: false,
+                ..matching
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn portable_installation_verification_hashes_the_actual_running_file() {
+        let executable = std::env::current_exe().unwrap();
+        let checksum = crate::services::checksum::sha256(
+            &executable,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let request = ReportInstallationRequest {
+            installation_mode: "portable".into(),
+            installed_exe: Some(executable.display().to_string()),
+            installed_version: Some(env!("CARGO_PKG_VERSION").into()),
+            installed_sha256: Some(checksum.clone()),
+            integration_completed: true,
+            integration_errors: Vec::new(),
+            relaunch_pending: false,
+        };
+        assert_eq!(
+            verify_completed_installation(
+                &request,
+                request.installed_exe.as_deref().unwrap(),
+                request.installed_version.as_deref().unwrap(),
+                request.installed_sha256.as_deref().unwrap(),
+            )
+            .await
+            .unwrap(),
+            checksum
+        );
     }
 }

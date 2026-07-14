@@ -27,6 +27,7 @@ import {
   restartApplication,
   setupInstallationInfo,
   type InstallationInfo,
+  type IntegrationRequest,
   type IntegrationReport,
 } from "../native/tauri";
 
@@ -131,6 +132,16 @@ export class SetupController {
       this.setupState = setupState;
       this.overview = overview;
       this.applyDetection(setupState, installation);
+      if (setupState.integration_consent) {
+        const consent = setupState.integration_consent;
+        this.applicationMode = installation.development
+          ? "development"
+          : consent.installation_mode;
+        this.startMenuShortcut = consent.start_menu_shortcut;
+        this.desktopShortcut = consent.desktop_shortcut;
+        this.launchAtStartup = consent.launch_at_startup;
+        this.launchAfterSetup = consent.launch_after_setup;
+      }
       this.installationReported = setupState.installation !== null;
       this.installationReady =
         setupState.installation?.integration_completed === true;
@@ -344,19 +355,64 @@ export class SetupController {
     this.installationReady = false;
 
     try {
-      if (this.applicationMode === "installed") {
-        const request = buildIntegrationRequest(
-          this.applicationMode,
-          this.installation,
-          {
-            startMenuShortcut: this.startMenuShortcut,
-            desktopShortcut: this.desktopShortcut,
-            launchAtStartup: this.launchAtStartup,
-          },
-        );
-        if (!request) {
-          throw new Error("installed mode did not produce an integration request");
+      const request: IntegrationRequest =
+        this.applicationMode === "installed"
+          ? (buildIntegrationRequest(
+              this.applicationMode,
+              this.installation,
+              {
+                startMenuShortcut: this.startMenuShortcut,
+                desktopShortcut: this.desktopShortcut,
+                launchAtStartup: this.launchAtStartup,
+              },
+            ) ?? (() => {
+              throw new Error(
+                "installed mode did not produce an integration request",
+              );
+            })())
+          : {
+              install_application: false,
+              register_installed_app: false,
+              start_menu_shortcut: false,
+              desktop_shortcut: false,
+              launch_at_startup: false,
+            };
+      const previousConsentId = this.setupState?.integration_consent?.id ?? null;
+      this.setupState = await this.client.saveIntegrationConsent({
+        installation_mode: this.applicationMode,
+        ...request,
+        launch_after_setup: this.launchAfterSetup,
+      });
+      const consentUnchanged =
+        previousConsentId !== null &&
+        previousConsentId === this.setupState.integration_consent?.id;
+      const persistedInstallation = this.setupState.installation;
+
+      if (
+        consentUnchanged &&
+        (persistedInstallation?.integration_completed === true ||
+          this.integrationReport?.integration_completed === true)
+      ) {
+        if (!this.integrationReport?.integration_completed && persistedInstallation) {
+          this.integrationReport = {
+            steps: [
+              {
+                step: "restore_persisted_integration",
+                applied: false,
+                skipped_reason:
+                  "the consented integration was already verified before restart",
+                error: null,
+              },
+            ],
+            install_dir: this.installation.install_dir,
+            installed_exe: persistedInstallation.installed_exe,
+            installed_version: persistedInstallation.installed_version,
+            installed_sha256: persistedInstallation.installed_sha256,
+            integration_completed: true,
+            integration_errors: [],
+          };
         }
+      } else if (this.applicationMode === "installed") {
         this.integrationReport = await applyWindowsIntegration(request);
       } else {
         const reason =
@@ -384,6 +440,10 @@ export class SetupController {
             ? []
             : ["the running executable could not be verified"],
         };
+      }
+
+      if (!this.integrationReport) {
+        throw new Error("Ravyn did not produce an installation report");
       }
 
       this.setupState = await this.client.reportInstallation({
@@ -492,7 +552,8 @@ export class SetupController {
       this.provisioningFinished &&
       this.installationReported &&
       this.installationReady &&
-      this.setupState?.restart_required !== true
+      this.setupState?.restart_required !== true &&
+      this.setupState?.integration_consent != null
     );
   }
 

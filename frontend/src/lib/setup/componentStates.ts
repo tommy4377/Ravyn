@@ -68,10 +68,22 @@ export const COMPONENT_STATE_UI: Record<ComponentState, StateDescriptor> = {
     icon: "warning",
     actions: [],
   },
+  cancelled: {
+    label: "Cancelled",
+    description: "The component operation was cancelled before activation.",
+    icon: "warning",
+    actions: ["retry"],
+  },
   custom_path: {
     label: "Custom path",
     description: "Using an executable you configured yourself.",
     icon: "success",
+    actions: [],
+  },
+  custom_path_invalid: {
+    label: "Custom path invalid",
+    description: "The configured executable is missing or failed its capability check.",
+    icon: "error",
     actions: [],
   },
 };
