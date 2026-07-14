@@ -23,6 +23,8 @@
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes } from "../util/format";
 
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let readiness = $state<ReadinessStatus | null>(null);
   let database = $state<DatabaseStatus | null>(null);
   let dependencies = $state<DependenciesStatus | null>(null);
@@ -190,7 +192,8 @@
   }
 </script>
 
-<div class="diagnostics page-scroll">
+<div class="diagnostics page-scroll" class:embedded>
+  {#if !embedded}
   <PageHeader
     eyebrow="System"
     title="Diagnostics"
@@ -205,6 +208,7 @@
       </Button>
     {/snippet}
   </PageHeader>
+  {/if}
 
   <div class="content">
     {#if error}
@@ -364,6 +368,8 @@
 
 <style>
   .diagnostics { height: 100%; overflow-y: auto; }
+  .diagnostics.embedded { height: auto; overflow: visible; }
+  .diagnostics.embedded .content { padding: 0; }
   .content { display: flex; flex-direction: column; gap: var(--space-4); padding: 0 var(--page-padding) var(--space-8); }
   .restore-banner, .restore-result { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--status-warning); border-radius: var(--radius-layer); background: var(--status-warning-bg); }
   .restore-banner > div { display: flex; flex: 1; min-width: 0; flex-direction: column; }

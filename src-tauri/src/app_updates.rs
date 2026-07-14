@@ -25,11 +25,19 @@ const UPDATE_FILENAME: &str = "ravyn-pending-update.exe";
 const UPDATE_PENDING_STATE_FILENAME: &str = "ravyn-pending-update.json";
 const UPDATE_TRANSACTION_FILENAME: &str = "ravyn-update-transaction.json";
 const UPDATE_RESULT_FILENAME: &str = "ravyn-update-result.json";
-const UPDATE_BACKUP_FILENAME: &str = ".ravyn.update.previous.exe";
+const UPDATE_JOURNAL_FILENAME: &str = "ravyn-update-journal.txt";
+/// Schema-2 single-file backup, still removed during cleanup of old state.
+const LEGACY_UPDATE_BACKUP_FILENAME: &str = ".ravyn.update.previous.exe";
 const UPDATE_PENDING_STATE_SCHEMA: u32 = 2;
-const UPDATE_TRANSACTION_SCHEMA: u32 = 2;
+const UPDATE_TRANSACTION_SCHEMA: u32 = 3;
 const READINESS_TIMEOUT_SECS: u64 = 180;
 const PENDING_UPDATE_MAX_AGE_SECS: u64 = 14 * 24 * 60 * 60;
+/// A transaction older than this without a surviving helper is interrupted:
+/// close + installer run + readiness wait all complete well inside it.
+const INTERRUPTED_TRANSACTION_STALE_MS: u64 = 30 * 60 * 1000;
+const REGISTRY_UNINSTALL_KEY: &str =
+    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Ravyn";
+const REGISTRY_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -121,14 +129,38 @@ struct PersistedPendingUpdate {
     repair: bool,
 }
 
+/// Versioned journal of a close-time update. Schema 3 covers the whole
+/// installation: directory snapshot, registry keys, and shortcuts, plus a
+/// phase journal the helper advances so an interrupted run can be diagnosed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingUpdateTransaction {
     schema: u32,
     token: String,
     from_version: String,
     to_version: String,
+    #[serde(default)]
+    install_dir: PathBuf,
     installed_exe: PathBuf,
-    backup_exe: PathBuf,
+    /// Pre-update snapshot of the application binaries (top-level `.exe` and
+    /// `.dll` files). The install directory doubles as the backend data
+    /// directory, so backup and rollback deliberately never touch anything
+    /// else: user data written after the snapshot must survive a rollback.
+    #[serde(default)]
+    backup_dir: PathBuf,
+    /// Pre-update copies of the shortcut files, indexed by `shortcuts` order.
+    #[serde(default)]
+    shortcuts_backup_dir: PathBuf,
+    #[serde(default)]
+    registry_uninstall_backup: PathBuf,
+    #[serde(default)]
+    registry_run_backup: PathBuf,
+    /// Shortcut files the installer may rewrite (Start Menu, Desktop).
+    #[serde(default)]
+    shortcuts: Vec<PathBuf>,
+    /// Single-line phase marker written by the helper (backup, install,
+    /// verify, rollback, finalize) for diagnostics after interruptions.
+    #[serde(default)]
+    journal_path: PathBuf,
     installer_path: PathBuf,
     readiness_marker: PathBuf,
     #[serde(default)]
@@ -255,6 +287,143 @@ pub fn confirm_update_readiness(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryAction {
+    /// The transaction is fresh; a helper may still be driving it.
+    LeaveAlone,
+    /// We are running the target version, so the install succeeded but the
+    /// helper died before finalizing. Complete its bookkeeping.
+    FinalizeSucceeded,
+    /// The helper died and the installation did not move to the target
+    /// version (or the journal is unreadable). Clean up and require an
+    /// explicit retry.
+    CleanupFailed,
+}
+
+/// Decides how to recover a persisted update transaction found at startup.
+fn plan_recovery(
+    schema: u32,
+    to_version: &str,
+    created_at_unix_ms: u64,
+    current_version: &str,
+    now_unix_ms: u64,
+) -> RecoveryAction {
+    if schema != UPDATE_TRANSACTION_SCHEMA {
+        return RecoveryAction::CleanupFailed;
+    }
+    let plausible_timestamp = created_at_unix_ms <= now_unix_ms.saturating_add(10 * 60 * 1000);
+    let fresh = plausible_timestamp
+        && now_unix_ms.saturating_sub(created_at_unix_ms) <= INTERRUPTED_TRANSACTION_STALE_MS;
+    if fresh {
+        return RecoveryAction::LeaveAlone;
+    }
+    if current_version == to_version.trim_start_matches('v') {
+        RecoveryAction::FinalizeSucceeded
+    } else {
+        RecoveryAction::CleanupFailed
+    }
+}
+
+/// Removes every on-disk artifact a transaction may have left behind.
+fn remove_transaction_artifacts(update_dir: &Path, transaction: Option<&PendingUpdateTransaction>) {
+    if let Some(transaction) = transaction {
+        let _ = std::fs::remove_file(&transaction.readiness_marker);
+        let _ = std::fs::remove_file(&transaction.journal_path);
+        let _ = std::fs::remove_dir_all(&transaction.backup_dir);
+        let _ = std::fs::remove_dir_all(&transaction.shortcuts_backup_dir);
+        let _ = std::fs::remove_file(&transaction.registry_uninstall_backup);
+        let _ = std::fs::remove_file(&transaction.registry_run_backup);
+    }
+    let _ = std::fs::remove_file(update_dir.join(UPDATE_JOURNAL_FILENAME));
+    let _ = std::fs::remove_file(update_dir.join(LEGACY_UPDATE_BACKUP_FILENAME));
+    let _ = std::fs::remove_file(update_dir.join(UPDATE_PENDING_STATE_FILENAME));
+    let _ = std::fs::remove_file(update_dir.join(UPDATE_FILENAME));
+    let _ = std::fs::remove_file(update_dir.join(format!("{UPDATE_FILENAME}.partial")));
+    let _ = std::fs::remove_file(update_dir.join(UPDATE_TRANSACTION_FILENAME));
+}
+
+/// Detects an update transaction whose helper was interrupted (crash, kill,
+/// or power loss between installer, readiness wait, and final cleanup) and
+/// either finalizes or cleans it so updates never stay blocked.
+pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
+    let update_dir = update_directory(app)?;
+    let transaction_path = update_dir.join(UPDATE_TRANSACTION_FILENAME);
+    if !transaction_path.exists() {
+        return Ok(());
+    }
+    let transaction = match read_json_file::<PendingUpdateTransaction>(&transaction_path) {
+        Ok(Some(transaction)) => Some(transaction),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "found an unreadable app update transaction; cleaning it up");
+            None
+        }
+    };
+    let journal_phase = std::fs::read_to_string(update_dir.join(UPDATE_JOURNAL_FILENAME))
+        .map(|phase| phase.trim().to_owned())
+        .unwrap_or_default();
+    let action = transaction.as_ref().map_or(
+        RecoveryAction::CleanupFailed,
+        |transaction| {
+            plan_recovery(
+                transaction.schema,
+                &transaction.to_version,
+                transaction.created_at_unix_ms,
+                env!("CARGO_PKG_VERSION"),
+                unix_timestamp_ms(),
+            )
+        },
+    );
+    match action {
+        RecoveryAction::LeaveAlone => Ok(()),
+        RecoveryAction::FinalizeSucceeded => {
+            let transaction = transaction.expect("finalize requires a parsed transaction");
+            let result = AppUpdateResult {
+                outcome: "succeeded".into(),
+                from_version: transaction.from_version.clone(),
+                to_version: transaction.to_version.clone(),
+                completed_at_unix_ms: unix_timestamp_ms(),
+                message: format!(
+                    "The update installed, but its helper was interrupted (last phase: {}). Ravyn finalized it on startup.",
+                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                ),
+            };
+            write_json_atomic_sync(&transaction.result_path, &result)?;
+            remove_transaction_artifacts(&update_dir, Some(&transaction));
+            tracing::info!(
+                to_version = %transaction.to_version,
+                "finalized an interrupted app update after startup verification"
+            );
+            Ok(())
+        }
+        RecoveryAction::CleanupFailed => {
+            let (from_version, to_version) = transaction
+                .as_ref()
+                .map(|transaction| {
+                    (
+                        transaction.from_version.clone(),
+                        transaction.to_version.clone(),
+                    )
+                })
+                .unwrap_or_else(|| (env!("CARGO_PKG_VERSION").to_owned(), "unknown".to_owned()));
+            let result = AppUpdateResult {
+                outcome: "failed".into(),
+                from_version,
+                to_version,
+                completed_at_unix_ms: unix_timestamp_ms(),
+                message: format!(
+                    "The update helper was interrupted (last phase: {}) and the update did not complete. Use Check now to retry, or Repair to reinstall the current version.",
+                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                ),
+            };
+            write_json_atomic_sync(&update_dir.join(UPDATE_RESULT_FILENAME), &result)?;
+            remove_transaction_artifacts(&update_dir, transaction.as_ref());
+            tracing::warn!("cleaned up an interrupted app update transaction at startup");
+            Ok(())
+        }
+    }
+}
+
 pub fn start_background_check(app: AppHandle) {
     let installation = crate::installation::detect();
     let installed_build =
@@ -282,6 +451,9 @@ pub fn start_background_check(app: AppHandle) {
                 return;
             }
         };
+        if let Err(error) = recover_interrupted_update(&app) {
+            tracing::warn!(%error, "failed to recover an interrupted app update");
+        }
         match restore_pending_update(&app, &configuration) {
             Ok(true) => return,
             Ok(false) => {}
@@ -337,6 +509,10 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
     let Some(configuration) = configuration()? else {
         return Err("application updates are not configured for this build".into());
     };
+    // A stale interrupted transaction would otherwise block staging forever.
+    if let Err(error) = recover_interrupted_update(&app) {
+        tracing::warn!(%error, "failed to recover an interrupted app update");
+    }
 
     let clear_existing = {
         let state = app.state::<AppUpdateState>();
@@ -789,14 +965,27 @@ fn verify_staged_installer(pending: &PendingUpdate) -> Result<(), String> {
     Ok(())
 }
 
+/// Shortcut files the installer may rewrite and the rollback must restore.
+fn installed_shortcut_paths() -> Vec<PathBuf> {
+    let mut shortcuts = Vec::new();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        shortcuts
+            .push(PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Ravyn.lnk"));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        shortcuts.push(PathBuf::from(profile).join(r"Desktop\Ravyn.lnk"));
+    }
+    shortcuts
+}
+
 fn prepare_update_transaction(
     app: &AppHandle,
     pending: &PendingUpdate,
 ) -> Result<PendingUpdateTransaction, String> {
-    let installed_exe = crate::installation::default_install_dir()
+    let install_dir = crate::installation::default_install_dir()
         .map(PathBuf::from)
-        .ok_or_else(|| "failed to resolve the installed Ravyn directory".to_owned())?
-        .join("Ravyn.exe");
+        .ok_or_else(|| "failed to resolve the installed Ravyn directory".to_owned())?;
+    let installed_exe = install_dir.join("Ravyn.exe");
     if !installed_exe.is_file() {
         return Err("the installed Ravyn executable could not be found".into());
     }
@@ -821,8 +1010,14 @@ fn prepare_update_transaction(
         token: token.clone(),
         from_version: env!("CARGO_PKG_VERSION").to_owned(),
         to_version: pending.manifest.version.clone(),
-        backup_exe: update_dir.join(UPDATE_BACKUP_FILENAME),
+        install_dir,
         installed_exe,
+        backup_dir: update_dir.join(format!("backup-{token}")),
+        shortcuts_backup_dir: update_dir.join(format!("shortcuts-{token}")),
+        registry_uninstall_backup: update_dir.join(format!("registry-uninstall-{token}.reg")),
+        registry_run_backup: update_dir.join(format!("registry-run-{token}.reg")),
+        shortcuts: installed_shortcut_paths(),
+        journal_path: update_dir.join(UPDATE_JOURNAL_FILENAME),
         installer_path: pending.installer_path.clone(),
         readiness_marker: update_dir.join(format!("ravyn-update-ready-{token}.marker")),
         pending_state_path: update_dir.join(UPDATE_PENDING_STATE_FILENAME),
@@ -831,12 +1026,14 @@ fn prepare_update_transaction(
         created_at_unix_ms: unix_timestamp_ms(),
     };
     let _ = std::fs::remove_file(&transaction.readiness_marker);
+    let _ = std::fs::remove_file(&transaction.journal_path);
     write_json_atomic_sync(&transaction.transaction_path, &transaction)?;
     Ok(transaction)
 }
 
 fn cleanup_unlaunched_transaction(transaction: &PendingUpdateTransaction) {
     let _ = std::fs::remove_file(&transaction.readiness_marker);
+    let _ = std::fs::remove_file(&transaction.journal_path);
     let _ = std::fs::remove_file(&transaction.transaction_path);
 }
 
@@ -875,51 +1072,38 @@ fn build_installer_helper_script(
 ) -> String {
     use std::fmt::Write as _;
 
+    let shortcuts = transaction
+        .shortcuts
+        .iter()
+        .map(|path| powershell_literal(path))
+        .collect::<Vec<_>>()
+        .join(",");
+    let shortcuts = if shortcuts.is_empty() {
+        "@()".to_owned()
+    } else {
+        format!("@({shortcuts})")
+    };
+
     let mut script = String::new();
     writeln!(&mut script, "$ErrorActionPreference='Stop';").unwrap();
     writeln!(&mut script, "$parentPid={parent_pid};").unwrap();
-    writeln!(
-        &mut script,
-        "$installed={};",
-        powershell_literal(&transaction.installed_exe)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$backup={};",
-        powershell_literal(&transaction.backup_exe)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$installer={};",
-        powershell_literal(&transaction.installer_path)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$ready={};",
-        powershell_literal(&transaction.readiness_marker)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$transactionPath={};",
-        powershell_literal(&transaction.transaction_path)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$pendingStatePath={};",
-        powershell_literal(&transaction.pending_state_path)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$resultPath={};",
-        powershell_literal(&transaction.result_path)
-    )
-    .unwrap();
+    for (name, path) in [
+        ("installDir", &transaction.install_dir),
+        ("installed", &transaction.installed_exe),
+        ("backupDir", &transaction.backup_dir),
+        ("shortcutBackupDir", &transaction.shortcuts_backup_dir),
+        ("regUninstallBackup", &transaction.registry_uninstall_backup),
+        ("regRunBackup", &transaction.registry_run_backup),
+        ("journal", &transaction.journal_path),
+        ("installer", &transaction.installer_path),
+        ("ready", &transaction.readiness_marker),
+        ("transactionPath", &transaction.transaction_path),
+        ("pendingStatePath", &transaction.pending_state_path),
+        ("resultPath", &transaction.result_path),
+    ] {
+        writeln!(&mut script, "${name}={};", powershell_literal(path)).unwrap();
+    }
+    writeln!(&mut script, "$shortcuts={shortcuts};").unwrap();
     writeln!(
         &mut script,
         "$fromVersion={};",
@@ -933,16 +1117,62 @@ fn build_installer_helper_script(
     )
     .unwrap();
     writeln!(&mut script, "$timeoutSeconds={READINESS_TIMEOUT_SECS};").unwrap();
+    writeln!(
+        &mut script,
+        "$regUninstallKey={};",
+        powershell_string(REGISTRY_UNINSTALL_KEY)
+    )
+    .unwrap();
+    writeln!(
+        &mut script,
+        "$regRunKey={};",
+        powershell_string(REGISTRY_RUN_KEY)
+    )
+    .unwrap();
     script.push_str(
-        "$ravyn=Get-Process -Id $parentPid -ErrorAction SilentlyContinue;\n\
+        "function Write-Journal([string]$phase) { try { Set-Content -LiteralPath $journal -Value $phase -Force } catch {} };\n\
+         function Restore-Installation {\n\
+           Write-Journal 'rollback';\n\
+           if (Test-Path -LiteralPath $backupDir) {\n\
+             Get-ChildItem -LiteralPath $installDir -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe','.dll' } | Remove-Item -Force -ErrorAction SilentlyContinue;\n\
+             Get-ChildItem -LiteralPath $backupDir -File -Force | Copy-Item -Destination $installDir -Force;\n\
+           };\n\
+           if ($script:uninstallKeyExisted) { if (Test-Path -LiteralPath $regUninstallBackup) { reg.exe import $regUninstallBackup | Out-Null } }\n\
+           else { reg.exe delete $regUninstallKey /f | Out-Null };\n\
+           if ($script:runHadRavyn) { if (Test-Path -LiteralPath $regRunBackup) { reg.exe import $regRunBackup | Out-Null } }\n\
+           else { Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Ravyn' -Force -ErrorAction SilentlyContinue };\n\
+           $i=0;\n\
+           foreach ($link in $shortcuts) {\n\
+             $saved=Join-Path $shortcutBackupDir (\"$i.lnk\");\n\
+             if (Test-Path -LiteralPath $saved) { Copy-Item -LiteralPath $saved -Destination $link -Force -ErrorAction SilentlyContinue }\n\
+             elseif (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue };\n\
+             $i++;\n\
+           };\n\
+         };\n\
+         $ravyn=Get-Process -Id $parentPid -ErrorAction SilentlyContinue;\n\
          if ($null -ne $ravyn) { $ravyn.WaitForExit() };\n\
          $outcome='failed'; $message=''; $launched=$null;\n\
+         $script:uninstallKeyExisted=$false; $script:runHadRavyn=$false;\n\
          try {\n\
+           Write-Journal 'backup';\n\
            Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue;\n\
-           Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue;\n\
-           Copy-Item -LiteralPath $installed -Destination $backup -Force;\n\
+           if (Test-Path -LiteralPath $backupDir) { Remove-Item -LiteralPath $backupDir -Recurse -Force };\n\
+           New-Item -ItemType Directory -Force -Path $backupDir | Out-Null;\n\
+           Get-ChildItem -LiteralPath $installDir -File -Force | Where-Object { $_.Extension -in '.exe','.dll' } | Copy-Item -Destination $backupDir -Force;\n\
+           $script:uninstallKeyExisted=Test-Path 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn';\n\
+           if ($script:uninstallKeyExisted) { reg.exe export $regUninstallKey $regUninstallBackup /y | Out-Null };\n\
+           $script:runHadRavyn=$null -ne (Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Ravyn' -ErrorAction SilentlyContinue);\n\
+           if ($script:runHadRavyn) { reg.exe export $regRunKey $regRunBackup /y | Out-Null };\n\
+           New-Item -ItemType Directory -Force -Path $shortcutBackupDir | Out-Null;\n\
+           $i=0;\n\
+           foreach ($link in $shortcuts) {\n\
+             if (Test-Path -LiteralPath $link) { Copy-Item -LiteralPath $link -Destination (Join-Path $shortcutBackupDir (\"$i.lnk\")) -Force };\n\
+             $i++;\n\
+           };\n\
+           Write-Journal 'install';\n\
            $setup=Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru;\n\
            if ($setup.ExitCode -ne 0) { throw \"installer exited with code $($setup.ExitCode)\" };\n\
+           Write-Journal 'verify';\n\
            $launched=Start-Process -FilePath $installed -PassThru;\n\
            $deadline=(Get-Date).AddSeconds($timeoutSeconds);\n\
            while ((Get-Date) -lt $deadline) {\n\
@@ -953,21 +1183,23 @@ fn build_installer_helper_script(
            if ($outcome -ne 'succeeded') {\n\
              $message='The updated version did not reach readiness before the safety deadline.';\n\
              if (($null -ne $launched) -and (!$launched.HasExited)) { Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $launched.Id -Timeout 10 -ErrorAction SilentlyContinue };\n\
-             Remove-Item -LiteralPath $installed -Force -ErrorAction SilentlyContinue;\n\
-             Move-Item -LiteralPath $backup -Destination $installed -Force;\n\
+             Restore-Installation;\n\
              $outcome='rolled_back';\n\
            };\n\
          } catch {\n\
            $message=$_.Exception.Message;\n\
            if (($null -ne $launched) -and (!$launched.HasExited)) { Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $launched.Id -Timeout 10 -ErrorAction SilentlyContinue };\n\
-           if (Test-Path -LiteralPath $backup) {\n\
-             Remove-Item -LiteralPath $installed -Force -ErrorAction SilentlyContinue;\n\
-             Move-Item -LiteralPath $backup -Destination $installed -Force;\n\
+           if (Test-Path -LiteralPath $backupDir) {\n\
+             Restore-Installation;\n\
              $outcome='rolled_back';\n\
            };\n\
          };\n\
+         Write-Journal 'finalize';\n\
+         Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue;\n\
+         Remove-Item -LiteralPath $shortcutBackupDir -Recurse -Force -ErrorAction SilentlyContinue;\n\
+         Remove-Item -LiteralPath $regUninstallBackup -Force -ErrorAction SilentlyContinue;\n\
+         Remove-Item -LiteralPath $regRunBackup -Force -ErrorAction SilentlyContinue;\n\
          if ($outcome -eq 'succeeded') {\n\
-           Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue;\n\
            Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue;\n\
          };\n\
          try {\n\
@@ -983,6 +1215,7 @@ fn build_installer_helper_script(
            Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue;\n\
            Remove-Item -LiteralPath $pendingStatePath -Force -ErrorAction SilentlyContinue;\n\
            Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue;\n\
+           Remove-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue;\n\
            if (($outcome -eq 'rolled_back') -or ($outcome -eq 'failed')) { if (Test-Path -LiteralPath $installed) { Start-Process -FilePath $installed | Out-Null } };\n\
          };\n\
          if ($outcome -eq 'failed') { exit 1 } else { exit 0 };\n",
@@ -1107,26 +1340,38 @@ mod tests {
         assert_eq!(value, r"'C:\Users\O''Brien\setup.exe'");
     }
 
-    #[test]
-    fn helper_script_contains_readiness_and_rollback_guards() {
-        let transaction = PendingUpdateTransaction {
+    fn sample_transaction() -> PendingUpdateTransaction {
+        PendingUpdateTransaction {
             schema: UPDATE_TRANSACTION_SCHEMA,
             token: "token".into(),
             from_version: "0.2.0".into(),
             to_version: "0.3.0".into(),
+            install_dir: PathBuf::from(r"C:\Ravyn"),
             installed_exe: PathBuf::from(r"C:\Ravyn\Ravyn.exe"),
-            backup_exe: PathBuf::from(r"C:\Ravyn\.ravyn.update.previous.exe"),
+            backup_dir: PathBuf::from(r"C:\cache\backup-token"),
+            shortcuts_backup_dir: PathBuf::from(r"C:\cache\shortcuts-token"),
+            registry_uninstall_backup: PathBuf::from(r"C:\cache\registry-uninstall-token.reg"),
+            registry_run_backup: PathBuf::from(r"C:\cache\registry-run-token.reg"),
+            shortcuts: vec![
+                PathBuf::from(r"C:\Users\Tester\Start Menu\Programs\Ravyn.lnk"),
+                PathBuf::from(r"C:\Users\Tester\Desktop\Ravyn.lnk"),
+            ],
+            journal_path: PathBuf::from(r"C:\cache\journal.txt"),
             installer_path: PathBuf::from(r"C:\cache\update.exe"),
             readiness_marker: PathBuf::from(r"C:\cache\ready.marker"),
             pending_state_path: PathBuf::from(r"C:\cache\pending.json"),
             transaction_path: PathBuf::from(r"C:\cache\transaction.json"),
             result_path: PathBuf::from(r"C:\cache\result.json"),
             created_at_unix_ms: 1,
-        };
-        let script = build_installer_helper_script(&transaction, 42);
+        }
+    }
+
+    #[test]
+    fn helper_script_contains_readiness_and_rollback_guards() {
+        let script = build_installer_helper_script(&sample_transaction(), 42);
         assert!(script.contains("$parentPid=42"));
         assert!(script.contains("The updated version did not reach readiness"));
-        assert!(script.contains("Move-Item -LiteralPath $backup"));
+        assert!(script.contains("Restore-Installation"));
         assert!(script.contains("completed_at_unix_ms"));
         assert!(script.contains("Remove-Item -LiteralPath $pendingStatePath"));
         let result_write = script.find("Move-Item -LiteralPath $resultTemp").unwrap();
@@ -1134,6 +1379,80 @@ mod tests {
             .rfind("Start-Process -FilePath $installed | Out-Null")
             .unwrap();
         assert!(result_write < rollback_relaunch);
+    }
+
+    #[test]
+    fn helper_script_backs_up_binaries_registry_and_shortcuts() {
+        let script = build_installer_helper_script(&sample_transaction(), 42);
+        // Only application binaries: the install dir doubles as the data dir.
+        assert!(script.contains("$_.Extension -in '.exe','.dll'"));
+        assert!(!script.contains("Copy-Item -LiteralPath $installDir"));
+        assert!(script.contains("reg.exe export $regUninstallKey"));
+        assert!(script.contains("reg.exe import $regUninstallBackup"));
+        assert!(script.contains("reg.exe delete $regUninstallKey /f"));
+        assert!(script.contains("Remove-ItemProperty"));
+        assert!(script.contains(r"Desktop\Ravyn.lnk"));
+        // Journal phases are advanced before every state-changing step.
+        for phase in ["'backup'", "'install'", "'verify'", "'rollback'", "'finalize'"] {
+            assert!(
+                script.contains(&format!("Write-Journal {phase}")),
+                "missing journal phase {phase}"
+            );
+        }
+        // The journal is removed only in the final cleanup block.
+        assert!(script.contains("Remove-Item -LiteralPath $journal"));
+    }
+
+    #[test]
+    fn recovery_leaves_fresh_transactions_alone() {
+        let now = 1_000_000_000_000_u64;
+        assert_eq!(
+            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "0.3.0", now - 60_000, "0.2.0", now),
+            RecoveryAction::LeaveAlone
+        );
+        // Freshly installed target version: the helper is still waiting for
+        // the readiness marker; recovery must not race it.
+        assert_eq!(
+            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "v0.3.0", now - 60_000, "0.3.0", now),
+            RecoveryAction::LeaveAlone
+        );
+    }
+
+    #[test]
+    fn recovery_finalizes_stale_transactions_on_the_target_version() {
+        let now = 1_000_000_000_000_u64;
+        let stale = now - INTERRUPTED_TRANSACTION_STALE_MS - 1;
+        assert_eq!(
+            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "v0.3.0", stale, "0.3.0", now),
+            RecoveryAction::FinalizeSucceeded
+        );
+    }
+
+    #[test]
+    fn recovery_cleans_up_stale_or_foreign_transactions() {
+        let now = 1_000_000_000_000_u64;
+        let stale = now - INTERRUPTED_TRANSACTION_STALE_MS - 1;
+        // Still on the previous version: the install never completed.
+        assert_eq!(
+            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "0.3.0", stale, "0.2.0", now),
+            RecoveryAction::CleanupFailed
+        );
+        // Unsupported schema is cleaned regardless of age.
+        assert_eq!(
+            plan_recovery(2, "0.3.0", now - 1_000, "0.2.0", now),
+            RecoveryAction::CleanupFailed
+        );
+        // A timestamp far in the future is implausible, not fresh.
+        assert_eq!(
+            plan_recovery(
+                UPDATE_TRANSACTION_SCHEMA,
+                "0.3.0",
+                now + 60 * 60 * 1000,
+                "0.2.0",
+                now
+            ),
+            RecoveryAction::CleanupFailed
+        );
     }
 
     #[test]
@@ -1154,5 +1473,14 @@ mod tests {
         };
         assert!(!should_block_automatic_retry(Some(&succeeded), "0.3.0"));
         assert!(!should_block_automatic_retry(None, "0.3.0"));
+    }
+
+    /// Writes the generated helper script to a file so CI or a developer can
+    /// validate it with the real PowerShell parser (run with `-- --ignored`).
+    #[test]
+    #[ignore]
+    fn dump_helper_script_for_parser_validation() {
+        let script = build_installer_helper_script(&sample_transaction(), 42);
+        std::fs::write(std::env::temp_dir().join("ravyn-helper-script.ps1"), script).unwrap();
     }
 }

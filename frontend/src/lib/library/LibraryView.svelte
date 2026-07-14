@@ -1,58 +1,83 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { CleanupPolicies, CleanupReport, DuplicateCandidate, LibraryCategory, LibraryEntry, LibraryEntryState, LibraryImportStatus } from "../api/types";
+  import type { LibraryCategory, LibraryEntry, LibraryEntryState, LibraryImportStatus } from "../api/types";
   import Button from "../components/Button.svelte";
+  import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
+  import DetailsPane from "../components/DetailsPane.svelte";
   import Dialog from "../components/Dialog.svelte";
   import Dropdown, { type DropdownOption } from "../components/Dropdown.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Icon, { type IconName } from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import InlineError from "../components/InlineError.svelte";
-  import PageHeader from "../components/PageHeader.svelte";
+  import ListDetailsLayout from "../components/ListDetailsLayout.svelte";
+  import MenuButton from "../components/MenuButton.svelte";
+  import type { MenuItem } from "../components/Menu.svelte";
+  import PageCommandBar from "../components/PageCommandBar.svelte";
+  import PageScaffold from "../components/PageScaffold.svelte";
   import PathPicker from "../components/PathPicker.svelte";
   import SearchBox from "../components/SearchBox.svelte";
-  import TextField from "../components/TextField.svelte";
   import StatusBadge from "../components/StatusBadge.svelte";
   import Surface from "../components/Surface.svelte";
+  import Tabs from "../components/Tabs.svelte";
+  import { openNativePath, revealNativePath } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes } from "../util/format";
+  import LibraryRelocationDialog from "./LibraryRelocationDialog.svelte";
+  import {
+    groupLibraryDuplicates,
+    libraryTypeLabel,
+    sortLibraryEntries,
+    type LibraryMode,
+    type LibrarySortKey,
+    type SortDirection,
+  } from "./libraryPresentation";
+
+  const SORT_STORAGE_KEY = "ravyn.library.sort";
 
   let entries = $state<LibraryEntry[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let search = $state("");
   let category = $state("");
-  let stateFilter = $state("active");
+  let mode = $state<LibraryMode>("files");
+  let selectedId = $state<string | null>(null);
+  let sortKey = $state<LibrarySortKey>("modified");
+  let sortDirection = $state<SortDirection>("desc");
+
   let importOpen = $state(false);
   let importPath = $state("");
   let importBusy = $state(false);
   let importStatus = $state<LibraryImportStatus | null>(null);
+  let relocationOpen = $state(false);
+
   let removeEntry = $state<LibraryEntry | null>(null);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
-  let selectedId = $state<string | null>(null);
-  let duplicateOpen = $state(false);
-  let duplicates = $state<DuplicateCandidate[]>([]);
-  let duplicateLoading = $state(false);
-  let duplicateError = $state<string | null>(null);
-  let cleanupOpen = $state(false);
-  let cleanupPolicies = $state<CleanupPolicies>({ temporary_max_age_days: 7, trash_retention_days: 30, log_retention_days: 90, cache_retention_days: 30 });
-  let cleanupTemporaryDays = $state("7");
-  let cleanupTrashDays = $state("30");
-  let cleanupLogDays = $state("90");
-  let cleanupCacheDays = $state("30");
-  let cleanupBusy = $state(false);
-  let cleanupError = $state<string | null>(null);
-  let cleanupReport = $state<CleanupReport | null>(null);
 
   const selected = $derived(entries.find((entry) => entry.id === selectedId) ?? null);
   const totalSize = $derived(entries.reduce((sum, entry) => sum + (entry.size_bytes ?? 0), 0));
   const missingCount = $derived(entries.filter((entry) => entry.state === "missing").length);
+  const duplicateGroups = $derived(groupLibraryDuplicates(entries));
+  const duplicateEntryCount = $derived(duplicateGroups.reduce((sum, group) => sum + group.entries.length, 0));
+  const sortedEntries = $derived(sortLibraryEntries(entries, sortKey, sortDirection));
+  const summaryItems = $derived<SummaryItem[]>([
+    { label: mode === "trash" ? "in trash" : "visible files", value: entries.length.toLocaleString() },
+    { label: "indexed", value: formatBytes(totalSize) },
+    { label: "missing", value: missingCount.toLocaleString(), tone: missingCount ? "warning" : "default" },
+    { label: "duplicate copies", value: duplicateEntryCount.toLocaleString(), tone: duplicateEntryCount ? "warning" : "default" },
+  ]);
+
+  const viewTabs = [
+    { id: "files", label: "Files" },
+    { id: "trash", label: "Trash" },
+    { id: "duplicates", label: "Duplicates" },
+  ];
 
   const categoryOptions: DropdownOption[] = [
-    { value: "", label: "All categories" },
+    { value: "", label: "All types" },
     { value: "downloads", label: "Downloads" },
     { value: "videos", label: "Videos" },
     { value: "music", label: "Music" },
@@ -62,12 +87,6 @@
     { value: "torrents", label: "Torrents" },
     { value: "playlists", label: "Playlists" },
     { value: "other", label: "Other" },
-  ];
-  const stateOptions: DropdownOption[] = [
-    { value: "active", label: "Available" },
-    { value: "trashed", label: "Trash" },
-    { value: "missing", label: "Missing" },
-    { value: "", label: "All states" },
   ];
 
   function iconFor(entry: LibraryEntry): IconName {
@@ -80,18 +99,34 @@
     return "file";
   }
 
+  function sourceLabel(source: string): string {
+    if (!source) return "Imported file";
+    try {
+      return new URL(source).hostname || source;
+    } catch {
+      return source;
+    }
+  }
+
   async function load(): Promise<void> {
     if (!connection.client) return;
     loading = true;
     error = null;
     try {
-      const page = await connection.client.listLibrary({
+      const request = {
         q: search || undefined,
         category: (category || undefined) as LibraryCategory | undefined,
-        state: (stateFilter || undefined) as LibraryEntryState | undefined,
         limit: 250,
-      });
-      entries = page.items;
+      };
+      if (mode === "trash") {
+        entries = (await connection.client.listLibrary({ ...request, state: "trashed" })).items;
+      } else {
+        const [active, missing] = await Promise.all([
+          connection.client.listLibrary({ ...request, state: "active" }),
+          connection.client.listLibrary({ ...request, state: "missing" }),
+        ]);
+        entries = [...active.items, ...missing.items];
+      }
       if (selectedId && !entries.some((entry) => entry.id === selectedId)) selectedId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -104,12 +139,31 @@
   $effect(() => {
     search;
     category;
-    stateFilter;
+    mode;
     const timer = setTimeout(() => {
       firstLoad = false;
       void load();
-    }, firstLoad ? 0 : 250);
+    }, firstLoad ? 0 : 220);
     return () => clearTimeout(timer);
+  });
+
+  $effect(() => {
+    if (typeof localStorage === "undefined") return;
+    const stored = localStorage.getItem(SORT_STORAGE_KEY);
+    if (stored) {
+      try {
+        const value = JSON.parse(stored) as { key?: LibrarySortKey; direction?: SortDirection };
+        if (value.key) sortKey = value.key;
+        if (value.direction) sortDirection = value.direction;
+      } catch {
+        localStorage.removeItem(SORT_STORAGE_KEY);
+      }
+    }
+  });
+
+  $effect(() => {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify({ key: sortKey, direction: sortDirection }));
   });
 
   $effect(() => {
@@ -122,7 +176,7 @@
           void load();
         }
       } catch {
-        // The import keeps running in the backend; the next poll can recover.
+        // The backend import continues; a later poll can recover.
       }
     }, 1500);
     return () => clearInterval(timer);
@@ -146,27 +200,13 @@
     if (!connection.client) return;
     try {
       const report = await connection.client.verifyLibrary();
-      notifications.info(`Verified ${report.checked} item(s)`, report.missing ? `${report.missing} missing file(s) found` : "No missing files found");
+      notifications.info(
+        `Verified ${report.checked} item(s)`,
+        report.missing ? `${report.missing} missing file(s) found` : "No missing files found",
+      );
       await load();
     } catch (cause) {
       notifications.error("Couldn't verify the library", describeError(cause));
-    }
-  }
-
-  async function confirmRemove(): Promise<void> {
-    if (!connection.client || !removeEntry) return;
-    removeBusy = true;
-    removeError = null;
-    try {
-      await connection.client.deleteLibraryEntry(removeEntry.id, removeEntry.state === "trashed" ? "purge" : "trash");
-      notifications.info(removeEntry.state === "trashed" ? "Item permanently deleted" : "Item moved to trash");
-      removeEntry = null;
-      selectedId = null;
-      await load();
-    } catch (cause) {
-      removeError = describeError(cause);
-    } finally {
-      removeBusy = false;
     }
   }
 
@@ -175,180 +215,242 @@
     try {
       await connection.client.restoreLibraryEntry(entry.id);
       notifications.info("Item restored");
+      selectedId = null;
       await load();
     } catch (cause) {
       notifications.error("Couldn't restore the item", describeError(cause));
     }
   }
 
-  async function copyPath(path: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(path);
-      notifications.info("Path copied");
-    } catch {
-      notifications.warning("Couldn't copy the path");
-    }
-  }
-
-  async function findDuplicates(entry: LibraryEntry): Promise<void> {
+  async function undoTrash(entry: LibraryEntry): Promise<void> {
     if (!connection.client) return;
-    duplicateOpen = true;
-    duplicateLoading = true;
-    duplicateError = null;
-    duplicates = [];
     try {
-      const candidates = await connection.client.findLibraryDuplicates({
-        sha256: entry.sha256 ?? undefined,
-        size_bytes: entry.size_bytes ?? undefined,
-        filename: entry.filename,
-        limit: 50,
-      });
-      duplicates = candidates.filter((candidate) => candidate.entry.id !== entry.id);
-    } catch (cause) {
-      duplicateError = describeError(cause);
-    } finally {
-      duplicateLoading = false;
-    }
-  }
-
-  async function openCleanup(): Promise<void> {
-    if (!connection.client) return;
-    cleanupOpen = true;
-    cleanupError = null;
-    cleanupReport = null;
-    try {
-      cleanupPolicies = await connection.client.getCleanupPolicies();
-      cleanupTemporaryDays = String(cleanupPolicies.temporary_max_age_days);
-      cleanupTrashDays = String(cleanupPolicies.trash_retention_days);
-      cleanupLogDays = String(cleanupPolicies.log_retention_days);
-      cleanupCacheDays = String(cleanupPolicies.cache_retention_days);
-    } catch (cause) {
-      cleanupError = describeError(cause);
-    }
-  }
-
-  async function saveAndRunCleanup(): Promise<void> {
-    if (!connection.client || cleanupBusy) return;
-    cleanupBusy = true;
-    cleanupError = null;
-    try {
-      const normalized: CleanupPolicies = {
-        temporary_max_age_days: Math.max(1, Math.round(Number(cleanupTemporaryDays) || 7)),
-        trash_retention_days: Math.max(1, Math.round(Number(cleanupTrashDays) || 30)),
-        log_retention_days: Math.max(1, Math.round(Number(cleanupLogDays) || 90)),
-        cache_retention_days: Math.max(1, Math.round(Number(cleanupCacheDays) || 30)),
-      };
-      cleanupPolicies = await connection.client.updateCleanupPolicies(normalized);
-      cleanupReport = await connection.client.runLibraryCleanup();
-      notifications.success("Library cleanup complete", `${cleanupReport.trash_entries_purged} trash item(s) purged · ${formatBytes(cleanupReport.temporary_bytes_removed + cleanupReport.cache_bytes_removed)} freed`);
+      await connection.client.restoreLibraryEntry(entry.id);
+      notifications.success("Item restored", entry.filename);
       await load();
     } catch (cause) {
-      cleanupError = describeError(cause);
-    } finally {
-      cleanupBusy = false;
+      notifications.error("Couldn't restore the item", describeError(cause));
     }
   }
+
+  async function confirmRemove(): Promise<void> {
+    if (!connection.client || !removeEntry) return;
+    removeBusy = true;
+    removeError = null;
+    const target = removeEntry;
+    try {
+      await connection.client.deleteLibraryEntry(target.id, target.state === "trashed" ? "purge" : "trash");
+      removeEntry = null;
+      selectedId = null;
+      if (target.state === "trashed") {
+        notifications.info("Item permanently deleted", target.filename);
+      } else {
+        notifications.push({
+          severity: "info",
+          title: "Item moved to trash",
+          message: target.filename,
+          actionLabel: "Undo",
+          onAction: () => void undoTrash(target),
+        });
+      }
+      await load();
+    } catch (cause) {
+      removeError = describeError(cause);
+    } finally {
+      removeBusy = false;
+    }
+  }
+
+  async function runPathAction(path: string, action: "open" | "reveal" | "copy"): Promise<void> {
+    try {
+      if (action === "open") await openNativePath(path);
+      else if (action === "reveal") await revealNativePath(path);
+      else await navigator.clipboard.writeText(path);
+      if (action === "copy") notifications.info("Path copied");
+    } catch (cause) {
+      notifications.error(
+        action === "open" ? "Couldn't open this file" : action === "reveal" ? "Couldn't show this file in Explorer" : "Couldn't copy the path",
+        describeError(cause),
+      );
+    }
+  }
+
+  function changeSort(next: LibrarySortKey): void {
+    if (sortKey === next) sortDirection = sortDirection === "asc" ? "desc" : "asc";
+    else {
+      sortKey = next;
+      sortDirection = next === "modified" || next === "size" ? "desc" : "asc";
+    }
+  }
+
+  function sortLabel(key: LibrarySortKey): "none" | "ascending" | "descending" {
+    return sortKey === key ? (sortDirection === "asc" ? "ascending" : "descending") : "none";
+  }
+
+  function moreItems(): MenuItem[] {
+    return [
+      { id: "verify", label: "Verify library", icon: "verify", onSelect: () => void verifyLibrary() },
+      { id: "relocate", label: "Find moved files", icon: "restore", onSelect: () => (relocationOpen = true) },
+      { id: "refresh", label: "Refresh", icon: "refresh", separatorBefore: true, onSelect: () => void load() },
+    ];
+  }
+
 </script>
 
-<div class="page">
-  <PageHeader
-    title="Library"
-    description={`${entries.length} visible item${entries.length === 1 ? "" : "s"} · ${formatBytes(totalSize)}`}
-  >
-    {#snippet actions()}
-      <Button onclick={() => void openCleanup()}><Icon name="wrench" size={16} /> Clean up</Button>
-      <Button onclick={() => void verifyLibrary()}><Icon name="verify" size={16} /> Verify</Button>
-      <Button variant="accent" onclick={() => (importOpen = true)}><Icon name="upload" size={16} /> Import folder</Button>
-    {/snippet}
-  </PageHeader>
+<PageScaffold title="Library" summary="Files managed by Ravyn, imported folders, trash, and duplicate groups.">
+  {#snippet actions()}
+    <Button variant="accent" onclick={() => (importOpen = true)}><Icon name="upload" size={16} /> Import folder</Button>
+  {/snippet}
 
-  <div class="toolbar">
-    <SearchBox bind:value={search} label="Search library" placeholder="Search files, tags, or source" />
-    <Dropdown options={categoryOptions} bind:value={category} label="Filter by category" />
-    <Dropdown options={stateOptions} bind:value={stateFilter} label="Filter by state" />
-    <IconButton icon="refresh" label="Refresh library" onclick={() => void load()} />
-  </div>
+  {#snippet commandBar()}
+    <PageCommandBar ariaLabel="Library commands">
+      {#snippet leading()}
+        <Tabs tabs={viewTabs} bind:selected={mode} />
+      {/snippet}
+      {#snippet actions()}
+        <SearchBox bind:value={search} label="Search library" placeholder="Search files, paths, or sources" />
+        <Dropdown options={categoryOptions} bind:value={category} label="Filter by file type" />
+        <MenuButton label="More" icon="more" items={moreItems()} variant="subtle" />
+      {/snippet}
+    </PageCommandBar>
+  {/snippet}
 
-  {#if importStatus?.running}
-    <div class="import-banner">
-      <Icon name="spinner" size={16} />
-      <span>Importing {importStatus.root ?? "folder"} — {importStatus.scanned} scanned, {importStatus.imported} added</span>
-    </div>
-  {/if}
-
-  <div class="workspace" class:with-details={!!selected}>
-    <Surface padding="none" class="list-surface">
-      {#if error}
-        <div class="state"><InlineError title="Couldn't load the library" message={error} retry={() => void load()} /></div>
-      {:else if loading}
-        <div class="state muted">Loading library…</div>
-      {:else if entries.length === 0}
-        <EmptyState icon="library" title="Nothing here" message={search || category ? "No library items match the current filters." : "Completed and imported files will appear here."}>
-          {#if !search && !category}<Button variant="accent" onclick={() => (importOpen = true)}>Import a folder</Button>{/if}
-        </EmptyState>
-      {:else}
-        <div class="table-header" aria-hidden="true">
-          <span>Name</span><span>Category</span><span>Size</span><span>Added</span><span></span>
-        </div>
-        <div class="rows" role="listbox" aria-label="Library items">
-          {#each entries as entry (entry.id)}
-            <button
-              type="button"
-              class="library-row"
-              class:selected={selectedId === entry.id}
-              role="option"
-              aria-selected={selectedId === entry.id}
-              onclick={() => (selectedId = entry.id)}
-            >
-              <span class="name-cell">
-                <span class="file-icon"><Icon name={iconFor(entry)} size={19} /></span>
-                <span class="file-copy"><strong>{entry.filename}</strong><small>{entry.path}</small></span>
-              </span>
-              <span class="category-cell">{entry.category}</span>
-              <span>{formatBytes(entry.size_bytes)}</span>
-              <span>{formatAbsoluteTime(entry.downloaded_at)}</span>
-              <span class="row-status">
-                {#if entry.state === "missing"}<StatusBadge label="Missing" severity="warning" icon="warning" />
-                {:else if entry.state === "trashed"}<StatusBadge label="Trash" severity="neutral" icon="trash" />{/if}
-              </span>
-            </button>
-          {/each}
-        </div>
+  {#snippet status()}
+    <div class="status-strip">
+      <CompactSummary items={summaryItems} ariaLabel="Library summary" />
+      {#if importStatus?.running}
+        <span class="import-status"><Icon name="spinner" size={14} /> Importing {importStatus.scanned} scanned · {importStatus.imported} added</span>
       {/if}
-    </Surface>
+    </div>
+  {/snippet}
 
-    {#if selected}
-      <aside class="details">
-        <header><div><span class="detail-icon"><Icon name={iconFor(selected)} size={22} /></span><h2>{selected.filename}</h2></div><IconButton icon="close" label="Close details" variant="subtle" onclick={() => (selectedId = null)} /></header>
-        <div class="details-body">
-          <dl>
-            <dt>State</dt><dd>{selected.state}</dd>
-            <dt>Category</dt><dd>{selected.category}</dd>
-            <dt>Size</dt><dd>{formatBytes(selected.size_bytes)}</dd>
-            <dt>Type</dt><dd>{selected.mime_type ?? "Unknown"}</dd>
-            <dt>Imported</dt><dd>{selected.imported ? "Yes" : "No"}</dd>
-            <dt>Downloaded</dt><dd>{formatAbsoluteTime(selected.downloaded_at)}</dd>
-            <dt>Path</dt><dd class="wrap">{selected.path}</dd>
-            {#if selected.tags.length}<dt>Tags</dt><dd>{selected.tags.join(", ")}</dd>{/if}
-            {#if selected.sha256}<dt>SHA-256</dt><dd class="wrap mono">{selected.sha256}</dd>{/if}
-          </dl>
-          <div class="detail-actions">
-            <Button onclick={() => void copyPath(selected.path)}><Icon name="paste" size={16} /> Copy path</Button>
-            <Button onclick={() => void findDuplicates(selected)}><Icon name="copy" size={16} /> Find duplicates</Button>
-            {#if selected.state === "trashed"}
-              <Button variant="accent" onclick={() => void restore(selected)}><Icon name="restore" size={16} /> Restore</Button>
+  <div class="workspace">
+    <ListDetailsLayout detailsOpen={!!selected} detailsLabel="Library item details" detailsWidth="390px">
+      {#snippet list()}
+        <Surface padding="none" class="library-list">
+          {#if error}
+            <div class="state"><InlineError title="Couldn't load the library" message={error} retry={() => void load()} /></div>
+          {:else if loading}
+            <div class="state muted">Loading library…</div>
+          {:else if mode === "duplicates"}
+            {#if duplicateGroups.length === 0}
+              <EmptyState icon="copy" title="No duplicate groups" message={search || category ? "No duplicate groups match the current filters." : "Ravyn did not find repeated checksums or matching file names and sizes in the loaded library."} />
+            {:else}
+              <div class="duplicate-groups">
+                {#each duplicateGroups as group (group.key)}
+                  <section class="duplicate-group">
+                    <header>
+                      <div><strong>{group.entries[0]?.filename}</strong><small>{group.entries.length} copies · matched by {group.reason}</small></div>
+                      <span>{formatBytes(group.totalBytes)}</span>
+                    </header>
+                    {#each group.entries as entry (entry.id)}
+                      <button type="button" class="duplicate-copy" class:selected={selectedId === entry.id} onclick={() => (selectedId = entry.id)}>
+                        <Icon name={iconFor(entry)} size={17} />
+                        <span><strong>{entry.path}</strong><small>{formatBytes(entry.size_bytes)} · {formatAbsoluteTime(entry.updated_at)}</small></span>
+                        {#if entry.state === "missing"}<StatusBadge label="Missing" severity="warning" icon="warning" />{/if}
+                      </button>
+                    {/each}
+                  </section>
+                {/each}
+              </div>
             {/if}
-            <Button onclick={() => (removeEntry = selected)}><Icon name="trash" size={16} /> {selected.state === "trashed" ? "Delete permanently" : "Move to trash"}</Button>
-          </div>
-        </div>
-      </aside>
-    {/if}
+          {:else if sortedEntries.length === 0}
+            <EmptyState
+              icon={mode === "trash" ? "trash" : "library"}
+              title={mode === "trash" ? "Trash is empty" : "No files found"}
+              message={search || category ? "No library items match the current filters." : mode === "trash" ? "Items moved to trash will appear here until they are restored or permanently deleted." : "Completed and imported files will appear here."}
+            >
+              {#if mode === "files" && !search && !category}<Button variant="accent" onclick={() => (importOpen = true)}>Import a folder</Button>{/if}
+            </EmptyState>
+          {:else}
+            <div class="table-header" role="row">
+              <span role="columnheader" aria-sort={sortLabel("name")}><button type="button" onclick={() => changeSort("name")}>Name <Icon name="sort" size={12} /></button></span>
+              <span role="columnheader" aria-sort={sortLabel("type")}><button type="button" onclick={() => changeSort("type")}>Type <Icon name="sort" size={12} /></button></span>
+              <span role="columnheader" aria-sort={sortLabel("size")}><button type="button" onclick={() => changeSort("size")}>Size <Icon name="sort" size={12} /></button></span>
+              <span role="columnheader" aria-sort={sortLabel("modified")}><button type="button" onclick={() => changeSort("modified")}>Modified <Icon name="sort" size={12} /></button></span>
+              <span role="columnheader" aria-sort={sortLabel("source")}><button type="button" onclick={() => changeSort("source")}>Source <Icon name="sort" size={12} /></button></span>
+              <span role="columnheader"></span>
+            </div>
+            <div class="rows" role="listbox" aria-label="Library files">
+              {#each sortedEntries as entry (entry.id)}
+                <button
+                  type="button"
+                  class="library-row"
+                  class:selected={selectedId === entry.id}
+                  role="option"
+                  aria-selected={selectedId === entry.id}
+                  ondblclick={() => entry.state !== "missing" && void runPathAction(entry.path, "open")}
+                  onclick={() => (selectedId = entry.id)}
+                >
+                  <span class="name-cell">
+                    <span class="file-icon"><Icon name={iconFor(entry)} size={18} /></span>
+                    <span class="file-copy"><strong>{entry.filename}</strong><small>{entry.path}</small></span>
+                  </span>
+                  <span class="type-cell">{libraryTypeLabel(entry)}</span>
+                  <span>{formatBytes(entry.size_bytes)}</span>
+                  <span>{formatAbsoluteTime(entry.updated_at)}</span>
+                  <span class="source-cell">{sourceLabel(entry.source_url)}</span>
+                  <span class="row-status">
+                    {#if entry.state === "missing"}<StatusBadge label="Missing" severity="warning" icon="warning" />
+                    {:else if entry.state === "trashed"}<StatusBadge label="Trash" severity="neutral" icon="trash" />{/if}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </Surface>
+      {/snippet}
+
+      {#snippet details()}
+        {#if selected}
+          <DetailsPane
+            title={selected.filename}
+            subtitle={selected.path}
+            icon={iconFor(selected)}
+            onClose={() => (selectedId = null)}
+          >
+            <div class="details-stack">
+              <div class="details-actions">
+                <Button variant="accent" disabled={selected.state === "missing" || selected.state === "trashed"} onclick={() => void runPathAction(selected.path, "open")}><Icon name="external-link" size={16} /> Open</Button>
+                <Button disabled={selected.state === "missing"} onclick={() => void runPathAction(selected.path, "reveal")}><Icon name="folder-open" size={16} /> Show in Explorer</Button>
+              </div>
+
+              {#if selected.state === "missing"}
+                <div class="notice warning"><Icon name="warning" size={17} /><span><strong>File not found</strong><small>Use Find moved files to reconnect this record by checksum.</small></span></div>
+              {/if}
+
+              <dl>
+                <dt>State</dt><dd>{selected.state === "active" ? "Available" : selected.state === "trashed" ? "In trash" : "Missing"}</dd>
+                <dt>Type</dt><dd>{libraryTypeLabel(selected)}</dd>
+                <dt>Category</dt><dd>{selected.category}</dd>
+                <dt>Size</dt><dd>{formatBytes(selected.size_bytes)}</dd>
+                <dt>Modified</dt><dd>{formatAbsoluteTime(selected.updated_at)}</dd>
+                <dt>Downloaded</dt><dd>{formatAbsoluteTime(selected.downloaded_at)}</dd>
+                <dt>Source</dt><dd class="wrap">{selected.source_url || "Imported file"}</dd>
+                <dt>Path</dt><dd class="wrap mono">{selected.path}</dd>
+                {#if selected.tags.length}<dt>Tags</dt><dd>{selected.tags.join(", ")}</dd>{/if}
+                {#if selected.sha256}<dt>SHA-256</dt><dd class="wrap mono">{selected.sha256}</dd>{/if}
+              </dl>
+
+              <div class="secondary-actions">
+                <Button variant="subtle" onclick={() => void runPathAction(selected.path, "copy")}><Icon name="copy" size={15} /> Copy path</Button>
+                <Button variant="subtle" onclick={() => void verifyLibrary()}><Icon name="verify" size={15} /> Verify library</Button>
+                {#if selected.state === "trashed"}
+                  <Button variant="subtle" onclick={() => void restore(selected)}><Icon name="restore" size={15} /> Restore</Button>
+                {/if}
+                <Button variant="subtle" onclick={() => (removeEntry = selected)}><Icon name="trash" size={15} /> {selected.state === "trashed" ? "Delete permanently" : "Move to trash"}</Button>
+              </div>
+            </div>
+          </DetailsPane>
+        {/if}
+      {/snippet}
+    </ListDetailsLayout>
   </div>
-</div>
+</PageScaffold>
 
 <Dialog open={importOpen} title="Import a folder" onClose={() => !importBusy && (importOpen = false)} preventClose={importBusy}>
   <div class="dialog-stack">
-    <p>Ravyn scans the folder safely, classifies supported files, and adds them to the library without moving the originals.</p>
+    <p>Ravyn scans the folder, classifies supported files, and adds them to the library without moving the originals.</p>
     <PathPicker bind:value={importPath} label="Folder" placeholder="Choose a folder to scan" />
   </div>
   {#snippet footer()}
@@ -357,42 +459,19 @@
   {/snippet}
 </Dialog>
 
-<Dialog open={duplicateOpen} title="Possible duplicates" size="large" onClose={() => (duplicateOpen = false)}>
-  {#if duplicateError}
-    <InlineError title="Couldn't find duplicates" message={duplicateError} />
-  {:else if duplicateLoading}
-    <p class="muted">Comparing library records…</p>
-  {:else if duplicates.length === 0}
-    <EmptyState icon="copy" title="No other matches" message="No other library entries match the selected file name, size, or checksum." />
-  {:else}
-    <div class="duplicate-list">
-      {#each duplicates as candidate (candidate.entry.id)}
-        <div class="duplicate-row"><span class="file-icon"><Icon name={iconFor(candidate.entry)} size={18} /></span><span><strong>{candidate.entry.filename}</strong><small>{candidate.entry.path}</small></span><span>{formatBytes(candidate.entry.size_bytes)}</span><span class="match-list">{candidate.matches.join(", ")}</span></div>
-      {/each}
-    </div>
-  {/if}
-  {#snippet footer()}<Button variant="accent" onclick={() => (duplicateOpen = false)}>Done</Button>{/snippet}
-</Dialog>
-
-<Dialog open={cleanupOpen} title="Library cleanup" size="medium" preventClose={cleanupBusy} onClose={() => !cleanupBusy && (cleanupOpen = false)}>
-  <div class="dialog-stack">
-    <p>Configure retention periods and remove expired temporary, cache, trash, and log data. Active library files are never deleted by this operation.</p>
-    <div class="cleanup-grid">
-      <TextField bind:value={cleanupTemporaryDays} inputmode="numeric" label="Temporary files (days)" />
-      <TextField bind:value={cleanupCacheDays} inputmode="numeric" label="Cache files (days)" />
-      <TextField bind:value={cleanupTrashDays} inputmode="numeric" label="Trash retention (days)" />
-      <TextField bind:value={cleanupLogDays} inputmode="numeric" label="Log retention (days)" />
-    </div>
-    {#if cleanupReport}<div class="cleanup-result"><Icon name="check-circle" size={18} /><span><strong>Cleanup complete</strong><small>{cleanupReport.temporary_files_removed} temporary file(s), {cleanupReport.cache_files_removed} cache file(s), {cleanupReport.trash_entries_purged} trash item(s), and {cleanupReport.job_logs_removed} log record(s) removed.</small></span></div>{/if}
-    {#if cleanupError}<InlineError title="Couldn't run cleanup" message={cleanupError} />{/if}
-  </div>
-  {#snippet footer()}<Button disabled={cleanupBusy} onclick={() => (cleanupOpen = false)}>Close</Button><Button variant="accent" disabled={cleanupBusy} onclick={() => void saveAndRunCleanup()}>{cleanupBusy ? "Cleaning…" : "Save and clean now"}</Button>{/snippet}
-</Dialog>
+<LibraryRelocationDialog
+  open={relocationOpen}
+  {missingCount}
+  entryCount={entries.length}
+  {totalSize}
+  onClose={() => (relocationOpen = false)}
+  onCompleted={() => void load()}
+/>
 
 <ConfirmDialog
   open={!!removeEntry}
   title={removeEntry?.state === "trashed" ? "Delete permanently?" : "Move to trash?"}
-  message={removeEntry?.state === "trashed" ? "This removes the file and its library record. This action cannot be undone." : "The item can be restored later from the Library trash filter."}
+  message={removeEntry?.state === "trashed" ? "This deletes the file and its library record. This action cannot be undone." : "The file is moved to Library trash and can be restored with Undo or from the Trash view."}
   confirmLabel={removeEntry?.state === "trashed" ? "Delete permanently" : "Move to trash"}
   destructive
   busy={removeBusy}
@@ -402,52 +481,56 @@
 />
 
 <style>
-  .page { height: 100%; display: flex; flex-direction: column; min-width: 0; }
-  .toolbar { display: flex; gap: var(--space-2); padding: 0 var(--page-padding) var(--space-4); flex-wrap: wrap; }
-  .toolbar :global(.search-box) { flex: 1; max-width: 520px; }
-  .import-banner { display: flex; align-items: center; gap: var(--space-2); margin: 0 var(--page-padding) var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--accent-border); border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
-  .workspace { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; gap: var(--space-3); padding: 0 var(--page-padding) var(--page-padding); }
-  .workspace.with-details { grid-template-columns: minmax(0, 1fr) minmax(300px, 370px); }
-  :global(.list-surface) { min-height: 0; display: flex; flex-direction: column; }
+  .workspace { height: 100%; min-height: 0; padding: 0 var(--page-padding) var(--page-padding); }
+  .status-strip { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 0 var(--page-padding); border-bottom: 1px solid var(--stroke-divider); }
+  .import-status { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--accent-text); font-size: var(--text-caption); }
+  :global(.library-list) { height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: 0; border-color: var(--stroke-divider); background: var(--surface-content); }
   .state { padding: var(--space-6); }
   .muted { color: var(--text-secondary); }
-  .table-header, .library-row { display: grid; grid-template-columns: minmax(240px, 2fr) minmax(100px, .7fr) 90px 150px minmax(0, auto); align-items: center; column-gap: var(--space-3); }
+  .table-header, .library-row { display: grid; grid-template-columns: minmax(250px, 2fr) minmax(110px, .8fr) 90px 150px minmax(120px, .8fr) auto; align-items: center; column-gap: var(--space-3); }
   .table-header { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
-  .rows { min-height: 0; overflow: auto; }
+  .table-header button { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; }
+  .rows { flex: 1; min-height: 0; overflow: auto; }
   .library-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); color: var(--text-primary); background: transparent; text-align: left; cursor: default; }
-  .library-row:hover { background: var(--bg-subtle-hover); }
-  .library-row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
+  .library-row:hover, .duplicate-copy:hover { background: var(--bg-subtle-hover); }
+  .library-row.selected, .duplicate-copy.selected { background: color-mix(in srgb, var(--accent-subtle) 52%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .name-cell { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .file-icon, .detail-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
+  .file-icon { width: 30px; height: 30px; flex: none; display: grid; place-items: center; color: var(--text-secondary); }
   .file-copy { display: flex; flex-direction: column; min-width: 0; }
-  .file-copy strong, .file-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-copy strong, .file-copy small, .source-cell, .type-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-copy strong { font-weight: 500; }
   .file-copy small { color: var(--text-tertiary); font-size: var(--text-caption); }
-  .category-cell { text-transform: capitalize; color: var(--text-secondary); }
+  .type-cell, .source-cell { color: var(--text-secondary); }
   .row-status { justify-self: end; }
-  .details { min-width: 0; overflow: hidden; border: 1px solid var(--stroke-surface); border-radius: var(--radius-layer); background: var(--surface-card); box-shadow: var(--shadow-card); }
-  .details header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .details header > div { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .details h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-body-strong); }
-  .details-body { height: calc(100% - 67px); overflow: auto; padding: var(--space-4); }
+  .duplicate-groups { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); }
+  .duplicate-group { margin-bottom: var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
+  .duplicate-group > header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 0 var(--space-2); }
+  .duplicate-group > header div, .duplicate-copy span { min-width: 0; display: flex; flex-direction: column; }
+  .duplicate-group small, .duplicate-copy small { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .duplicate-copy { width: 100%; min-height: 50px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-2); border: 0; border-top: 1px solid var(--stroke-divider); color: var(--text-primary); background: transparent; text-align: left; }
+  .duplicate-copy strong, .duplicate-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .details-stack { display: flex; flex-direction: column; gap: var(--space-4); }
+  .details-actions, .secondary-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .secondary-actions { padding-top: var(--space-3); border-top: 1px solid var(--stroke-divider); }
   dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0; }
   dt { color: var(--text-secondary); }
-  dd { margin: 0; }
+  dd { min-width: 0; margin: 0; }
   .wrap { word-break: break-word; }
-  .mono { font: 12px/18px Consolas, monospace; }
-  .detail-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
+  .mono { font: 12px/18px Consolas, ui-monospace, monospace; }
+  .notice { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--stroke-divider); border-radius: var(--radius-medium); }
+  .notice span { display: flex; flex-direction: column; }
+  .notice small { color: inherit; opacity: .85; }
+  .notice.warning { color: var(--status-warning); background: var(--status-warning-bg); }
   .dialog-stack { display: flex; flex-direction: column; gap: var(--space-4); }
   .dialog-stack p { margin: 0; color: var(--text-secondary); }
-  .duplicate-list { display: flex; flex-direction: column; max-height: 430px; overflow: auto; }
-  .duplicate-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 56px; padding: var(--space-2) 0; border-bottom: 1px solid var(--stroke-divider); }
-  .duplicate-row > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; }
-  .duplicate-row strong, .duplicate-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .duplicate-row small, .match-list { color: var(--text-tertiary); font-size: var(--text-caption); }
-  .match-list { padding: 3px 7px; border-radius: var(--radius-pill); background: var(--accent-subtle); color: var(--accent-text); }
-  .cleanup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
-  .cleanup-result { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-medium); color: var(--status-success); background: var(--status-success-bg); }
-  .cleanup-result > span { display: flex; flex-direction: column; }
-  .cleanup-result small { color: inherit; }
-  @media (max-width: 1120px) { .workspace.with-details { grid-template-columns: minmax(0, 1fr) 320px; } .table-header, .library-row { grid-template-columns: minmax(220px, 2fr) 100px 90px minmax(0, auto); } .table-header span:nth-child(4), .library-row > span:nth-child(4) { display: none; } }
-  @media (max-width: 800px) { .workspace.with-details { grid-template-columns: minmax(0, 1fr); } .details { position: absolute; inset: 92px var(--page-padding) var(--page-padding); z-index: 20; backdrop-filter: blur(30px); } .table-header { display: none; } .library-row { grid-template-columns: minmax(0, 1fr) auto; } .library-row > span:nth-child(2), .library-row > span:nth-child(3), .library-row > span:nth-child(4) { display: none; } }
+  @media (max-width: 1180px) {
+    .table-header, .library-row { grid-template-columns: minmax(230px, 2fr) 110px 90px 140px auto; }
+    .table-header button:nth-child(5), .library-row > span:nth-child(5) { display: none; }
+  }
+  @media (max-width: 820px) {
+    .status-strip { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: var(--space-2); }
+    .table-header { display: none; }
+    .library-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .library-row > span:nth-child(2), .library-row > span:nth-child(3), .library-row > span:nth-child(4), .library-row > span:nth-child(5) { display: none; }
+  }
 </style>

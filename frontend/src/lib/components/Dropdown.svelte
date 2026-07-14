@@ -10,15 +10,19 @@
     options,
     value = $bindable(""),
     label,
+    onchange,
+    id,
   }: {
     options: DropdownOption[];
     value?: string;
     label: string;
+    onchange?: (value: string) => void;
+    id?: string;
   } = $props();
 </script>
 
 <div class="dropdown">
-  <select aria-label={label} bind:value>
+  <select {id} aria-label={label} bind:value onchange={() => onchange?.(value)}>
     {#each options as option (option.value)}
       <option value={option.value}>{option.label}</option>
     {/each}

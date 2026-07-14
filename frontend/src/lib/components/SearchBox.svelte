@@ -5,10 +5,12 @@
     value = $bindable(""),
     placeholder = "Search",
     label,
+    inputId,
   }: {
     value?: string;
     placeholder?: string;
     label: string;
+    inputId?: string;
   } = $props();
 
   let inputEl = $state<HTMLInputElement | null>(null);
@@ -23,6 +25,7 @@
   <Icon name="search" size={14} />
   <input
     bind:this={inputEl}
+    id={inputId}
     type="text"
     aria-label={label}
     {placeholder}

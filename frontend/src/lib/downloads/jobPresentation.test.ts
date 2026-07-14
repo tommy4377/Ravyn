@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { permittedActions, presentStatus } from "./jobPresentation";
+import { permittedActions, presentStatus, presentTrust } from "./jobPresentation";
 import type { JobStatus } from "../api/types";
 
 // This mirrors the exact transition guards in src/core/lifecycle.rs
@@ -75,5 +75,16 @@ describe("presentStatus", () => {
     expect(presentStatus("verifying").spinning).toBe(true);
     expect(presentStatus("post_processing").spinning).toBe(true);
     expect(presentStatus("downloading").spinning).toBeFalsy();
+  });
+});
+
+
+describe("presentTrust", () => {
+  const report = (score: number) => ({ score, level: "advisory", factors: [] });
+
+  it("uses plain-language trust states instead of exposing the numeric score", () => {
+    expect(presentTrust(report(90)).label).toBe("Secure source");
+    expect(presentTrust(report(65)).label).toBe("Verification recommended");
+    expect(presentTrust(report(20)).label).toBe("Source requires attention");
   });
 });

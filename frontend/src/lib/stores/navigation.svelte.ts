@@ -12,9 +12,7 @@ export type NavSection =
   | "torrents"
   | "basket"
   | "automation"
-  | "components"
-  | "settings"
-  | "diagnostics";
+  | "settings";
 
 export type DownloadsView = "all" | "active" | "queued" | "completed" | "failed";
 export type Density = "comfortable" | "compact";
@@ -57,8 +55,12 @@ class NavigationStore {
   materialIntensity = $state(76);
   backdropImage = $state("");
   navigationCollapsed = $state(false);
+  navigationOverlayOpen = $state(false);
+  basketDrawerOpen = $state(false);
   systemAccent = $state<string | null>(null);
   pendingAddKind = $state<"http" | "media" | "torrent" | null>(null);
+  settingsDirty = $state(false);
+  pendingSection = $state<NavSection | null>(null);
 
   private initialized = false;
   private mediaQuery: MediaQueryList | null = null;
@@ -155,6 +157,44 @@ class NavigationStore {
     this.applyAppearance();
   }
 
+
+  navigate(section: NavSection): boolean {
+    if (this.section === "settings" && this.settingsDirty && section !== "settings") {
+      this.pendingSection = section;
+      return false;
+    }
+    this.section = section;
+    this.navigationOverlayOpen = false;
+    return true;
+  }
+
+  confirmPendingNavigation(): void {
+    const target = this.pendingSection;
+    this.pendingSection = null;
+    this.settingsDirty = false;
+    if (target) this.navigate(target);
+  }
+
+  cancelPendingNavigation(): void {
+    this.pendingSection = null;
+  }
+
+  openBasket(): void {
+    this.basketDrawerOpen = true;
+  }
+
+  closeTransientLayers(): boolean {
+    if (this.basketDrawerOpen) {
+      this.basketDrawerOpen = false;
+      return true;
+    }
+    if (this.navigationOverlayOpen) {
+      this.navigationOverlayOpen = false;
+      return true;
+    }
+    return false;
+  }
+
   setNavigationCollapsed(collapsed: boolean): void {
     this.navigationCollapsed = collapsed;
     localStorage.setItem(NAV_COLLAPSED_KEY, String(collapsed));
@@ -167,7 +207,7 @@ class NavigationStore {
 
   requestAdd(kind: "http" | "media" | "torrent" = "http"): void {
     this.pendingAddKind = kind;
-    this.section = "downloads";
+    this.navigate("downloads");
   }
 
   consumeAddRequest(): "http" | "media" | "torrent" | null {
