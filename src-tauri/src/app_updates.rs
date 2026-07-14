@@ -473,7 +473,8 @@ pub fn start_background_check(app: AppHandle) {
     let installed_build =
         installation.installed && !installation.portable && !installation.development;
     let automatic = {
-        let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() else {
+        let state = app.state::<AppUpdateState>();
+        let Ok(mut inner) = state.0.lock() else {
             return;
         };
         let automatic = installed_build && inner.status.configured;

@@ -195,6 +195,12 @@
           "markdownDescription": "Enables the backend_info command without any pre-configured scope."
         },
         {
+          "description": "Enables the cancel_app_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-app-update",
+          "markdownDescription": "Enables the cancel_app_update command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_app_update command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-app-update",
@@ -211,6 +217,12 @@
           "type": "string",
           "const": "allow-finish-setup-handoff",
           "markdownDescription": "Enables the finish_setup_handoff command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install_app_update_now command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-install-app-update-now",
+          "markdownDescription": "Enables the install_app_update_now command without any pre-configured scope."
         },
         {
           "description": "Enables the main_window_ready command without any pre-configured scope.",
@@ -267,6 +279,12 @@
           "markdownDescription": "Denies the backend_info command without any pre-configured scope."
         },
         {
+          "description": "Denies the cancel_app_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-app-update",
+          "markdownDescription": "Denies the cancel_app_update command without any pre-configured scope."
+        },
+        {
           "description": "Denies the check_app_update command without any pre-configured scope.",
           "type": "string",
           "const": "deny-check-app-update",
@@ -283,6 +301,12 @@
           "type": "string",
           "const": "deny-finish-setup-handoff",
           "markdownDescription": "Denies the finish_setup_handoff command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install_app_update_now command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-install-app-update-now",
+          "markdownDescription": "Denies the install_app_update_now command without any pre-configured scope."
         },
         {
           "description": "Denies the main_window_ready command without any pre-configured scope.",

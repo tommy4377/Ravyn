@@ -1,4 +1,5 @@
 # Conventions
+- Do not commit, do not push, unless the user explicitly asks in the current conversation (hard project rule, CLAUDE.md).
 - English docs/comments/API/migration/status text; rustfmt and strict Clippy.
 - Prefer typed errors, checked conversions for external values, transactions for related DB changes, bounded channels/inputs, deterministic tests, backward-compatible API evolution.
 - Avoid runtime unwrap/expect/panic in production, warning suppression, placeholder handlers, and sensitive config exposure.
@@ -8,3 +9,6 @@
 - Directory scans (import, relocation, cleanup) are bounded by depth and entry count ceilings, skip symlinks, and exclude internal directories (Trash, Temporary).
 - Preserve dirty worktree changes and established HTTP/media/torrent/automation behavior.
 - Releases remain GitHub-only; do not introduce Azure, external signing services, certificate infrastructure, MSI, or non-GitHub release services.
+- The install directory equals the data directory (desktop shell), so updater rollback must remain binaries-only — never roll back user data on update failure.
+- Frontend: build every feature as a complete vertical slice (backend contract → UI → real API/Tauri wiring → loading/empty/error/recovery states → tests → docs) in one pass; never leave production mock data or visual-only screens (CLAUDE.md working rules).
+- Preserve security defaults everywhere: loopback binding, output-root confinement, private-network blocking, bounded inputs, verified managed components, atomic replacement, least privilege, no silent installation of disabled features.
