@@ -13,6 +13,8 @@
     "allow-app-update-status",
     "allow-check-app-update",
     "allow-repair-application",
+    "allow-install-app-update-now",
+    "allow-cancel-app-update",
     "allow-desktop-appearance",
     "allow-open-native-path",
     "allow-reveal-native-path"

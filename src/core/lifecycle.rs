@@ -76,6 +76,12 @@ fn automatic_library_destination(
 
 impl JobManager {
     pub async fn create(&self, mut request: CreateJob) -> Result<Job> {
+        if self.repository.library_move_blocks_new_jobs().await? {
+            return Err(RavynError::Conflict(
+                "new downloads are paused while the Library is moving or waiting for restart"
+                    .into(),
+            ));
+        }
         if request.preset_id.is_none() {
             request.preset_id = self
                 .repository

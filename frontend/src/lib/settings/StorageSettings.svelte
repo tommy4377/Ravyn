@@ -6,9 +6,17 @@
   import ToggleSwitch from "../components/ToggleSwitch.svelte";
   import { formatBytes } from "../util/format";
   import SettingsCategoryHeader from "./SettingsCategoryHeader.svelte";
+  import LibraryMoveDialog from "./LibraryMoveDialog.svelte";
   import type { SettingsController } from "./settingsController.svelte";
 
   let { controller }: { controller: SettingsController } = $props();
+  let moveOpen = $state(false);
+
+  function moveActivated(destination: string): void {
+    controller.libraryRoot = destination;
+    controller.restartRequired = true;
+    void controller.load();
+  }
 </script>
 
 <SettingsCategoryHeader title="Storage and Library" description="Control the library root, organization, retention, and cleanup." />
@@ -16,6 +24,13 @@
   <Surface class="form-surface">
     <PathPicker bind:value={controller.libraryRoot} label="Library root" placeholder="Use the configured library" />
     <ToggleSwitch bind:checked={controller.autoOrganize} label="Organize completed downloads automatically" description="Move completed items into category folders under the library root." />
+    <div class="move-row">
+      <div>
+        <strong>Move the existing Library</strong>
+        <span>Copy, checksum, activate, and recover the entire tracked Library as one durable operation.</span>
+      </div>
+      <Button onclick={() => (moveOpen = true)}><Icon name="folder-open" size={15} /> Move Library</Button>
+    </div>
   </Surface>
 
   {#if controller.cleanupPolicies}
@@ -38,17 +53,25 @@
   {/if}
 </div>
 
+<LibraryMoveDialog
+  open={moveOpen}
+  currentRoot={controller.libraryRoot}
+  onClose={() => (moveOpen = false)}
+  onActivated={moveActivated}
+/>
+
 <style>
   .stack { display: flex; flex-direction: column; gap: var(--space-4); }
   :global(.form-surface) { display: flex; flex-direction: column; gap: var(--space-5); overflow: visible; }
-  .heading, .cleanup-row { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .heading > div, .cleanup-row > div { display: flex; flex-direction: column; }
-  .heading span, .cleanup-row span { color: var(--text-secondary); font-size: var(--text-caption); }
+  .heading, .cleanup-row, .move-row { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
+  .heading > div, .cleanup-row > div, .move-row > div { display: flex; flex-direction: column; }
+  .heading span, .cleanup-row span, .move-row span { color: var(--text-secondary); font-size: var(--text-caption); }
+  .move-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--stroke-divider); }
   .policy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); padding: var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
   .policy-grid label { display: flex; flex-direction: column; gap: var(--space-1); color: var(--text-primary); font-size: var(--text-body); }
   .policy-grid input { min-width: 0; height: var(--control-default); padding: 0 var(--space-3); border: 1px solid var(--stroke-control); border-bottom-color: var(--stroke-control-strong); border-radius: var(--radius-control); color: var(--text-primary); background: var(--bg-control); font: inherit; }
   .policy-grid input:focus { border-bottom: 2px solid var(--accent-default); outline: none; }
   .report { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3) var(--space-4); color: var(--text-secondary); font-size: var(--text-caption); }
   @media (max-width: 900px) { .policy-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 600px) { .policy-grid { grid-template-columns: 1fr; } .heading, .cleanup-row { align-items: stretch; flex-direction: column; } }
+  @media (max-width: 600px) { .policy-grid { grid-template-columns: 1fr; } .heading, .cleanup-row, .move-row { align-items: stretch; flex-direction: column; } }
 </style>

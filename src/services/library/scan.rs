@@ -47,6 +47,12 @@ pub struct LibraryImportStatus {
     pub imported: usize,
     pub duplicates: usize,
     pub skipped: usize,
+    /// True when the configured scan limit stopped the import before every entry was visited.
+    pub truncated: bool,
+    /// True after a client has requested cancellation and before the worker has stopped.
+    pub cancel_requested: bool,
+    /// True when the most recent import stopped because it was cancelled.
+    pub cancelled: bool,
     pub errors: Vec<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -115,8 +121,11 @@ pub async fn import_directory(
     let mut current = status.write().await;
     current.running = false;
     current.completed_at = Some(Utc::now());
+    current.cancelled = matches!(result, Err(RavynError::Cancelled));
     if let Err(error) = &result {
-        push_bounded_error(&mut current.errors, error.to_string());
+        if !matches!(error, RavynError::Cancelled) {
+            push_bounded_error(&mut current.errors, error.to_string());
+        }
     }
     result
 }
@@ -137,9 +146,28 @@ async fn import_directory_inner(
         if cancellation.is_cancelled() {
             return Err(RavynError::Cancelled);
         }
-        let mut entries = tokio::fs::read_dir(&directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                let mut current = status.write().await;
+                current.skipped += 1;
+                push_bounded_error(&mut current.errors, format!("{}: {error}", directory.display()));
+                continue;
+            }
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    let mut current = status.write().await;
+                    current.skipped += 1;
+                    push_bounded_error(&mut current.errors, format!("{}: {error}", directory.display()));
+                    break;
+                }
+            };
             if visited_entries >= maximum {
+                status.write().await.truncated = true;
                 return Ok(());
             }
             visited_entries += 1;
@@ -174,10 +202,14 @@ async fn import_directory_inner(
             status.write().await.scanned += 1;
             let sha256 = match checksum::sha256(&path, cancellation).await {
                 Ok(value) => value,
+                Err(RavynError::Cancelled) => return Err(RavynError::Cancelled),
                 Err(error) => {
                     let mut current = status.write().await;
                     current.skipped += 1;
-                    push_bounded_error(&mut current.errors, format!("{}: {error}", path.display()));
+                    push_bounded_error(
+                        &mut current.errors,
+                        format!("{}: {error}", path.display()),
+                    );
                     continue;
                 }
             };
@@ -424,6 +456,90 @@ mod tests {
 
     use super::*;
     use crate::services::library::LibraryCategory;
+
+    #[tokio::test]
+    async fn cancelled_import_records_a_clean_cancelled_result() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Ravyn");
+        let config = Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            temporary.path().join("data").to_str().unwrap(),
+            "--library-root",
+            root.to_str().unwrap(),
+        ])
+        .unwrap();
+        config.prepare_directories().await.unwrap();
+        let repository = Repository::connect(&config.database_url()).await.unwrap();
+        let source = root.join("Documents");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        tokio::fs::write(source.join("manual.pdf"), b"content")
+            .await
+            .unwrap();
+        let request = LibraryImportRequest {
+            path: source,
+            tags: Vec::new(),
+            max_entries: 100,
+            max_depth: 8,
+        };
+        let status = Arc::new(RwLock::new(LibraryImportStatus::default()));
+        reserve_import(&config, &request, &status).await.unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = import_directory(
+            Arc::new(config),
+            repository,
+            request,
+            status.clone(),
+            cancellation,
+        )
+        .await;
+        assert!(matches!(result, Err(RavynError::Cancelled)));
+        let snapshot = status.read().await;
+        assert!(!snapshot.running);
+        assert!(snapshot.cancelled);
+        assert!(snapshot.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_reports_when_the_entry_limit_truncates_the_scan() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Ravyn");
+        let config = Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            temporary.path().join("data").to_str().unwrap(),
+            "--library-root",
+            root.to_str().unwrap(),
+        ])
+        .unwrap();
+        config.prepare_directories().await.unwrap();
+        let repository = Repository::connect(&config.database_url()).await.unwrap();
+        let source = root.join("Documents");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        tokio::fs::write(source.join("one.pdf"), b"one").await.unwrap();
+        tokio::fs::write(source.join("two.pdf"), b"two").await.unwrap();
+        let request = LibraryImportRequest {
+            path: source,
+            tags: Vec::new(),
+            max_entries: 1,
+            max_depth: 8,
+        };
+        let status = Arc::new(RwLock::new(LibraryImportStatus::default()));
+        reserve_import(&config, &request, &status).await.unwrap();
+        import_directory(
+            Arc::new(config),
+            repository,
+            request,
+            status.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let snapshot = status.read().await;
+        assert!(snapshot.truncated);
+        assert!(!snapshot.cancelled);
+    }
 
     #[tokio::test]
     async fn import_verify_and_relocation_repair_round_trip() {

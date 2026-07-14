@@ -24,6 +24,8 @@
   import { SelectionStore } from "../stores/selection.svelte";
   import { formatSpeed } from "../util/format";
   import AddDownloadDialog from "./AddDownloadDialog.svelte";
+  import BatchImportDialog from "./BatchImportDialog.svelte";
+  import MetalinkImportDialog from "./MetalinkImportDialog.svelte";
   import { permittedActions } from "./jobPresentation";
   import JobRow from "./JobRow.svelte";
 
@@ -36,6 +38,10 @@
   let addDialogOpen = $state(false);
   let addDialogSource = $state("");
   let addDialogKind = $state<JobKind>("http");
+  let metalinkDialogOpen = $state(false);
+  let metalinkInitialDocument = $state("");
+  let batchImportOpen = $state(false);
+  let batchInitialText = $state("");
   let removeIds = $state<string[] | null>(null);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
@@ -106,6 +112,13 @@
       separatorBefore: true,
       onSelect: () => (sortDir = sortDir === "asc" ? "desc" : "asc"),
     },
+  ]);
+  const addMenuItems = $derived<MenuItem[]>([
+    { id: "new-download", label: "New download", icon: "download", onSelect: openAddDialog },
+    { id: "paste-add", label: "Paste and add", icon: "paste", onSelect: () => void pasteAndAdd() },
+    { id: "import-metalink", label: "Import Metalink", icon: "document", separatorBefore: true, onSelect: () => { metalinkInitialDocument = ""; metalinkDialogOpen = true; } },
+    { id: "import-batch", label: "Import batch file", icon: "basket", onSelect: () => { batchInitialText = ""; batchImportOpen = true; } },
+    { id: "batch-queue", label: "Open batch queue", icon: "basket", separatorBefore: true, onSelect: () => navigation.openBasket() },
   ]);
   const moreMenuItems = $derived<MenuItem[]>([
     { id: "paste", label: "Paste and add", icon: "paste", onSelect: () => void pasteAndAdd() },
@@ -282,15 +295,28 @@
 
   async function pasteAndAdd(): Promise<void> {
     try {
-      addDialogSource = await navigator.clipboard.readText();
+      const clipboard = await navigator.clipboard.readText();
+      const meaningful = clipboard.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
+      if (meaningful.length > 1 || clipboard.trim().startsWith("[")) {
+        batchInitialText = clipboard;
+        batchImportOpen = true;
+        return;
+      }
+      if (/^\s*<\?xml|<metalink(?:\s|>)/i.test(clipboard)) {
+        metalinkInitialDocument = clipboard;
+        metalinkDialogOpen = true;
+        return;
+      }
+      addDialogSource = clipboard;
       const normalized = addDialogSource.trim().toLowerCase();
       addDialogKind = normalized.startsWith("magnet:") || normalized.endsWith(".torrent") ? "torrent" : "http";
+      addDialogOpen = true;
     } catch {
       addDialogSource = "";
       addDialogKind = "http";
       notifications.info("Paste the source manually in the add dialog.");
+      addDialogOpen = true;
     }
-    addDialogOpen = true;
   }
 
   function handleDragEnter(event: DragEvent): void {
@@ -310,14 +336,24 @@
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
   }
 
-  function handleDrop(event: DragEvent): void {
+  async function handleDrop(event: DragEvent): Promise<void> {
     event.preventDefault();
     dragDepth = 0;
     dragActive = false;
     const transfer = event.dataTransfer;
     if (!transfer) return;
 
-    const filePaths = [...transfer.files]
+    const files = [...transfer.files];
+    if (files.length === 1 && /\.(meta4|metalink)$/i.test(files[0]!.name)) {
+      try {
+        metalinkInitialDocument = await files[0]!.text();
+        metalinkDialogOpen = true;
+      } catch {
+        notifications.error("Couldn't read the dropped Metalink document");
+      }
+      return;
+    }
+    const filePaths = files
       .map((file) => (file as File & { path?: string }).path ?? file.name)
       .filter((path) => path.trim().length > 0);
     const uriList = transfer.getData("text/uri-list")
@@ -331,9 +367,14 @@
       return;
     }
 
-    addDialogSource = sources.join("\n");
+    if (sources.length > 1) {
+      batchInitialText = sources.join("\n");
+      batchImportOpen = true;
+      return;
+    }
+    addDialogSource = sources[0] ?? "";
     const normalized = addDialogSource.trim().toLowerCase();
-    addDialogKind = sources.length === 1 && (normalized.startsWith("magnet:") || normalized.endsWith(".torrent")) ? "torrent" : "http";
+    addDialogKind = normalized.startsWith("magnet:") || normalized.endsWith(".torrent") ? "torrent" : "http";
     addDialogOpen = true;
   }
 
@@ -349,7 +390,7 @@
 
 <PageScaffold title="Downloads" summary="Manage transfers and review completed files">
   {#snippet actions()}
-    <Button variant="accent" onclick={openAddDialog}><Icon name="add" size={15} /> Add download</Button>
+    <MenuButton label="Add" icon="add" items={addMenuItems} variant="accent" />
   {/snippet}
 
   {#snippet commandBar()}
@@ -407,7 +448,7 @@
     ondragenter={handleDragEnter}
     ondragleave={handleDragLeave}
     ondragover={handleDragOver}
-    ondrop={handleDrop}
+    ondrop={(event) => void handleDrop(event)}
   >
     {#if dragActive}
       <div class="drop-overlay" aria-live="polite">
@@ -473,6 +514,8 @@
 </PageScaffold>
 
 <AddDownloadDialog open={addDialogOpen} initialSource={addDialogSource} initialKind={addDialogKind} onClose={() => (addDialogOpen = false)} />
+<MetalinkImportDialog open={metalinkDialogOpen} initialDocument={metalinkInitialDocument} onClose={() => { metalinkDialogOpen = false; metalinkInitialDocument = ""; }} />
+<BatchImportDialog open={batchImportOpen} initialText={batchInitialText} onClose={() => { batchImportOpen = false; batchInitialText = ""; }} />
 <ConfirmDialog
   open={removeIds !== null}
   title={removeIds && removeIds.length > 1 ? `Remove ${removeIds.length} downloads?` : "Remove this download?"}

@@ -62,6 +62,18 @@ impl Ravyn {
                 }
             }
         };
+        // Resume or finalize durable Library relocation transactions before
+        // persistent settings are applied. A restart-required transaction was
+        // committed by the previous process; an interrupted running copy can
+        // be safely resumed because source files are retained until activation.
+        if let Err(error) =
+            services::library::recover_interrupted_library_move(&config, &repository).await
+        {
+            tracing::error!(%error, "failed to recover interrupted Library move");
+        }
+        if let Err(error) = services::library::finalize_activated_library_move(&repository).await {
+            tracing::error!(%error, "failed to finalize activated Library move");
+        }
         let base_config = Arc::new(config.clone());
         if let Some(settings) = repository.load_persistent_settings().await? {
             settings.apply_to(&mut config)?;

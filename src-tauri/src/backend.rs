@@ -136,15 +136,93 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
         .map_err(|e| e.to_string())?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
 
-    let _ = sender.send(Some(BackendInfo {
+    let info = BackendInfo {
         base_url: format!("http://{bound}"),
         api_token,
         data_dir: data_dir_str,
         setup_completed,
-    }));
+    };
+    let _ = sender.send(Some(info.clone()));
+    write_desktop_ready_marker(&info);
     crate::integration::confirm_installed_copy_ready();
 
     ravyn::api::serve_with_listener(app, listener)
         .await
         .map_err(|e| e.to_string())
+}
+
+
+#[derive(Serialize)]
+struct DesktopReadyMarker<'a> {
+    schema: u32,
+    process_id: u32,
+    version: &'a str,
+    base_url: &'a str,
+    data_dir: &'a str,
+    setup_completed: bool,
+}
+
+/// Writes an opt-in, non-secret readiness marker for desktop automation.
+/// Production builds do nothing unless the test runner explicitly provides
+/// `RAVYN_DESKTOP_READY_FILE` for the current process.
+fn write_desktop_ready_marker(info: &BackendInfo) {
+    let Ok(path) = std::env::var("RAVYN_DESKTOP_READY_FILE") else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    let marker = DesktopReadyMarker {
+        schema: 1,
+        process_id: std::process::id(),
+        version: env!("CARGO_PKG_VERSION"),
+        base_url: &info.base_url,
+        data_dir: &info.data_dir,
+        setup_completed: info.setup_completed,
+    };
+    let result = (|| -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "the desktop readiness marker has no parent directory".to_owned())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create the readiness marker directory: {error}"))?;
+        let bytes = serde_json::to_vec_pretty(&marker)
+            .map_err(|error| format!("failed to serialize the desktop readiness marker: {error}"))?;
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, bytes)
+            .map_err(|error| format!("failed to write the desktop readiness marker: {error}"))?;
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("failed to replace the desktop readiness marker: {error}"))?;
+        }
+        std::fs::rename(&temporary, &path)
+            .map_err(|error| format!("failed to activate the desktop readiness marker: {error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error, path = %path.display(), "failed to publish desktop readiness marker");
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_readiness_marker_contains_no_api_token() {
+        let marker = DesktopReadyMarker {
+            schema: 1,
+            process_id: 42,
+            version: "0.2.0",
+            base_url: "http://127.0.0.1:12345",
+            data_dir: r"C:\Users\Tester\AppData\Local\Ravyn",
+            setup_completed: true,
+        };
+        let json = serde_json::to_string(&marker).unwrap();
+        assert!(json.contains("127.0.0.1:12345"));
+        assert!(!json.contains("api_token"));
+        assert!(!json.contains("authorization"));
+    }
 }

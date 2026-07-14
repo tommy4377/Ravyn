@@ -5,6 +5,7 @@ mod basket;
 mod components;
 mod jobs;
 mod library;
+mod library_move;
 mod media;
 mod outputs;
 mod pagination;

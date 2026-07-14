@@ -4,9 +4,22 @@ use chrono::{DateTime, Utc};
 
 use super::*;
 use crate::{
-    services::library::{LibraryCategory, TemplatePreview, TemplatePreviewRequest},
+    services::library::{
+        LibraryCategory, LibraryMovePreflight, LibraryMoveRequest, LibraryMoveStatus,
+        TemplatePreview, TemplatePreviewRequest,
+    },
     storage::{LibraryEntry, LibraryEntryState, LibraryListFilter},
 };
+
+async fn ensure_library_move_inactive(repository: &crate::storage::Repository) -> Result<()> {
+    if repository.library_move_blocks_new_jobs().await? {
+        return Err(crate::error::RavynError::Conflict(
+            "Library maintenance is unavailable while the Library is moving or waiting for restart"
+                .into(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct LibraryQuery {
@@ -147,6 +160,8 @@ pub(super) async fn delete_library_entry(
     Path(id): Path<Uuid>,
     Query(query): Query<DeleteLibraryQuery>,
 ) -> Result<Json<DeleteLibraryResult>> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let resource_id = id.to_string();
     let result = match query.mode {
         DeleteLibraryMode::Trash => {
@@ -188,6 +203,8 @@ pub(super) async fn restore_library_entry(
     State(s): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LibraryEntry>> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let config = s.manager.config();
     let result = crate::services::library::restore_entry(&config, &s.repository, id).await;
     let resource_id = id.to_string();
@@ -210,6 +227,8 @@ pub(super) async fn start_library_import(
     StatusCode,
     Json<crate::services::library::LibraryImportStatus>,
 )> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let config = s.manager.config();
     let status = s.library_import_status.clone();
     let snapshot = audited(
@@ -220,19 +239,45 @@ pub(super) async fn start_library_import(
         crate::services::library::reserve_import(&config, &request, &status).await,
     )
     .await?;
+    let run_id = snapshot.run_id.ok_or_else(|| {
+        crate::error::RavynError::Internal(
+            "reserved library import did not expose a run identifier".into(),
+        )
+    })?;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    {
+        let mut active = s.library_import_cancellation.lock().await;
+        *active = Some((run_id, cancellation.clone()));
+    }
     let repository = s.repository.clone();
     let task_status = status.clone();
+    let cancellation_slot = s.library_import_cancellation.clone();
     tokio::spawn(async move {
         let result = crate::services::library::import_directory(
             config,
             repository.clone(),
             request,
             task_status.clone(),
-            tokio_util::sync::CancellationToken::new(),
+            cancellation,
         )
         .await;
+        {
+            let mut active = cancellation_slot.lock().await;
+            if active
+                .as_ref()
+                .is_some_and(|(active_run_id, _)| *active_run_id == run_id)
+            {
+                active.take();
+            }
+        }
         let snapshot = task_status.read().await.clone();
-        let outcome = if result.is_ok() { "success" } else { "failure" };
+        let outcome = if snapshot.cancelled {
+            "cancelled"
+        } else if result.is_ok() {
+            "success"
+        } else {
+            "failure"
+        };
         let resource_id = snapshot.run_id.map(|id| id.to_string());
         if let Err(error) = repository
             .append_audit_with_metadata(
@@ -245,6 +290,8 @@ pub(super) async fn start_library_import(
                     "imported": snapshot.imported,
                     "duplicates": snapshot.duplicates,
                     "skipped": snapshot.skipped,
+                    "truncated": snapshot.truncated,
+                    "cancelled": snapshot.cancelled,
                 }),
             )
             .await
@@ -252,7 +299,9 @@ pub(super) async fn start_library_import(
             tracing::warn!(%error, "failed to persist library import audit record");
         }
         if let Err(error) = result {
-            tracing::warn!(%error, "library import failed");
+            if !matches!(error, crate::error::RavynError::Cancelled) {
+                tracing::warn!(%error, "library import failed");
+            }
         }
     });
     Ok((StatusCode::ACCEPTED, Json(snapshot)))
@@ -264,9 +313,49 @@ pub(super) async fn library_import_status(
     Json(s.library_import_status.read().await.clone())
 }
 
+/// Requests cancellation of the active Library import. Cancellation is
+/// cooperative and the status endpoint remains authoritative until the worker
+/// reports `running=false`.
+pub(super) async fn cancel_library_import(
+    State(s): State<ApiState>,
+) -> Result<Json<crate::services::library::LibraryImportStatus>> {
+    let active_import = s.library_import_cancellation.lock().await.clone();
+    let result: Result<crate::services::library::LibraryImportStatus> = async {
+        let Some((run_id, cancellation)) = active_import else {
+            return Err(crate::error::RavynError::Conflict(
+                "there is no active library import to cancel".into(),
+            ));
+        };
+        {
+            let mut status = s.library_import_status.write().await;
+            if status.run_id != Some(run_id) || !status.running {
+                return Err(crate::error::RavynError::Conflict(
+                    "the active library import has already completed".into(),
+                ));
+            }
+            status.cancel_requested = true;
+        }
+        cancellation.cancel();
+        Ok(s.library_import_status.read().await.clone())
+    }
+    .await;
+    Ok(Json(
+        audited(
+            &s.repository,
+            "library.import.cancel",
+            "library_import",
+            None,
+            result,
+        )
+        .await?,
+    ))
+}
+
 pub(super) async fn verify_library(
     State(s): State<ApiState>,
 ) -> Result<Json<crate::services::library::VerifyLibraryReport>> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let result = crate::services::library::verify_entries(&s.repository).await;
     Ok(Json(
         audited(&s.repository, "library.verify", "library", None, result).await?,
@@ -277,6 +366,8 @@ pub(super) async fn relocate_library(
     State(s): State<ApiState>,
     Json(request): Json<crate::services::library::RelocationRequest>,
 ) -> Result<Json<crate::services::library::RelocationReport>> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let config = s.manager.config();
     let result = crate::services::library::repair_relocations(
         &config,
@@ -287,6 +378,96 @@ pub(super) async fn relocate_library(
     .await;
     Ok(Json(
         audited(&s.repository, "library.relocate", "library", None, result).await?,
+    ))
+}
+
+/// Performs a read-only validation of a physical Library-root move.
+pub(super) async fn preflight_library_move_root(
+    State(s): State<ApiState>,
+    Json(request): Json<LibraryMoveRequest>,
+) -> Result<Json<LibraryMovePreflight>> {
+    let import_running = s.library_import_status.read().await.running;
+    let active_jobs = s.manager.active_job_count().await;
+    Ok(Json(
+        crate::services::library::preflight_library_move(
+            &s.configured_config,
+            &s.repository,
+            &request,
+            active_jobs,
+            import_running,
+        )
+        .await?,
+    ))
+}
+
+/// Returns the latest durable Library-root move status.
+pub(super) async fn library_move_status(
+    State(s): State<ApiState>,
+) -> Result<Json<LibraryMoveStatus>> {
+    let status = s
+        .repository
+        .latest_library_move_status()
+        .await?
+        .unwrap_or_default();
+    if !status.state.is_running() {
+        let mut active = s.library_move_cancellation.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|(run_id, _)| Some(*run_id) == status.run_id)
+        {
+            active.take();
+        }
+    }
+    Ok(Json(status))
+}
+
+/// Starts a durable copy, verification and activation transaction.
+pub(super) async fn start_library_move_root(
+    State(s): State<ApiState>,
+    Json(request): Json<LibraryMoveRequest>,
+) -> Result<(StatusCode, Json<LibraryMoveStatus>)> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    let import_running = s.library_import_status.read().await.running;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let result = crate::services::library::start_library_move(
+        s.configured_config.clone(),
+        s.repository.clone(),
+        s.manager.clone(),
+        request,
+        import_running,
+        cancellation.clone(),
+    )
+    .await;
+    let status = audited(
+        &s.repository,
+        "library.move.start",
+        "library_move",
+        None,
+        result,
+    )
+    .await?;
+    if let Some(run_id) = status.run_id {
+        *s.library_move_cancellation.lock().await = Some((run_id, cancellation));
+    }
+    Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
+/// Requests cooperative cancellation before settings activation.
+pub(super) async fn cancel_library_move_root(
+    State(s): State<ApiState>,
+) -> Result<Json<LibraryMoveStatus>> {
+    let active = s.library_move_cancellation.lock().await.clone();
+    let cancellation = active.map(|(_, token)| token);
+    let result = crate::services::library::cancel_library_move(&s.repository, cancellation).await;
+    Ok(Json(
+        audited(
+            &s.repository,
+            "library.move.cancel",
+            "library_move",
+            None,
+            result,
+        )
+        .await?,
     ))
 }
 
@@ -676,6 +857,8 @@ pub(super) async fn put_cleanup_policies(
 pub(super) async fn run_library_cleanup(
     State(s): State<ApiState>,
 ) -> Result<Json<crate::services::library::CleanupReport>> {
+    let _maintenance = s.library_maintenance_lock.lock().await;
+    ensure_library_move_inactive(&s.repository).await?;
     let policies = s.repository.load_cleanup_policies().await?;
     let config = s.manager.config();
     let result = crate::services::library::run_cleanup(&config, &s.repository, &policies).await;

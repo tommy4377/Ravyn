@@ -370,7 +370,7 @@ impl Repository {
         let started = std::time::Instant::now();
         let now = Utc::now();
         let sql = format!(
-            "UPDATE jobs SET status='downloading', available_at=NULL, started_at=COALESCE(started_at, ?), updated_at=? WHERE id=(SELECT id FROM jobs WHERE status='queued' AND (available_at IS NULL OR available_at<=?) ORDER BY priority DESC, created_at ASC LIMIT 1) AND status='queued' RETURNING {}",
+            "UPDATE jobs SET status='downloading', available_at=NULL, started_at=COALESCE(started_at, ?), updated_at=? WHERE id=(SELECT id FROM jobs WHERE status='queued' AND (available_at IS NULL OR available_at<=?) AND NOT EXISTS (SELECT 1 FROM library_move_transactions WHERE state IN ('running','cancelling','restart_required')) ORDER BY priority DESC, created_at ASC LIMIT 1) AND status='queued' RETURNING {}",
             JOB_COLUMNS
         );
         let result = sqlx::query(&sql)
