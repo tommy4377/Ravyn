@@ -28,7 +28,9 @@
     onClose: () => void;
   } = $props();
 
-  let kind = $state<JobKind>("http");
+  type DialogKind = JobKind | "metalink";
+
+  let kind = $state<DialogKind>("http");
   let source = $state("");
   let destination = $state("");
   let filename = $state("");
@@ -57,6 +59,9 @@
   let proxySecretId = $state("");
   let cookiesSecretId = $state("");
   let authenticationHeaderSecretId = $state("");
+  let overwriteExisting = $state(false);
+  let metalinkFileName = $state("");
+  let metalinkFileInput = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
     if (open) {
@@ -70,12 +75,17 @@
 
   const lines = $derived(source.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("//")));
   const lineCount = $derived(lines.length);
-  const canSubmit = $derived(lineCount > 0 && (kind === "http" || lineCount === 1));
+  const canSubmit = $derived(
+    kind === "metalink"
+      ? source.trim().length > 0
+      : lineCount > 0 && (kind === "http" || lineCount === 1),
+  );
   const allTorrentFilesSelected = $derived(!!torrentProbe?.files.length && selectedTorrentFiles.length === torrentProbe.files.length);
   const kindOptions: DropdownOption[] = [
     { value: "http", label: "Direct download" },
     { value: "media", label: "Video or audio" },
     { value: "torrent", label: "Torrent or magnet" },
+    { value: "metalink", label: "Metalink document" },
   ];
   const duplicateOptions: DropdownOption[] = [
     { value: "allow", label: "Allow duplicates" },
@@ -149,12 +159,43 @@
     proxySecretId = "";
     cookiesSecretId = "";
     authenticationHeaderSecretId = "";
+    overwriteExisting = false;
+    metalinkFileName = "";
     clearProbe();
   }
 
   function changeKind(value: string): void {
-    kind = value as JobKind;
+    kind = value as DialogKind;
     clearProbe();
+  }
+
+  function pickMetalinkFile(): void {
+    metalinkFileInput?.click();
+  }
+
+  function onMetalinkFileChosen(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      source = typeof reader.result === "string" ? reader.result : "";
+      metalinkFileName = file.name;
+    };
+    reader.onerror = () => notifications.error("Couldn't read this Metalink file");
+    reader.readAsText(file);
+    input.value = "";
+  }
+
+  async function submitMetalink(service: JobsService): Promise<void> {
+    const job = await service.addMetalink(source, {
+      destination: destination || undefined,
+      overwrite: overwriteExisting,
+    });
+    jobsStore.upsert(job);
+    notifications.success("Metalink download added");
+    reset();
+    onClose();
   }
 
   function close(): void {
@@ -199,6 +240,10 @@
     error = null;
     const service = new JobsService(connection.client);
     try {
+      if (kind === "metalink") {
+        await submitMetalink(service);
+        return;
+      }
       const result = await service.addFromInput({
         source,
         destination: destination || undefined,
@@ -248,20 +293,45 @@
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void submit();
 }} />
 
-<Dialog {open} title={kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : "Add download"} size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
+<Dialog {open} title={kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : "Add download"} size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
   <div class="form">
     <div class="kind-field"><span>Download type</span><Dropdown options={kindOptions} bind:value={kind} label="Download type" /></div>
-    <TextArea
-      bind:value={source}
-      label={kind === "torrent" ? "Magnet link or torrent source" : kind === "media" ? "Media URL" : "URL or URLs"}
-      placeholder={kind === "torrent" ? "magnet:?xt=urn:btih:…" : kind === "media" ? "https://example.com/watch?v=…" : "https://example.com/file.zip\nhttps://example.com/another-file.zip"}
-      rows={kind === "http" ? 4 : 3}
-      hint={kind === "http" ? "One URL per line. Multiple lines create multiple downloads." : "Media and torrent downloads accept one source at a time so the content can be analyzed first."}
-    />
-    {#if kind !== "http" && lineCount > 1}<InlineError title="Use one source" message="Media and torrent downloads must be added one at a time." />{/if}
+    {#if kind === "metalink"}
+      <div class="metalink-pick">
+        <Button variant="standard" onclick={pickMetalinkFile}><Icon name="folder-open" size={16} /> Choose .metalink file…</Button>
+        {#if metalinkFileName}<span class="metalink-name">{metalinkFileName}</span>{/if}
+        <input
+          type="file"
+          accept=".metalink,.meta4,.xml,application/metalink4+xml,application/metalink+xml"
+          hidden
+          bind:this={metalinkFileInput}
+          onchange={onMetalinkFileChosen}
+        />
+      </div>
+      <TextArea
+        bind:value={source}
+        label="Metalink document"
+        placeholder={'<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">…'}
+        rows={8}
+        hint="Paste the Metalink XML or choose a .metalink/.meta4 file. File names, sizes, checksums, and mirror URLs come from the document."
+      />
+    {:else}
+      <TextArea
+        bind:value={source}
+        label={kind === "torrent" ? "Magnet link or torrent source" : kind === "media" ? "Media URL" : "URL or URLs"}
+        placeholder={kind === "torrent" ? "magnet:?xt=urn:btih:…" : kind === "media" ? "https://example.com/watch?v=…" : "https://example.com/file.zip\nhttps://example.com/another-file.zip"}
+        rows={kind === "http" ? 4 : 3}
+        hint={kind === "http" ? "One URL per line. Multiple lines create multiple downloads." : "Media and torrent downloads accept one source at a time so the content can be analyzed first."}
+      />
+    {/if}
+    {#if kind !== "http" && kind !== "metalink" && lineCount > 1}<InlineError title="Use one source" message="Media and torrent downloads must be added one at a time." />{/if}
     <PathPicker bind:value={destination} label="Destination" placeholder="Use the library default" />
 
-    {#if kind !== "http"}
+    {#if kind === "metalink"}
+      <ToggleSwitch bind:checked={overwriteExisting} label="Overwrite existing files" description="Replace files that already exist at the destination." />
+    {/if}
+
+    {#if kind !== "http" && kind !== "metalink"}
       <div class="analyze-row">
         <div><strong>{kind === "media" ? "Inspect available formats" : "Inspect torrent contents"}</strong><small>{kind === "media" ? "Uses yt-dlp to read title, playlist, and quality information." : "Uses the managed torrent engine to read metadata and file names."}</small></div>
         <Button disabled={probing || lineCount !== 1} onclick={() => void analyze()}><Icon name={probing ? "spinner" : "search"} size={16} /> {probing ? "Analyzing…" : mediaProbe || torrentProbe ? "Analyze again" : "Analyze"}</Button>
@@ -296,6 +366,7 @@
       <ToggleSwitch bind:checked={seedAfterDownload} label="Seed after download" description="Keep the torrent active after all selected files are complete." />
     {/if}
 
+    {#if kind !== "metalink"}
     <details class="advanced">
       <summary>Advanced options</summary>
       <div class="advanced-body">
@@ -315,6 +386,7 @@
         {/if}
       </div>
     </details>
+    {/if}
 
     {#if error}<InlineError title="Couldn't add this download" message={error} />{/if}
   </div>
@@ -322,7 +394,7 @@
   {#snippet footer()}
     <Button variant="standard" disabled={busy || probing} onclick={close}>Cancel</Button>
     <Button variant="accent" disabled={busy || probing || !canSubmit || (kind === "torrent" && !!torrentProbe && selectedTorrentFiles.length === 0)} onclick={() => void submit()}>
-      {busy ? "Adding…" : kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : lineCount > 1 ? `Add ${lineCount} downloads` : "Add download"}
+      {busy ? "Adding…" : kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : lineCount > 1 ? `Add ${lineCount} downloads` : "Add download"}
     </Button>
   {/snippet}
 </Dialog>
@@ -351,6 +423,8 @@
   .file-row > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; }
   .file-row strong, .file-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .metalink-pick { display: flex; align-items: center; gap: var(--space-3); }
+  .metalink-name { color: var(--text-secondary); font-size: var(--text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .advanced summary { cursor: default; font-size: var(--text-body); font-weight: 600; color: var(--text-primary); padding: var(--space-1) 0; }
   .advanced-body { display: flex; flex-direction: column; gap: var(--space-4); padding-top: var(--space-3); }
   .secret-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }

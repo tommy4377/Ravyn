@@ -41,6 +41,10 @@
   let presetPriority = $state("0");
   let presetSpeed = $state("0");
   let presetBusy = $state(false);
+  let templatePreview = $state<string | null>(null);
+  let templatePreviewMissing = $state<string[]>([]);
+  let templatePreviewError = $state<string | null>(null);
+  let templatePreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let profileOpen = $state(false);
   let profileName = $state("");
   let profileMaxActive = $state("3");
@@ -320,6 +324,47 @@
     }
   }
 
+
+  // Sample values for the built-in template variables the backend injects
+  // (see services::presets::builtin_variables) so the preview reflects a
+  // realistic render instead of reporting every variable as missing.
+  const templateSampleVariables: Record<string, string> = {
+    filename: "example-file.zip",
+    stem: "example-file",
+    extension: "zip",
+    host: "example.com",
+    year: String(new Date().getFullYear()),
+    month: String(new Date().getMonth() + 1).padStart(2, "0"),
+    day: String(new Date().getDate()).padStart(2, "0"),
+  };
+
+  function scheduleTemplatePreview(): void {
+    if (templatePreviewTimer) clearTimeout(templatePreviewTimer);
+    const template = presetTemplate.trim();
+    if (!template) {
+      templatePreview = null;
+      templatePreviewMissing = [];
+      templatePreviewError = null;
+      return;
+    }
+    templatePreviewTimer = setTimeout(() => void runTemplatePreview(template), 350);
+  }
+
+  async function runTemplatePreview(template: string): Promise<void> {
+    if (!connection.client) return;
+    try {
+      const preview = await connection.client.previewTemplate({ template, variables: templateSampleVariables });
+      if (presetTemplate.trim() !== template) return;
+      templatePreview = preview.rendered;
+      templatePreviewMissing = preview.missing_variables;
+      templatePreviewError = null;
+    } catch (cause) {
+      if (presetTemplate.trim() !== template) return;
+      templatePreview = null;
+      templatePreviewMissing = [];
+      templatePreviewError = describeError(cause);
+    }
+  }
 
   async function createPreset(): Promise<void> {
     if (!connection.client || !presetName.trim() || presetBusy) return;
@@ -628,7 +673,17 @@
 </div>
 
 <Dialog open={presetOpen} title="New download preset" onClose={() => !presetBusy && (presetOpen = false)} preventClose={presetBusy}>
-  <div class="dialog-form"><TextField bind:value={presetName} label="Preset name" placeholder="Fast downloads" /><PathPicker bind:value={presetDestination} label="Destination" placeholder="Use the default destination" /><TextField bind:value={presetTemplate} label="Filename template" placeholder="Leave empty to keep the original name" /><div class="two-column"><TextField bind:value={presetPriority} inputmode="numeric" label="Priority" /><TextField bind:value={presetSpeed} inputmode="decimal" label="Speed limit (Mbit/s)" placeholder="0 for unlimited" /></div></div>
+  <div class="dialog-form">
+    <TextField bind:value={presetName} label="Preset name" placeholder="Fast downloads" />
+    <PathPicker bind:value={presetDestination} label="Destination" placeholder="Use the default destination" />
+    <TextField bind:value={presetTemplate} label="Filename template" placeholder={"{host}/{year}/{stem}.{extension}"} hint={"Variables: {filename} {stem} {extension} {host} {year} {month} {day}"} oninput={scheduleTemplatePreview} />
+    {#if templatePreviewError}
+      <p class="template-preview error">Invalid template: {templatePreviewError}</p>
+    {:else if templatePreview}
+      <p class="template-preview">Example: <code>{templatePreview}</code>{#if templatePreviewMissing.length}<span class="template-missing"> · unknown variables: {templatePreviewMissing.join(", ")}</span>{/if}</p>
+    {/if}
+    <div class="two-column"><TextField bind:value={presetPriority} inputmode="numeric" label="Priority" /><TextField bind:value={presetSpeed} inputmode="decimal" label="Speed limit (Mbit/s)" placeholder="0 for unlimited" /></div>
+  </div>
   {#snippet footer()}<Button disabled={presetBusy} onclick={() => (presetOpen = false)}>Cancel</Button><Button variant="accent" disabled={presetBusy || !presetName.trim()} onclick={() => void createPreset()}>{presetBusy ? "Creating…" : "Create preset"}</Button>{/snippet}
 </Dialog>
 
@@ -706,6 +761,9 @@
   .management-row strong, .management-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .management-empty { margin: 0; padding: var(--space-5); }
   .dialog-form { display: flex; flex-direction: column; gap: var(--space-4); }
+  .template-preview { margin: calc(var(--space-3) * -1) 0 0; color: var(--text-secondary); font-size: var(--text-caption); }
+  .template-preview code { font-family: "Consolas", ui-monospace, monospace; }
+  .template-preview.error, .template-missing { color: var(--status-warning); }
   .dropdown-field { display: flex; flex-direction: column; gap: var(--space-1); }
   .select-field {
     display: grid;

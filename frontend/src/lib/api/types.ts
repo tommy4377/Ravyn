@@ -860,6 +860,13 @@ export interface RetryFailedMediaItemsResponse {
   results: MediaItemRetryResult[];
 }
 
+export interface MediaItemOutputRecord {
+  media_item_id: string;
+  role: string;
+  output: JobOutput;
+  created_at: string;
+}
+
 export interface RuleMatcher {
   domains: string[];
   extensions: string[];
@@ -1144,6 +1151,103 @@ export interface HostProfile {
   range_failures: number;
   circuit_open_until: string | null;
   last_error: string | null;
+}
+
+
+// --- Tags, trust, template and rule previews, torrent engine ---
+
+export interface TagRecord {
+  id: number;
+  name: string;
+  job_count: number;
+}
+
+export interface TemplatePreviewRequest {
+  template: string;
+  variables?: Record<string, string>;
+}
+
+export interface TemplatePreview {
+  rendered: string;
+  missing_variables: string[];
+}
+
+export interface Ed25519SignatureInput {
+  public_key_hex: string;
+  signature_hex: string;
+  /** SHA-256 digest whose raw 32 bytes were signed. */
+  signed_sha256: string;
+}
+
+export interface TrustPreviewRequest {
+  source_url: string;
+  /** Whether a real TLS handshake completed with a valid certificate chain. */
+  tls_certificate_valid?: boolean | null;
+  checksum_available?: boolean;
+  checksum_verified?: boolean;
+  signature_valid?: boolean | null;
+  /** Whether the signature key is anchored in an operator-trusted key set. */
+  signer_trusted?: boolean;
+  ed25519_signature?: Ed25519SignatureInput | null;
+  known_mirror?: boolean;
+  metadata_consistent?: boolean;
+}
+
+export interface TrustFactor {
+  code: string;
+  label: string;
+  points: number;
+  satisfied: boolean;
+  explanation: string;
+}
+
+export interface TrustReport {
+  score: number;
+  level: string;
+  factors: TrustFactor[];
+}
+
+export interface RulePreviewRequest {
+  request: CreateJob;
+  mime?: string | null;
+  extension?: string | null;
+}
+
+export interface RulePreviewMatch {
+  id: string;
+  name: string;
+  priority: number;
+  destination_selected: boolean;
+  destination_shadowed: boolean;
+  speed_limit_selected: boolean;
+  speed_limit_shadowed: boolean;
+}
+
+export interface RulePreview {
+  result: CreateJob;
+  matches: RulePreviewMatch[];
+}
+
+export interface TorrentEngineTorrent {
+  torrent_id: string | null;
+  info_hash: string | null;
+  name: string | null;
+  output_folder: string | null;
+  state: string | null;
+  downloaded_bytes: number | null;
+  total_bytes: number | null;
+  progress: number | null;
+  raw: unknown;
+}
+
+export interface TorrentEngineList {
+  torrents: TorrentEngineTorrent[];
+  raw: unknown;
+}
+
+export interface TorrentDhtTable {
+  v4: unknown;
+  v6: unknown;
 }
 
 

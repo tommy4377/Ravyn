@@ -44,6 +44,7 @@ import type {
   LibraryImportStatus,
   LibraryListParams,
   MediaArchiveRecord,
+  MediaItemOutputRecord,
   MediaItemRecord,
   MediaItemRetryResult,
   MediaItemSummary,
@@ -63,6 +64,8 @@ import type {
   RetryFailedMediaItemsResponse,
   RelocationReport,
   RuleInput,
+  RulePreview,
+  RulePreviewRequest,
   ScheduleExecutionRecord,
   ScheduleInput,
   ScheduleRecord,
@@ -73,8 +76,13 @@ import type {
   SetupProfile,
   SetupState,
   SystemCapabilities,
+  TagRecord,
+  TemplatePreview,
+  TemplatePreviewRequest,
   TorrentDetails,
   TorrentDhtStats,
+  TorrentDhtTable,
+  TorrentEngineList,
   TorrentGlobalStats,
   TorrentPeerStats,
   TorrentProbe,
@@ -82,6 +90,8 @@ import type {
   TorrentRecord,
   TorrentSeedingState,
   TorrentSnapshot,
+  TrustPreviewRequest,
+  TrustReport,
   UpdateJob,
   UserProfile,
   ActivateProfileResponse,
@@ -272,6 +282,42 @@ export class RavynClient {
     return this.request("GET", `/v1/jobs/${id}/logs`, undefined, signal, { ...params });
   }
 
+  // --- Tags ---
+
+  listTags(params?: PageQueryParams, signal?: AbortSignal): Promise<Page<TagRecord>> {
+    return this.request("GET", "/v1/tags", undefined, signal, { ...params });
+  }
+
+  deleteTag(id: number): Promise<void> {
+    return this.request("DELETE", `/v1/tags/${id}`);
+  }
+
+  getJobTags(id: string, signal?: AbortSignal): Promise<string[]> {
+    return this.request("GET", `/v1/jobs/${id}/tags`, undefined, signal);
+  }
+
+  replaceJobTags(id: string, tags: string[]): Promise<string[]> {
+    return this.request("PUT", `/v1/jobs/${id}/tags`, { tags });
+  }
+
+  // --- Trust and previews ---
+
+  previewTrust(request: TrustPreviewRequest): Promise<TrustReport> {
+    return this.request("POST", "/v1/trust/preview", request);
+  }
+
+  getJobTrust(id: string, signal?: AbortSignal): Promise<TrustReport> {
+    return this.request("GET", `/v1/jobs/${id}/trust`, undefined, signal);
+  }
+
+  previewTemplate(request: TemplatePreviewRequest): Promise<TemplatePreview> {
+    return this.request("POST", "/v1/templates/preview", request);
+  }
+
+  previewRules(request: RulePreviewRequest): Promise<RulePreview> {
+    return this.request("POST", "/v1/rules/preview", request);
+  }
+
   // --- Library ---
 
   listLibrary(params?: LibraryListParams, signal?: AbortSignal): Promise<Page<LibraryEntry>> {
@@ -424,6 +470,10 @@ export class RavynClient {
     return this.request("POST", `/v1/jobs/${jobId}/media-items/retry-failed`, { limit });
   }
 
+  listMediaItemOutputs(jobId: string, itemId: string, signal?: AbortSignal): Promise<MediaItemOutputRecord[]> {
+    return this.request("GET", `/v1/jobs/${jobId}/media-items/${itemId}/outputs`, undefined, signal);
+  }
+
   // --- Torrents ---
 
   probeTorrent(request: TorrentProbeRequest): Promise<TorrentProbe> {
@@ -458,12 +508,20 @@ export class RavynClient {
     return this.request("GET", `/v1/torrents/${id}/seeding`, undefined, signal);
   }
 
+  listEngineTorrents(signal?: AbortSignal): Promise<TorrentEngineList> {
+    return this.request("GET", "/v1/torrents/engine", undefined, signal);
+  }
+
   getTorrentEngineStats(signal?: AbortSignal): Promise<TorrentGlobalStats> {
     return this.request("GET", "/v1/torrents/engine/stats", undefined, signal);
   }
 
   getTorrentDhtStats(signal?: AbortSignal): Promise<TorrentDhtStats> {
     return this.request("GET", "/v1/torrents/dht/stats", undefined, signal);
+  }
+
+  getTorrentDhtTable(signal?: AbortSignal): Promise<TorrentDhtTable> {
+    return this.request("GET", "/v1/torrents/dht/table", undefined, signal);
   }
 
   removeTorrent(id: string, deleteFiles = false): Promise<void> {

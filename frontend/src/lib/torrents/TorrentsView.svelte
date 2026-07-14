@@ -3,6 +3,8 @@
   import type {
     TorrentDetails,
     TorrentDhtStats,
+    TorrentDhtTable,
+    TorrentEngineList,
     TorrentGlobalStats,
     TorrentPeerStats,
     TorrentRecord,
@@ -29,6 +31,7 @@
   import { formatAbsoluteTime, formatBytes, formatSpeed } from "../util/format";
 
   type DetailTab = "overview" | "files" | "peers";
+  type ViewTab = "managed" | "engine" | "dht";
 
   let torrents = $state<TorrentRecord[]>([]);
   let engineStats = $state<TorrentGlobalStats | null>(null);
@@ -50,6 +53,11 @@
   let deleteFiles = $state(false);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
+  let viewTab = $state<ViewTab>("managed");
+  let engineList = $state<TorrentEngineList | null>(null);
+  let engineListError = $state<string | null>(null);
+  let dhtTable = $state<TorrentDhtTable | null>(null);
+  let dhtTableError = $state<string | null>(null);
   let peersDialogOpen = $state(false);
   let peersInput = $state("");
   let peersBusy = $state(false);
@@ -117,6 +125,47 @@
       if (selectedId === id) detailError = describeError(cause);
     } finally {
       if (selectedId === id) detailLoading = false;
+    }
+  }
+
+  const managedHashes = $derived(new Set(torrents.map((torrent) => torrent.info_hash?.toLowerCase()).filter(Boolean)));
+
+  async function loadEngineList(): Promise<void> {
+    if (!connection.client) return;
+    engineListError = null;
+    try {
+      engineList = await connection.client.listEngineTorrents();
+    } catch (cause) {
+      engineList = null;
+      engineListError = describeError(cause);
+    }
+  }
+
+  async function loadDhtTable(): Promise<void> {
+    if (!connection.client) return;
+    dhtTableError = null;
+    try {
+      dhtTable = await connection.client.getTorrentDhtTable();
+    } catch (cause) {
+      dhtTable = null;
+      dhtTableError = describeError(cause);
+    }
+  }
+
+  function changeViewTab(next: ViewTab): void {
+    viewTab = next;
+    if (next !== "managed") selectedId = null;
+    if (next === "engine" && engineList === null) void loadEngineList();
+    if (next === "dht" && dhtTable === null) void loadDhtTable();
+  }
+
+  async function copyDhtTable(): Promise<void> {
+    if (!dhtTable) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(dhtTable, null, 2));
+      notifications.info("DHT table copied as JSON");
+    } catch {
+      notifications.warning("Couldn't copy to the clipboard");
     }
   }
 
@@ -214,11 +263,54 @@
     <MetricCard label="Managed torrents" value={torrents.length.toLocaleString()} detail={`${formatBytes(engineStats?.downloaded_bytes ?? 0)} downloaded by engine`} icon="speed" />
   </div>
 
-  <div class="toolbar"><SearchBox bind:value={search} label="Search torrents" placeholder="Search name or info hash" /></div>
+  <div class="toolbar">
+    <div class="view-tabs" role="tablist" aria-label="Torrent view">
+      <button type="button" role="tab" aria-selected={viewTab === "managed"} onclick={() => changeViewTab("managed")}>Managed</button>
+      <button type="button" role="tab" aria-selected={viewTab === "engine"} onclick={() => changeViewTab("engine")}>Engine</button>
+      <button type="button" role="tab" aria-selected={viewTab === "dht"} onclick={() => changeViewTab("dht")}>DHT</button>
+    </div>
+    {#if viewTab === "managed"}<SearchBox bind:value={search} label="Search torrents" placeholder="Search name or info hash" />{/if}
+  </div>
 
   <div class="workspace" class:with-details={!!selected}>
     <Surface padding="none" class="torrent-list">
-      {#if error}
+      {#if viewTab === "engine"}
+        {#if engineListError}
+          <div class="state"><InlineError title="Couldn't read the torrent engine" message={engineListError} retry={() => void loadEngineList()} /></div>
+        {:else if engineList === null}
+          <div class="state muted">Reading the torrent engine…</div>
+        {:else if engineList.torrents.length === 0}
+          <EmptyState icon="torrent" title="The engine has no torrents" message="Torrents added through Ravyn or directly in rqbit will appear here." />
+        {:else}
+          <div class="engine-header" aria-hidden="true"><span>Name</span><span>State</span><span>Progress</span><span>Origin</span></div>
+          <div class="rows">
+            {#each engineList.torrents as torrent, index (torrent.torrent_id ?? torrent.info_hash ?? index)}
+              {@const managed = !!torrent.info_hash && managedHashes.has(torrent.info_hash.toLowerCase())}
+              <div class="engine-row">
+                <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={19} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? `Engine torrent ${torrent.torrent_id ?? index}`}</strong><small>{torrent.info_hash ?? "No info hash reported"}</small></span></span>
+                <span>{torrent.state ?? "unknown"}</span>
+                <span>{torrent.progress !== null ? `${Math.round(torrent.progress * 100)}%` : formatBytes(torrent.downloaded_bytes)}</span>
+                <span><StatusBadge label={managed ? "Managed by Ravyn" : "Engine only"} severity={managed ? "success" : "warning"} /></span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {:else if viewTab === "dht"}
+        {#if dhtTableError}
+          <div class="state"><InlineError title="Couldn't read the DHT routing table" message={dhtTableError} retry={() => void loadDhtTable()} /></div>
+        {:else if dhtTable === null}
+          <div class="state muted">Reading the DHT routing table…</div>
+        {:else}
+          <div class="dht-command">
+            <span class="muted">{dhtStats ? `${dhtStats.routing_table_size} IPv4 · ${dhtStats.routing_table_size_v6} IPv6 nodes · ${dhtStats.outstanding_requests} outstanding requests` : "DHT routing table"}</span>
+            <div class="dht-actions"><Button variant="subtle" onclick={() => void copyDhtTable()}><Icon name="copy" size={14} /> Copy JSON</Button><Button variant="subtle" onclick={() => void loadDhtTable()}><Icon name="refresh" size={14} /> Refresh</Button></div>
+          </div>
+          <div class="dht-tables">
+            <section><h3>IPv4</h3><pre class="json">{JSON.stringify(dhtTable.v4, null, 2)}</pre></section>
+            <section><h3>IPv6</h3><pre class="json">{JSON.stringify(dhtTable.v6, null, 2)}</pre></section>
+          </div>
+        {/if}
+      {:else if error}
         <div class="state"><InlineError title="Couldn't load torrents" message={error} retry={() => void load()} /></div>
       {:else if loading}
         <div class="state muted">Loading torrent engine…</div>
@@ -325,7 +417,20 @@
 <style>
   .page { height: 100%; display: flex; flex-direction: column; min-width: 0; }
   .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); padding: 0 var(--page-padding) var(--space-4); }
-  .toolbar { padding: 0 var(--page-padding) var(--space-4); }
+  .toolbar { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--page-padding) var(--space-4); }
+  .view-tabs { display: inline-flex; padding: 3px; border: 1px solid var(--stroke-control); border-radius: var(--radius-medium); background: var(--bg-control); }
+  .view-tabs button { min-height: 30px; padding: 0 var(--space-3); border: 0; border-radius: calc(var(--radius-medium) - 2px); color: var(--text-secondary); background: transparent; }
+  .view-tabs button[aria-selected="true"] { color: var(--text-primary); background: var(--surface-card); box-shadow: var(--shadow-control); font-weight: 600; }
+  .engine-header, .engine-row { display: grid; grid-template-columns: minmax(240px, 1.8fr) 130px 110px 150px; gap: var(--space-3); align-items: center; }
+  .engine-header { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
+  .engine-row { min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
+  .engine-row:hover { background: var(--bg-subtle-hover); }
+  .dht-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
+  .dht-actions { display: flex; gap: var(--space-1); }
+  .dht-tables { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); padding: var(--space-4); }
+  .dht-tables h3 { margin: 0 0 var(--space-2); font-size: var(--text-caption); text-transform: uppercase; letter-spacing: .04em; color: var(--text-tertiary); }
+  .dht-tables .json { margin: 0; padding: var(--space-3); overflow: auto; max-height: 100%; font-size: var(--text-caption); background: var(--bg-subtle); border-radius: var(--radius-control); }
+  @media (max-width: 900px) { .dht-tables { grid-template-columns: 1fr; } }
   .toolbar :global(.search-box) { width: min(520px, 100%); }
   .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; gap: var(--space-3); padding: 0 var(--page-padding) var(--page-padding); }
   .workspace.with-details { grid-template-columns: minmax(0, 1fr) minmax(340px, 390px); }

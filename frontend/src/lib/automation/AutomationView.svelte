@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { AutomationRule, JobKind, RuleInput, ScheduleExecutionRecord, ScheduleInput, ScheduleRecord } from "../api/types";
+  import type { AutomationRule, JobKind, RuleInput, RulePreview, ScheduleExecutionRecord, ScheduleInput, ScheduleRecord } from "../api/types";
   import Button from "../components/Button.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Dialog from "../components/Dialog.svelte";
@@ -52,6 +52,14 @@
   let historyLoading = $state(false);
   let historyError = $state<string | null>(null);
   let executionBusy = $state<string | null>(null);
+
+  let previewOpen = $state(false);
+  let previewUrl = $state("");
+  let previewExtension = $state("");
+  let previewMime = $state("");
+  let previewBusy = $state(false);
+  let previewResult = $state<RulePreview | null>(null);
+  let previewError = $state<string | null>(null);
 
   let deleteKind = $state<"rule" | "schedule" | null>(null);
   let deleteId = $state<string | null>(null);
@@ -239,6 +247,30 @@
     return ["queued", "claimed", "running"].includes(state);
   }
 
+  async function runRulePreview(): Promise<void> {
+    if (!connection.client || !previewUrl.trim() || previewBusy) return;
+    previewBusy = true;
+    previewError = null;
+    try {
+      previewResult = await connection.client.previewRules({
+        request: { kind: "http", source: previewUrl.trim() },
+        mime: previewMime.trim() || null,
+        extension: previewExtension.trim().replace(/^\./, "") || null,
+      });
+    } catch (cause) {
+      previewError = describeError(cause);
+      previewResult = null;
+    } finally {
+      previewBusy = false;
+    }
+  }
+
+  function openRulePreview(): void {
+    previewResult = null;
+    previewError = null;
+    previewOpen = true;
+  }
+
   function requestDelete(kind: "rule" | "schedule", id: string): void {
     deleteKind = kind;
     deleteId = id;
@@ -267,6 +299,9 @@
 <div class="page">
   <PageHeader title="Automation" description="Organize incoming downloads with rules and run recurring tasks on a schedule.">
     {#snippet actions()}
+      {#if tab === "rules"}
+        <Button variant="standard" onclick={openRulePreview}><Icon name="search" size={16} /> Test rules</Button>
+      {/if}
       <Button variant="accent" onclick={() => tab === "rules" ? openRule() : (scheduleOpen = true)}><Icon name="add" size={16} /> {tab === "rules" ? "New rule" : "New schedule"}</Button>
     {/snippet}
   </PageHeader>
@@ -365,6 +400,54 @@
   {#snippet footer()}<Button variant="accent" onclick={() => (historySchedule = null)}>Done</Button>{/snippet}
 </Dialog>
 
+<Dialog open={previewOpen} title="Test rules" size="large" onClose={() => !previewBusy && (previewOpen = false)} preventClose={previewBusy}>
+  <div class="form">
+    <TextField bind:value={previewUrl} label="URL to test" placeholder="https://example.com/videos/movie.mkv" />
+    <div class="two-column">
+      <TextField bind:value={previewExtension} label="File extension" placeholder="mkv (optional)" />
+      <TextField bind:value={previewMime} label="MIME type" placeholder="video/x-matroska (optional)" />
+    </div>
+    {#if previewError}
+      <InlineError title="Couldn't preview the rules" message={previewError} retry={() => void runRulePreview()} />
+    {:else if previewResult}
+      {#if previewResult.matches.length === 0}
+        <EmptyState icon="rule" title="No rules match" message="No enabled rule matches this URL, extension, and MIME type." />
+      {:else}
+        <div class="preview-results">
+          <h3 class="preview-heading">Matched rules</h3>
+          <ul class="preview-matches">
+            {#each previewResult.matches as match (match.id)}
+              <li>
+                <strong>{match.name}</strong>
+                <span class="preview-meta">
+                  Priority {match.priority}
+                  {#if match.destination_selected} · sets the destination{/if}
+                  {#if match.destination_shadowed} · destination shadowed by a higher-priority rule{/if}
+                  {#if match.speed_limit_selected} · sets the speed limit{/if}
+                  {#if match.speed_limit_shadowed} · speed limit shadowed{/if}
+                </span>
+              </li>
+            {/each}
+          </ul>
+          <h3 class="preview-heading">Resulting download</h3>
+          <dl class="preview-outcome">
+            <dt>Destination</dt>
+            <dd>{previewResult.result.destination ?? "Library default"}</dd>
+            <dt>Tags</dt>
+            <dd>{previewResult.result.options?.tags?.length ? previewResult.result.options.tags.join(", ") : "None"}</dd>
+            <dt>Speed limit</dt>
+            <dd>{previewResult.result.speed_limit_bps ? `${previewResult.result.speed_limit_bps} B/s` : "Unlimited"}</dd>
+          </dl>
+        </div>
+      {/if}
+    {/if}
+  </div>
+  {#snippet footer()}
+    <Button disabled={previewBusy} onclick={() => (previewOpen = false)}>Close</Button>
+    <Button variant="accent" disabled={previewBusy || !previewUrl.trim()} onclick={() => void runRulePreview()}>{previewBusy ? "Testing…" : "Run test"}</Button>
+  {/snippet}
+</Dialog>
+
 <ConfirmDialog open={!!deleteKind} title={`Delete ${deleteKind ?? "item"}?`} message={`This ${deleteKind ?? "item"} will be removed permanently.`} confirmLabel="Delete" destructive busy={deleteBusy} error={deleteError} onConfirm={() => void confirmDelete()} onClose={() => !deleteBusy && (deleteKind = null)} />
 
 <style>
@@ -402,6 +485,14 @@
   .execution-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--stroke-control-strong); }
   .execution-dot.active { background: var(--accent-default); box-shadow: 0 0 0 3px var(--accent-subtle); }
   .form { display: flex; flex-direction: column; gap: var(--space-4); }
+  .preview-results { display: flex; flex-direction: column; gap: var(--space-2); }
+  .preview-heading { margin: var(--space-2) 0 0; font-size: var(--text-caption); text-transform: uppercase; letter-spacing: .04em; color: var(--text-tertiary); }
+  .preview-matches { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .preview-matches li { display: flex; flex-direction: column; padding: var(--space-2) var(--space-3); border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); }
+  .preview-meta { color: var(--text-secondary); font-size: var(--text-caption); }
+  .preview-outcome { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; font-size: var(--text-body); }
+  .preview-outcome dt { color: var(--text-secondary); }
+  .preview-outcome dd { margin: 0; word-break: break-all; }
   .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
   .field { display: flex; flex-direction: column; gap: var(--space-1); }
   @media (max-width: 850px) { .controls { align-items: stretch; flex-wrap: wrap; } .controls :global(.search-box) { order: 3; width: 100%; margin-left: 0; } .automation-item { grid-template-columns: 38px minmax(0, 1fr); } .item-actions { grid-column: 2; justify-content: flex-start; } }

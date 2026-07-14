@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { BulkJobAction, Job, JobActionRecord, JobLogRecord, JobOutput } from "../api/types";
+  import type { BulkJobAction, Job, JobActionRecord, JobLogRecord, JobOutput, TrustReport } from "../api/types";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
@@ -28,6 +28,7 @@
     { id: "overview", label: "Overview" },
     { id: "outputs", label: "Outputs" },
     { id: "activity", label: "Activity" },
+    { id: "security", label: "Security" },
     { id: "advanced", label: "Advanced" },
   ];
 
@@ -38,6 +39,12 @@
   let activityError = $state<string | null>(null);
   let segmentSummary = $state<string | null>(null);
   let actionBusy = $state(false);
+  let trust = $state<TrustReport | null>(null);
+  let trustError = $state<string | null>(null);
+  let tags = $state<string[] | null>(null);
+  let tagsDraft = $state("");
+  let tagsEditing = $state(false);
+  let tagsBusy = $state(false);
 
   const service = $derived(connection.client ? new JobsService(connection.client) : null);
 
@@ -54,12 +61,27 @@
       logs = null;
       activityError = null;
       segmentSummary = null;
+      trust = null;
+      trustError = null;
+      tags = null;
+      tagsDraft = "";
+      tagsEditing = false;
       tab = "overview";
       loadedForJobId = jobId;
     }
 
     if (!service || !jobId) return;
-    if (tab === "outputs" && outputs === null) {
+    if (tab === "overview" && tags === null) {
+      service
+        .tags(jobId)
+        .then((names) => (tags = names))
+        .catch(() => (tags = []));
+    } else if (tab === "security" && trust === null && trustError === null) {
+      service
+        .trust(jobId)
+        .then((report) => (trust = report))
+        .catch((error) => (trustError = describeError(error)));
+    } else if (tab === "outputs" && outputs === null) {
       service
         .outputs(jobId)
         .then((page) => (outputs = page.items))
@@ -122,6 +144,34 @@
     } finally {
       actionBusy = false;
     }
+  }
+
+  function startTagEditing(): void {
+    tagsDraft = (tags ?? []).join(", ");
+    tagsEditing = true;
+  }
+
+  async function saveTags(): Promise<void> {
+    if (!service || tagsBusy) return;
+    tagsBusy = true;
+    try {
+      const next = tagsDraft
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0);
+      tags = await service.replaceTags(jobId, next);
+      tagsEditing = false;
+      notifications.info("Tags updated");
+    } catch (error) {
+      notifications.error("Couldn't update tags", describeError(error));
+    } finally {
+      tagsBusy = false;
+    }
+  }
+
+  function retryTrust(): void {
+    trustError = null;
+    trust = null;
   }
 
   function retryOutputs(): void {
@@ -196,10 +246,34 @@
               <dt>Expected SHA-256</dt>
               <dd class="wrap mono">{job.expected_sha256}</dd>
             {/if}
-            {#if job.options_json.tags?.length}
-              <dt>Tags</dt>
-              <dd>{job.options_json.tags.join(", ")}</dd>
-            {/if}
+            <dt>Tags</dt>
+            <dd>
+              {#if tagsEditing}
+                <div class="tag-editor">
+                  <input
+                    class="tag-input"
+                    type="text"
+                    bind:value={tagsDraft}
+                    placeholder="tag-one, tag-two"
+                    aria-label="Tags, comma separated"
+                    disabled={tagsBusy}
+                    onkeydown={(event) => {
+                      if (event.key === "Enter") void saveTags();
+                      else if (event.key === "Escape") tagsEditing = false;
+                    }}
+                  />
+                  <Button variant="subtle" disabled={tagsBusy} onclick={() => void saveTags()}>Save</Button>
+                  <Button variant="subtle" disabled={tagsBusy} onclick={() => (tagsEditing = false)}>Cancel</Button>
+                </div>
+              {:else}
+                <span class="tag-row">
+                  <span>{tags === null ? "Loading…" : tags.length > 0 ? tags.join(", ") : "None"}</span>
+                  {#if tags !== null}
+                    <IconButton icon="edit" label="Edit tags" variant="subtle" onclick={startTagEditing} />
+                  {/if}
+                </span>
+              {/if}
+            </dd>
             <dt>Added</dt>
             <dd>{formatAbsoluteTime(job.created_at)}</dd>
             {#if job.started_at}
@@ -265,6 +339,36 @@
               {/each}
             </ul>
           {/if}
+        {/if}
+      {:else if tab === "security"}
+        {#if trustError}
+          <InlineError title="Couldn't load the trust report" message={trustError} retry={retryTrust} />
+        {:else if trust === null}
+          <Skeleton height="120px" />
+        {:else}
+          <div class="trust-summary trust-{trust.level}">
+            <Icon name="shield" size={20} />
+            <div>
+              <strong>Trust score: {trust.score}/100</strong>
+              <span class="trust-level">{trust.level}</span>
+            </div>
+          </div>
+          <p class="muted trust-note">
+            Advisory evaluation of the download source. It informs, it does not block.
+          </p>
+          <ul class="trust-factors">
+            {#each trust.factors as factor (factor.code)}
+              <li class="trust-factor" class:satisfied={factor.satisfied}>
+                <span class="factor-points" class:positive={factor.points > 0 && factor.satisfied}>
+                  {factor.satisfied ? (factor.points > 0 ? `+${factor.points}` : factor.points) : "—"}
+                </span>
+                <div>
+                  <span class="factor-label">{factor.label}</span>
+                  <span class="factor-explanation">{factor.explanation}</span>
+                </div>
+              </li>
+            {/each}
+          </ul>
         {/if}
       {:else if tab === "advanced"}
         <h3 class="subheading">Segments</h3>
@@ -405,6 +509,84 @@
   }
   .log-time {
     flex: none;
+    color: var(--text-tertiary);
+  }
+  .tag-row {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .tag-editor {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .tag-input {
+    flex: 1;
+    min-width: 0;
+    min-height: 26px;
+    padding: 0 var(--space-2);
+    font: inherit;
+    font-size: var(--text-caption);
+    color: var(--text-primary);
+    background: var(--bg-subtle);
+    border: 1px solid var(--stroke-divider);
+    border-radius: var(--radius-control);
+  }
+  .trust-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid var(--stroke-divider);
+    border-radius: var(--radius-control);
+    background: var(--bg-subtle);
+  }
+  .trust-summary strong {
+    display: block;
+  }
+  .trust-level {
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    text-transform: capitalize;
+  }
+  .trust-note {
+    font-size: var(--text-caption);
+    margin: var(--space-2) 0 var(--space-3);
+  }
+  .trust-factors {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .trust-factor {
+    display: flex;
+    gap: var(--space-2);
+    font-size: var(--text-caption);
+    color: var(--text-secondary);
+  }
+  .trust-factor.satisfied {
+    color: var(--text-primary);
+  }
+  .factor-points {
+    flex: none;
+    width: 32px;
+    text-align: right;
+    font-family: "Consolas", ui-monospace, monospace;
+    color: var(--text-tertiary);
+  }
+  .factor-points.positive {
+    color: var(--status-success, #2e7d32);
+  }
+  .factor-label {
+    display: block;
+    font-weight: 600;
+  }
+  .factor-explanation {
+    display: block;
     color: var(--text-tertiary);
   }
   .json {

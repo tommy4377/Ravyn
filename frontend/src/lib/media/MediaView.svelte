@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { Job, MediaArchiveRecord, MediaItemRecord, MediaItemSummary } from "../api/types";
+  import type { Job, MediaArchiveRecord, MediaItemOutputRecord, MediaItemRecord, MediaItemSummary } from "../api/types";
   import Button from "../components/Button.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import EmptyState from "../components/EmptyState.svelte";
@@ -15,6 +15,7 @@
   import { connection } from "../stores/connection.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
+  import { openNativePath, revealNativePath } from "../native/tauri";
   import { formatAbsoluteTime, formatBytes, formatPercent, jobDisplayName } from "../util/format";
 
   type MediaTab = "downloads" | "archive";
@@ -32,6 +33,9 @@
   let detailsError = $state<string | null>(null);
   let retryBusy = $state<string | null>(null);
   let retryAllBusy = $state(false);
+  let expandedItemId = $state<string | null>(null);
+  let expandedOutputs = $state<MediaItemOutputRecord[] | null>(null);
+  let expandedOutputsError = $state<string | null>(null);
   let archiveTarget = $state<MediaArchiveRecord | null>(null);
   let archiveBusy = $state(false);
   let archiveError = $state<string | null>(null);
@@ -94,6 +98,9 @@
 
   $effect(() => { void load(); });
   $effect(() => {
+    expandedItemId = null;
+    expandedOutputs = null;
+    expandedOutputsError = null;
     if (!selectedJobId) {
       summary = null;
       items = [];
@@ -102,6 +109,34 @@
     }
     void loadDetails(selectedJobId);
   });
+
+  async function toggleItemOutputs(item: MediaItemRecord): Promise<void> {
+    if (expandedItemId === item.id) {
+      expandedItemId = null;
+      expandedOutputs = null;
+      expandedOutputsError = null;
+      return;
+    }
+    if (!connection.client) return;
+    expandedItemId = item.id;
+    expandedOutputs = null;
+    expandedOutputsError = null;
+    try {
+      const outputs = await connection.client.listMediaItemOutputs(item.job_id, item.id);
+      if (expandedItemId === item.id) expandedOutputs = outputs;
+    } catch (cause) {
+      if (expandedItemId === item.id) expandedOutputsError = describeError(cause);
+    }
+  }
+
+  async function runNativePathAction(path: string, action: "open" | "reveal"): Promise<void> {
+    try {
+      if (action === "open") await openNativePath(path);
+      else await revealNativePath(path);
+    } catch (cause) {
+      notifications.error(action === "open" ? "Couldn't open this path" : "Couldn't reveal this path", describeError(cause));
+    }
+  }
 
   async function retryItem(item: MediaItemRecord): Promise<void> {
     if (!connection.client || retryBusy) return;
@@ -226,7 +261,28 @@
             {#if (summary?.failed ?? 0) > 0}<Button variant="accent" disabled={retryAllBusy} onclick={() => void retryFailed()}><Icon name="refresh" size={16} /> {retryAllBusy ? "Retrying…" : "Retry all failed"}</Button>{/if}
             <div class="item-list">
               {#each items as item (item.id)}
-                <div class="item-row"><span class="item-state {statusSeverity(item.state)}"><Icon name={item.state === "completed" ? "check-circle" : item.state === "failed" ? "alert-circle" : "video"} size={16} /></span><span><strong>{item.title ?? item.item_key}</strong><small>{item.playlist_index ? `${item.playlist_index}${item.playlist_count ? ` of ${item.playlist_count}` : ""}` : item.output_path ?? item.webpage_url ?? item.state}</small>{#if item.error}<em>{item.error}</em>{/if}</span><StatusBadge label={item.state} severity={statusSeverity(item.state)} />{#if item.state === "failed"}<IconButton icon="refresh" label="Retry item" variant="subtle" disabled={retryBusy === item.id} onclick={() => void retryItem(item)} />{/if}</div>
+                <div class="item-row"><span class="item-state {statusSeverity(item.state)}"><Icon name={item.state === "completed" ? "check-circle" : item.state === "failed" ? "alert-circle" : "video"} size={16} /></span><span><strong>{item.title ?? item.item_key}</strong><small>{item.playlist_index ? `${item.playlist_index}${item.playlist_count ? ` of ${item.playlist_count}` : ""}` : item.output_path ?? item.webpage_url ?? item.state}</small>{#if item.error}<em>{item.error}</em>{/if}</span><StatusBadge label={item.state} severity={statusSeverity(item.state)} /><span class="item-buttons"><IconButton icon={expandedItemId === item.id ? "chevron-up" : "chevron-down"} label={expandedItemId === item.id ? "Hide produced files" : "Show produced files"} variant="subtle" onclick={() => void toggleItemOutputs(item)} />{#if item.state === "failed"}<IconButton icon="refresh" label="Retry item" variant="subtle" disabled={retryBusy === item.id} onclick={() => void retryItem(item)} />{/if}</span></div>
+                {#if expandedItemId === item.id}
+                  <div class="item-outputs">
+                    {#if expandedOutputsError}
+                      <InlineError title="Couldn't load produced files" message={expandedOutputsError} retry={() => void toggleItemOutputs(item)} />
+                    {:else if expandedOutputs === null}
+                      <p class="muted">Loading produced files…</p>
+                    {:else if expandedOutputs.length === 0}
+                      <p class="muted">No files recorded for this item yet.</p>
+                    {:else}
+                      {#each expandedOutputs as record (record.output.id)}
+                        <div class="output-row">
+                          <span class="output-path" title={record.output.current_path}>{record.output.relative_path}</span>
+                          <span class="output-role">{record.role}</span>
+                          <span class="output-size">{formatBytes(record.output.size_bytes)}</span>
+                          <IconButton icon="external-link" label="Open file" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "open")} />
+                          <IconButton icon="folder-open" label="Show in Explorer" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "reveal")} />
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                {/if}
               {/each}
               {#if items.length === 0}<EmptyState icon="list" title="No media item records" message="Single-file downloads may not expose a playlist item list until processing begins." />{/if}
             </div>
@@ -286,6 +342,11 @@
   .item-row strong, .item-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-row small { color: var(--text-tertiary); }
   .item-row em { color: var(--status-error); font-size: var(--text-caption); font-style: normal; }
+  .item-buttons { display: flex; align-items: center; gap: var(--space-1); }
+  .item-outputs { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--stroke-divider); background: var(--bg-subtle); border-radius: var(--radius-control); }
+  .output-row { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; }
+  .output-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Consolas", ui-monospace, monospace; font-size: var(--text-caption); }
+  .output-role, .output-size { flex: none; color: var(--text-tertiary); font-size: var(--text-caption); }
   .item-state { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-medium); color: var(--text-tertiary); background: var(--bg-subtle); }
   .item-state.success { color: var(--status-success); background: var(--status-success-bg); }
   .item-state.error { color: var(--status-error); background: var(--status-error-bg); }

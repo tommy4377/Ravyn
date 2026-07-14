@@ -24,6 +24,7 @@ import type {
   PageQueryParams,
   SegmentRecord,
   TorrentOptions,
+  TrustReport,
   UpdateJob,
 } from "../api/types";
 
@@ -134,6 +135,34 @@ export class JobsService {
 
   logs(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<JobLogRecord>> {
     return this.client.listJobLogs(id, params, signal);
+  }
+
+  tags(id: string, signal?: AbortSignal): Promise<string[]> {
+    return this.client.getJobTags(id, signal);
+  }
+
+  replaceTags(id: string, tags: string[]): Promise<string[]> {
+    return this.client.replaceJobTags(id, tags);
+  }
+
+  trust(id: string, signal?: AbortSignal): Promise<TrustReport> {
+    return this.client.getJobTrust(id, signal);
+  }
+
+  /** Create a download from a Metalink (.metalink / .meta4) XML document. */
+  addMetalink(document: string, options?: {
+    destination?: string;
+    priority?: number;
+    speedLimitBps?: number;
+    overwrite?: boolean;
+  }): Promise<Job> {
+    return this.client.createMetalinkJob({
+      document,
+      destination: options?.destination || undefined,
+      priority: options?.priority,
+      speed_limit_bps: options?.speedLimitBps,
+      overwrite: options?.overwrite,
+    });
   }
 
   /**

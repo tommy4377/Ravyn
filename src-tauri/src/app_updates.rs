@@ -633,8 +633,8 @@ fn restore_pending_update(
         };
         verify_staged_installer(&pending)?;
 
-        let mut inner = app
-            .state::<AppUpdateState>()
+        let state = app.state::<AppUpdateState>();
+        let mut inner = state
             .0
             .lock()
             .map_err(|_| "application update state is unavailable".to_owned())?;
