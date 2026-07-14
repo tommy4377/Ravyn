@@ -62,6 +62,10 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --locked --workspace --all-targets
 
+      - name: Parse generated updater helper
+        shell: pwsh
+        run: ./tools/validate_update_helper.ps1
+
       - name: Validate release signing configuration
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -278,12 +282,34 @@ jobs:
           }
 
           $env:RAVYN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ravyn-smoke-data'
+          $readyMarker = Join-Path $env:RUNNER_TEMP 'ravyn-desktop-ready.json'
+          Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+          $env:RAVYN_DESKTOP_READY_FILE = $readyMarker
           $process = Start-Process -FilePath $installedExe -PassThru
-          Start-Sleep -Seconds 10
-          if ($process.HasExited) {
-            throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+
+          $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
+          while (-not (Test-Path $readyMarker) -and [DateTimeOffset]::UtcNow -lt $deadline) {
+            if ($process.HasExited) {
+              throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+            }
+            Start-Sleep -Milliseconds 250
           }
+          if (-not (Test-Path $readyMarker)) {
+            throw 'Ravyn did not publish its desktop readiness marker within 45 seconds.'
+          }
+
+          $ready = Get-Content $readyMarker -Raw | ConvertFrom-Json
+          if ($ready.schema -ne 1 -or $ready.process_id -ne $process.Id) {
+            throw 'The desktop readiness marker does not describe the launched process.'
+          }
+          $health = Invoke-RestMethod -Uri "$($ready.base_url)/health/ready" -TimeoutSec 10
+          if (-not $health.ready -or -not $health.database_writable -or -not $health.progress_writer_running) {
+            throw "The installed Ravyn backend failed readiness: $($health | ConvertTo-Json -Compress)"
+          }
+
           Stop-Process -Id $process.Id -Force
+          Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+          Remove-Item Env:RAVYN_DESKTOP_READY_FILE -ErrorAction SilentlyContinue
 
           & $uninstaller /S
           if ($LASTEXITCODE -ne 0) {

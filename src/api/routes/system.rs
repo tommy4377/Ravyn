@@ -722,6 +722,17 @@ pub(super) async fn patch_settings(
     Json(patch): Json<PersistentSettingsPatch>,
 ) -> Result<Json<SettingsResponse>> {
     let result: Result<SettingsResponse> = async {
+        let _maintenance = if patch.library_root.is_some() {
+            Some(s.library_maintenance_lock.lock().await)
+        } else {
+            None
+        };
+        if patch.library_root.is_some() && s.repository.library_move_blocks_new_jobs().await? {
+            return Err(crate::error::RavynError::Conflict(
+                "the Library root cannot be edited while a Library move is active or waiting for restart"
+                    .into(),
+            ));
+        }
         let secret_issues = validate_settings_secret_references(&s.repository, &patch).await;
         if let Some(issue) = secret_issues.into_iter().next() {
             return Err(crate::error::RavynError::Invalid(format!(
@@ -765,6 +776,13 @@ pub(super) async fn patch_settings(
 
 pub(super) async fn reset_settings(State(s): State<ApiState>) -> Result<Json<SettingsResponse>> {
     let result: Result<SettingsResponse> = async {
+        let _maintenance = s.library_maintenance_lock.lock().await;
+        if s.repository.library_move_blocks_new_jobs().await? {
+            return Err(crate::error::RavynError::Conflict(
+                "settings cannot be reset while a Library move is active or waiting for restart"
+                    .into(),
+            ));
+        }
         s.repository.reset_persistent_settings().await?;
         let values = PersistentSettings::from_config(&s.base_config);
         s.manager.apply_live_settings(&values)?;

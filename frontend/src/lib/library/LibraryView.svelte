@@ -21,11 +21,13 @@
   import StatusBadge from "../components/StatusBadge.svelte";
   import Surface from "../components/Surface.svelte";
   import Tabs from "../components/Tabs.svelte";
+  import TextField from "../components/TextField.svelte";
   import { openNativePath, revealNativePath } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes } from "../util/format";
   import LibraryRelocationDialog from "./LibraryRelocationDialog.svelte";
+  import LibraryStatisticsDialog from "./LibraryStatisticsDialog.svelte";
   import {
     groupLibraryDuplicates,
     libraryTypeLabel,
@@ -49,9 +51,14 @@
 
   let importOpen = $state(false);
   let importPath = $state("");
+  let importTags = $state("");
+  let importMaxEntries = $state("100000");
+  let importMaxDepth = $state("64");
   let importBusy = $state(false);
+  let importCancelBusy = $state(false);
   let importStatus = $state<LibraryImportStatus | null>(null);
   let relocationOpen = $state(false);
+  let statisticsOpen = $state(false);
 
   let removeEntry = $state<LibraryEntry | null>(null);
   let removeBusy = $state(false);
@@ -167,12 +174,31 @@
   });
 
   $effect(() => {
+    const client = connection.client;
+    if (!client) return;
+    void client.getLibraryImportStatus().then((status) => {
+      importStatus = status.run_id ? status : null;
+    }).catch(() => {
+      // Import status is secondary to the main Library list.
+    });
+  });
+
+  $effect(() => {
     if (!importStatus?.running || !connection.client) return;
     const timer = setInterval(async () => {
       try {
+        const previousRun = importStatus?.run_id;
         importStatus = await connection.client!.getLibraryImportStatus();
-        if (!importStatus.running) {
-          notifications.info(`Library import completed: ${importStatus.imported} item(s) added`);
+        if (!importStatus.running && importStatus.run_id === previousRun) {
+          if (importStatus.cancelled) {
+            notifications.info("Library import cancelled", `${importStatus.imported} item(s) were added before cancellation.`);
+          } else if (importStatus.truncated) {
+            notifications.warning("Library import reached its scan limit", `${importStatus.imported} item(s) added. Increase the scan limit to continue.`);
+          } else if (importStatus.errors.length > 0) {
+            notifications.warning("Library import completed with warnings", `${importStatus.imported} item(s) added · ${importStatus.errors.length} warning(s)`);
+          } else {
+            notifications.info(`Library import completed: ${importStatus.imported} item(s) added`);
+          }
           void load();
         }
       } catch {
@@ -186,13 +212,33 @@
     if (!connection.client || !importPath.trim()) return;
     importBusy = true;
     try {
-      importStatus = await connection.client.startLibraryImport({ path: importPath.trim() });
+      const maxEntries = Number.parseInt(importMaxEntries, 10);
+      const maxDepth = Number.parseInt(importMaxDepth, 10);
+      importStatus = await connection.client.startLibraryImport({
+        path: importPath.trim(),
+        tags: importTags.split(",").map((tag) => tag.trim()).filter(Boolean),
+        max_entries: Number.isFinite(maxEntries) ? maxEntries : 100_000,
+        max_depth: Number.isFinite(maxDepth) ? maxDepth : 64,
+      });
       importOpen = false;
       notifications.info("Library import started");
     } catch (cause) {
       notifications.error("Couldn't start the library import", describeError(cause));
     } finally {
       importBusy = false;
+    }
+  }
+
+  async function cancelImport(): Promise<void> {
+    if (!connection.client || !importStatus?.running || importCancelBusy) return;
+    importCancelBusy = true;
+    try {
+      importStatus = await connection.client.cancelLibraryImport();
+      notifications.info("Cancelling Library import", "The current file finishes safely before the scan stops.");
+    } catch (cause) {
+      notifications.error("Couldn't cancel the Library import", describeError(cause));
+    } finally {
+      importCancelBusy = false;
     }
   }
 
@@ -291,6 +337,7 @@
     return [
       { id: "verify", label: "Verify library", icon: "verify", onSelect: () => void verifyLibrary() },
       { id: "relocate", label: "Find moved files", icon: "restore", onSelect: () => (relocationOpen = true) },
+      { id: "statistics", label: "Library statistics", icon: "speed", onSelect: () => (statisticsOpen = true) },
       { id: "refresh", label: "Refresh", icon: "refresh", separatorBefore: true, onSelect: () => void load() },
     ];
   }
@@ -319,7 +366,13 @@
     <div class="status-strip">
       <CompactSummary items={summaryItems} ariaLabel="Library summary" />
       {#if importStatus?.running}
-        <span class="import-status"><Icon name="spinner" size={14} /> Importing {importStatus.scanned} scanned · {importStatus.imported} added</span>
+        <span class="import-status" role="status">
+          <Icon name="spinner" size={14} />
+          {importStatus.cancel_requested ? "Stopping import" : "Importing"} · {importStatus.scanned} scanned · {importStatus.imported} added
+        </span>
+        <Button variant="subtle" disabled={importCancelBusy || importStatus.cancel_requested} onclick={() => void cancelImport()}>
+          <Icon name="cancel" size={14} /> {importCancelBusy || importStatus.cancel_requested ? "Stopping…" : "Cancel import"}
+        </Button>
       {/if}
     </div>
   {/snippet}
@@ -452,12 +505,22 @@
   <div class="dialog-stack">
     <p>Ravyn scans the folder, classifies supported files, and adds them to the library without moving the originals.</p>
     <PathPicker bind:value={importPath} label="Folder" placeholder="Choose a folder to scan" />
+    <TextField bind:value={importTags} label="Tags" placeholder="imported, archive" hint="Optional comma-separated labels applied to every imported file." />
+    <details class="advanced">
+      <summary>Advanced scan limits</summary>
+      <div class="two-column">
+        <TextField bind:value={importMaxEntries} label="Maximum entries" inputmode="numeric" hint="Stops safely when the limit is reached." />
+        <TextField bind:value={importMaxDepth} label="Maximum folder depth" inputmode="numeric" hint="Symlinks are never followed." />
+      </div>
+    </details>
   </div>
   {#snippet footer()}
     <Button disabled={importBusy} onclick={() => (importOpen = false)}>Cancel</Button>
     <Button variant="accent" disabled={importBusy || !importPath.trim()} onclick={() => void startImport()}>{importBusy ? "Starting…" : "Start import"}</Button>
   {/snippet}
 </Dialog>
+
+<LibraryStatisticsDialog open={statisticsOpen} onClose={() => (statisticsOpen = false)} />
 
 <LibraryRelocationDialog
   open={relocationOpen}
@@ -523,11 +586,14 @@
   .notice.warning { color: var(--status-warning); background: var(--status-warning-bg); }
   .dialog-stack { display: flex; flex-direction: column; gap: var(--space-4); }
   .dialog-stack p { margin: 0; color: var(--text-secondary); }
+  .advanced summary { cursor: default; font-weight: 600; }
+  .two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); padding-top: var(--space-3); }
   @media (max-width: 1180px) {
     .table-header, .library-row { grid-template-columns: minmax(230px, 2fr) 110px 90px 140px auto; }
     .table-header button:nth-child(5), .library-row > span:nth-child(5) { display: none; }
   }
   @media (max-width: 820px) {
+    .two-column { grid-template-columns: 1fr; }
     .status-strip { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: var(--space-2); }
     .table-header { display: none; }
     .library-row { grid-template-columns: minmax(0, 1fr) auto; }

@@ -156,7 +156,7 @@ pub(super) fn schemas() -> Value {
         },
         "LibraryImportStatus": {
             "type":"object",
-            "required":["running","scanned","imported","duplicates","skipped","errors"],
+            "required":["running","scanned","imported","duplicates","skipped","truncated","cancel_requested","cancelled","errors"],
             "properties": {
                 "run_id":{"type":["string","null"],"format":"uuid"},
                 "running":{"type":"boolean"},
@@ -165,6 +165,9 @@ pub(super) fn schemas() -> Value {
                 "imported":{"type":"integer","minimum":0},
                 "duplicates":{"type":"integer","minimum":0},
                 "skipped":{"type":"integer","minimum":0},
+                "truncated":{"type":"boolean"},
+                "cancel_requested":{"type":"boolean"},
+                "cancelled":{"type":"boolean"},
                 "errors":{"type":"array","items":{"type":"string"}},
                 "started_at":{"type":["string","null"],"format":"date-time"},
                 "completed_at":{"type":["string","null"],"format":"date-time"}
@@ -185,6 +188,62 @@ pub(super) fn schemas() -> Value {
                 "scanned":{"type":"integer","minimum":0},
                 "repaired":{"type":"integer","minimum":0},
                 "unmatched":{"type":"integer","minimum":0}
+            }
+        },
+        "LibraryMovePreflight": {
+            "type":"object",
+            "required":[
+                "source_root","destination_root","total_files","total_bytes",
+                "copy_files","copy_bytes","reusable_files","missing_files",
+                "external_entries","conflict_files","active_jobs","import_running",
+                "can_start","issues"
+            ],
+            "properties": {
+                "source_root":{"type":"string"},
+                "destination_root":{"type":"string"},
+                "total_files":{"type":"integer","minimum":0},
+                "total_bytes":{"type":"integer","minimum":0},
+                "copy_files":{"type":"integer","minimum":0},
+                "copy_bytes":{"type":"integer","minimum":0},
+                "reusable_files":{"type":"integer","minimum":0},
+                "missing_files":{"type":"integer","minimum":0},
+                "external_entries":{"type":"integer","minimum":0},
+                "conflict_files":{"type":"integer","minimum":0},
+                "available_bytes":{"type":["integer","null"],"minimum":0},
+                "active_jobs":{"type":"integer","minimum":0},
+                "import_running":{"type":"boolean"},
+                "can_start":{"type":"boolean"},
+                "issues":{"type":"array","items":{"type":"string"}}
+            }
+        },
+        "LibraryMoveStatus": {
+            "type":"object",
+            "required":[
+                "state","conflict_policy","total_files","total_bytes","copied_files",
+                "copied_bytes","verified_files","reused_files","missing_files",
+                "external_entries","conflict_files","cancel_requested","restart_required"
+            ],
+            "properties": {
+                "run_id":{"type":["string","null"],"format":"uuid"},
+                "state":{"type":"string","enum":["idle","running","cancelling","cancelled","failed","restart_required","completed","rolled_back"]},
+                "source_root":{"type":["string","null"]},
+                "destination_root":{"type":["string","null"]},
+                "conflict_policy":{"type":"string","enum":["fail","reuse_identical"]},
+                "total_files":{"type":"integer","minimum":0},
+                "total_bytes":{"type":"integer","minimum":0},
+                "copied_files":{"type":"integer","minimum":0},
+                "copied_bytes":{"type":"integer","minimum":0},
+                "verified_files":{"type":"integer","minimum":0},
+                "reused_files":{"type":"integer","minimum":0},
+                "missing_files":{"type":"integer","minimum":0},
+                "external_entries":{"type":"integer","minimum":0},
+                "conflict_files":{"type":"integer","minimum":0},
+                "cancel_requested":{"type":"boolean"},
+                "restart_required":{"type":"boolean"},
+                "error":{"type":["string","null"]},
+                "started_at":{"type":["string","null"],"format":"date-time"},
+                "updated_at":{"type":["string","null"],"format":"date-time"},
+                "completed_at":{"type":["string","null"],"format":"date-time"}
             }
         },
         "DownloadPreset": {

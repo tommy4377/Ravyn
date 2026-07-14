@@ -343,6 +343,36 @@ async fn repair_application(
     app_updates::repair_now(app).await
 }
 
+/// Cancel an active update check/download or discard the staged installer.
+#[tauri::command]
+fn cancel_app_update(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<app_updates::AppUpdateStatus, String> {
+    require_window(&window, "main")?;
+    app_updates::cancel(&app)
+}
+
+/// Apply the staged installer immediately using the same detached helper that
+/// normally runs after a regular close.
+#[tauri::command]
+fn install_app_update_now(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    if !app_updates::install_pending_on_close(&app)? {
+        return Err("no verified application update is ready to install".into());
+    }
+    // Return the IPC response before terminating the webview so the frontend
+    // does not misreport the intentional restart as a command failure.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        app.exit(0);
+    });
+    Ok(())
+}
+
 /// Called by the main window frontend once it has verified the backend
 /// connection. Shows the main window, focuses it, then closes setup.
 #[tauri::command]
@@ -426,6 +456,8 @@ pub fn run() {
             app_update_status,
             check_app_update,
             repair_application,
+            cancel_app_update,
+            install_app_update_now,
             desktop_appearance,
             open_native_path,
             reveal_native_path,

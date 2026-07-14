@@ -545,6 +545,9 @@ export interface LibraryImportStatus {
   imported: number;
   duplicates: number;
   skipped: number;
+  truncated: boolean;
+  cancel_requested: boolean;
+  cancelled: boolean;
   errors: string[];
   started_at: string | null;
   completed_at: string | null;
@@ -553,6 +556,30 @@ export interface LibraryImportStatus {
 export interface VerifyLibraryReport {
   checked: number;
   missing: number;
+}
+
+export interface CategoryStatistics {
+  files: number;
+  bytes: number;
+}
+
+export interface ActivityBucket {
+  period: string;
+  files: number;
+  bytes: number;
+}
+
+export interface PersonalStatistics {
+  total_files: number;
+  total_downloaded_bytes: number;
+  active_storage_bytes: number;
+  trashed_storage_bytes: number;
+  average_speed_bps: number;
+  saved_bandwidth_bytes: number;
+  duplicate_avoidance_count: number;
+  categories: Record<string, CategoryStatistics>;
+  monthly_activity: ActivityBucket[];
+  yearly_activity: ActivityBucket[];
 }
 
 export interface LibraryRelocationRequest {
@@ -565,6 +592,64 @@ export interface RelocationReport {
   scanned: number;
   repaired: number;
   unmatched: number;
+}
+
+export type LibraryMoveConflictPolicy = "fail" | "reuse_identical";
+
+export type LibraryMoveState =
+  | "idle"
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "failed"
+  | "restart_required"
+  | "completed"
+  | "rolled_back";
+
+export interface LibraryMoveRequest {
+  destination: string;
+  conflict_policy: LibraryMoveConflictPolicy;
+}
+
+export interface LibraryMovePreflight {
+  source_root: string;
+  destination_root: string;
+  total_files: number;
+  total_bytes: number;
+  copy_files: number;
+  copy_bytes: number;
+  reusable_files: number;
+  missing_files: number;
+  external_entries: number;
+  conflict_files: number;
+  available_bytes: number | null;
+  active_jobs: number;
+  import_running: boolean;
+  can_start: boolean;
+  issues: string[];
+}
+
+export interface LibraryMoveStatus {
+  run_id: string | null;
+  state: LibraryMoveState;
+  source_root: string | null;
+  destination_root: string | null;
+  conflict_policy: LibraryMoveConflictPolicy;
+  total_files: number;
+  total_bytes: number;
+  copied_files: number;
+  copied_bytes: number;
+  verified_files: number;
+  reused_files: number;
+  missing_files: number;
+  external_entries: number;
+  conflict_files: number;
+  cancel_requested: boolean;
+  restart_required: boolean;
+  error: string | null;
+  started_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
 }
 
 export interface DuplicateCandidate {

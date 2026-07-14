@@ -57,3 +57,13 @@ commands.allow = ["open_native_path"]
 identifier = "allow-reveal-native-path"
 description = "Allows the main Ravyn window to reveal an existing absolute local path in Windows Explorer."
 commands.allow = ["reveal_native_path"]
+
+[[permission]]
+identifier = "allow-cancel-app-update"
+description = "Allows the main Ravyn window to cancel an active update operation or discard a staged installer."
+commands.allow = ["cancel_app_update"]
+
+[[permission]]
+identifier = "allow-install-app-update-now"
+description = "Allows the main Ravyn window to apply a verified staged update immediately and restart through the detached helper."
+commands.allow = ["install_app_update_now"]

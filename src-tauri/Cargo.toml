@@ -28,6 +28,7 @@ tauri-plugin-dialog = "2"
 # Debug-only automation bridge used by the tauri-mcp test tooling.
 tauri-plugin-mcp-bridge = "0.12"
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"

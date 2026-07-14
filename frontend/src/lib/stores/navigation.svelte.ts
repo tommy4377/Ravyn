@@ -57,6 +57,7 @@ class NavigationStore {
   navigationCollapsed = $state(false);
   navigationOverlayOpen = $state(false);
   basketDrawerOpen = $state(false);
+  notificationDrawerOpen = $state(false);
   systemAccent = $state<string | null>(null);
   pendingAddKind = $state<"http" | "media" | "torrent" | null>(null);
   settingsDirty = $state(false);
@@ -180,10 +181,20 @@ class NavigationStore {
   }
 
   openBasket(): void {
+    this.notificationDrawerOpen = false;
     this.basketDrawerOpen = true;
   }
 
+  openNotifications(): void {
+    this.basketDrawerOpen = false;
+    this.notificationDrawerOpen = true;
+  }
+
   closeTransientLayers(): boolean {
+    if (this.notificationDrawerOpen) {
+      this.notificationDrawerOpen = false;
+      return true;
+    }
     if (this.basketDrawerOpen) {
       this.basketDrawerOpen = false;
       return true;

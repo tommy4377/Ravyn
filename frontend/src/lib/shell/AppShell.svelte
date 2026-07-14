@@ -14,14 +14,17 @@
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
+  import { notifications } from "../stores/notifications.svelte";
   import TorrentsView from "../torrents/TorrentsView.svelte";
   import AppBackdrop from "./AppBackdrop.svelte";
   import ConnectionBoot from "./ConnectionBoot.svelte";
   import NavigationView from "./NavigationView.svelte";
+  import NotificationHistoryDrawer from "./NotificationHistoryDrawer.svelte";
   import NotificationHost from "./NotificationHost.svelte";
   import StatusBar from "./StatusBar.svelte";
 
   navigation.init();
+  notifications.init();
   onMount(() => {
     const disposeAppearance = systemAppearance.init();
     const onKeydown = (event: KeyboardEvent): void => {
@@ -142,7 +145,7 @@
 
       {#if navigation.basketDrawerOpen}
         <button class="drawer-scrim" type="button" aria-label="Close batch queue" onclick={() => (navigation.basketDrawerOpen = false)}></button>
-        <aside class="batch-drawer" aria-label="Batch queue">
+        <aside class="side-drawer" aria-label="Batch queue">
           <header class="drawer-header">
             <div>
               <h2>Batch queue</h2>
@@ -153,6 +156,11 @@
             </button>
           </header>
           <div class="drawer-content"><BasketView /></div>
+        </aside>
+      {:else if navigation.notificationDrawerOpen}
+        <button class="drawer-scrim" type="button" aria-label="Close notifications" onclick={() => (navigation.notificationDrawerOpen = false)}></button>
+        <aside class="side-drawer" aria-label="Notification history">
+          <NotificationHistoryDrawer onClose={() => (navigation.notificationDrawerOpen = false)} />
         </aside>
       {/if}
     </div>
@@ -182,7 +190,7 @@
   .resize-handle::after { content: ""; position: absolute; left: 4px; top: 28px; bottom: 28px; width: 2px; border-radius: var(--radius-pill); background: transparent; transition: background var(--motion-fast) var(--motion-easing); }
   .resize-handle:hover::after, .resizing .resize-handle::after { background: var(--accent-default); }
   .drawer-scrim { position: absolute; z-index: 29; inset: 0; border: 0; background: rgba(0, 0, 0, .32); }
-  .batch-drawer { position: absolute; z-index: 30; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(480px, calc(100% - 56px)); border-left: 1px solid var(--stroke-surface); background: var(--surface-overlay); box-shadow: var(--shadow-flyout); backdrop-filter: blur(28px) saturate(118%); -webkit-backdrop-filter: blur(28px) saturate(118%); animation: drawer-in var(--motion-normal) var(--motion-easing); }
+  .side-drawer { position: absolute; z-index: 30; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(480px, calc(100% - 56px)); border-left: 1px solid var(--stroke-surface); background: var(--surface-overlay); box-shadow: var(--shadow-flyout); backdrop-filter: blur(28px) saturate(118%); -webkit-backdrop-filter: blur(28px) saturate(118%); animation: drawer-in var(--motion-normal) var(--motion-easing); }
   .drawer-header { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
   .drawer-header h2 { margin: 0; font-size: var(--text-subtitle); font-weight: 620; }
   .drawer-header p { margin: 2px 0 0; color: var(--text-tertiary); font-size: var(--text-caption); }
@@ -196,6 +204,6 @@
     .resize-handle { display: none; }
   }
   @media (max-width: 680px) {
-    .details-region, .batch-drawer { width: 100% !important; }
+    .details-region, .side-drawer { width: 100% !important; }
   }
 </style>

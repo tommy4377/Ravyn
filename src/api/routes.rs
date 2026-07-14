@@ -57,6 +57,13 @@ pub struct ApiState {
         Option<Arc<crate::services::manifest_refresh::RemoteManifestRefresher>>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
+    pub library_import_cancellation: Arc<
+        tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>,
+    >,
+    pub library_move_cancellation: Arc<
+        tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>,
+    >,
+    pub library_maintenance_lock: Arc<tokio::sync::Mutex<()>>,
     pub provisioning_cancellation: crate::services::components::ProvisioningCancellation,
 }
 
@@ -133,10 +140,22 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/templates/preview", post(preview_template))
         .route(
             "/v1/library/import",
-            get(library_import_status).post(start_library_import),
+            get(library_import_status)
+                .post(start_library_import)
+                .delete(cancel_library_import),
         )
         .route("/v1/library/verify", post(verify_library))
         .route("/v1/library/relocate", post(relocate_library))
+        .route(
+            "/v1/library/move/preflight",
+            post(preflight_library_move_root),
+        )
+        .route(
+            "/v1/library/move",
+            get(library_move_status)
+                .post(start_library_move_root)
+                .delete(cancel_library_move_root),
+        )
         .route("/v1/presets", get(list_presets).post(create_preset))
         .route(
             "/v1/presets/{id}",

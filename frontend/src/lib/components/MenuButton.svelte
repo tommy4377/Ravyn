@@ -12,7 +12,7 @@
     label: string;
     icon?: IconName;
     items: MenuItem[];
-    variant?: "standard" | "subtle";
+    variant?: "accent" | "standard" | "subtle";
     iconOnly?: boolean;
   } = $props();
 
@@ -84,10 +84,23 @@
     border-color: var(--stroke-control);
     background: var(--bg-control);
   }
+  .menu-trigger.accent {
+    border-color: transparent;
+    background: var(--accent-default);
+    color: var(--text-on-accent);
+    font-weight: 600;
+  }
   .menu-trigger:hover {
     background: var(--bg-control-hover);
   }
+  .menu-trigger.accent:hover {
+    background: var(--accent-hover);
+  }
   .menu-trigger[aria-expanded="true"] {
     background: var(--bg-subtle-pressed);
+  }
+  .menu-trigger.accent[aria-expanded="true"] {
+    background: var(--accent-pressed);
+    color: var(--text-on-accent);
   }
 </style>

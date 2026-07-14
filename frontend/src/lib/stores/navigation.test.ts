@@ -7,6 +7,9 @@ describe("settings navigation guard", () => {
     navigation.settingsDirty = false;
     navigation.pendingSection = null;
     navigation.pendingAddKind = null;
+    navigation.basketDrawerOpen = false;
+    navigation.notificationDrawerOpen = false;
+    navigation.navigationOverlayOpen = false;
   });
 
   it("blocks leaving Settings while backend changes are dirty", () => {
@@ -40,4 +43,23 @@ describe("settings navigation guard", () => {
     expect(navigation.pendingSection).toBe("downloads");
     expect(navigation.pendingAddKind).toBe("media");
   });
+  it("keeps only one right-side drawer open", () => {
+    navigation.openBasket();
+    expect(navigation.basketDrawerOpen).toBe(true);
+    expect(navigation.notificationDrawerOpen).toBe(false);
+
+    navigation.openNotifications();
+    expect(navigation.basketDrawerOpen).toBe(false);
+    expect(navigation.notificationDrawerOpen).toBe(true);
+  });
+
+  it("closes notification history before other transient layers", () => {
+    navigation.navigationOverlayOpen = true;
+    navigation.notificationDrawerOpen = true;
+
+    expect(navigation.closeTransientLayers()).toBe(true);
+    expect(navigation.notificationDrawerOpen).toBe(false);
+    expect(navigation.navigationOverlayOpen).toBe(true);
+  });
+
 });

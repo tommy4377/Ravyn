@@ -3,6 +3,7 @@
 mod category;
 mod cleanup;
 mod root;
+mod move_root;
 mod scan;
 mod template;
 mod trash;
@@ -12,6 +13,13 @@ pub use category::{
     classify_name_with_overrides, validate_category_overrides,
 };
 pub use root::{LIBRARY_DIRECTORIES, category_directory, prepare_library_layout};
+pub use move_root::{
+    LibraryMoveConflictPolicy, LibraryMovePreflight, LibraryMoveRequest, LibraryMoveState,
+    LibraryMoveStatus, cancel_library_move, execute_library_move,
+    finalize_activated_library_move, preflight_library_move, recover_interrupted_library_move,
+    start_library_move,
+};
+pub(crate) use move_root::{LibraryMoveItemRecord, LibraryMovePlan};
 
 pub use cleanup::{
     ActivityBucket, CategoryStatistics, CleanupPolicies, CleanupReport, PersonalStatistics,

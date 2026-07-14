@@ -232,6 +232,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         Some("LibraryImportStatus")
     ),
     op!(
+        "delete",
+        "/v1/library/import",
+        "cancelLibraryImport",
+        "Library",
+        "Request cancellation of the active library import",
+        "200",
+        false,
+        false,
+        Some("LibraryImportStatus")
+    ),
+    op!(
         "post",
         "/v1/library/verify",
         "verifyLibraryEntries",
@@ -252,6 +263,50 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         true,
         Some("RelocationReport")
+    ),
+    op!(
+        "post",
+        "/v1/library/move/preflight",
+        "preflightLibraryMove",
+        "Library",
+        "Validate a physical Library-root move",
+        "200",
+        false,
+        true,
+        Some("LibraryMovePreflight")
+    ),
+    op!(
+        "get",
+        "/v1/library/move",
+        "getLibraryMoveStatus",
+        "Library",
+        "Get the latest durable Library-root move status",
+        "200",
+        false,
+        false,
+        Some("LibraryMoveStatus")
+    ),
+    op!(
+        "post",
+        "/v1/library/move",
+        "startLibraryMove",
+        "Library",
+        "Start a transactional physical Library-root move",
+        "202",
+        false,
+        true,
+        Some("LibraryMoveStatus")
+    ),
+    op!(
+        "delete",
+        "/v1/library/move",
+        "cancelLibraryMove",
+        "Library",
+        "Request cancellation of an uncommitted Library-root move",
+        "200",
+        false,
+        false,
+        Some("LibraryMoveStatus")
     ),
     op!(
         "get",

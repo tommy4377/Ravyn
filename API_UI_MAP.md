@@ -2,67 +2,62 @@
 
 Last reconciled with source: 2026-07-14
 
-## Setup and components
+The static audit currently verifies 149 Axum/OpenAPI method-path pairs in exact
+parity and 131 typed frontend client operations backed by real router entries.
 
-- `/v1/setup*` → setup controller and installation handoff.
-- `/v1/components*` → setup component selection and the Components screen.
-- `GET/POST /v1/components/manifest` → signed catalog status and manual refresh
-  on the Components screen.
+## Downloads and import
 
-## Downloads
+- `/v1/jobs*`, bulk actions, outputs, segments, logs, and `/v1/events` →
+  Downloads workspace, command bar, virtualized rows, selection actions, and
+  details pane.
+- `POST /v1/jobs/metalink` → dedicated Metalink import dialog.
+- `POST /v1/jobs/batch` and `POST /v1/jobs/import-text` → dedicated batch import
+  dialog and Batch queue.
+- `/v1/trust/preview` and job trust → source guidance and Advanced details.
 
-- `/v1/jobs*`, bulk actions, outputs, segments, logs, and SSE `/v1/events` →
-  Downloads workspace, virtualized rows, command bar, details pane, and stores.
-- Direct, media, and torrent creation are exposed through the typed Add dialog.
-- Metalink and some advanced batch/template surfaces remain secondary API-only
-  capabilities.
+## Library
 
-## Library and basket
-
-- `/v1/library*`, duplicate discovery, import, verify, relocate, cleanup
-  policies, cleanup, and statistics → Library screen.
-- `/v1/basket*`, reorder, clear, and start → Basket screen.
+- `/v1/library*` → Files, Trash, Duplicates, details, restore and destructive
+  actions.
+- `GET/POST/DELETE /v1/library/import` → resumable status display, bounded import,
+  and cooperative cancellation.
+- `/v1/library/verify` and `/v1/library/relocate` → verification and Find moved
+  files for checksum-based record repair.
+- `POST /v1/library/move/preflight` and `GET/POST/DELETE /v1/library/move` →
+  Settings → Storage and Library physical move dialog, progress, cancellation,
+  restart activation, recovery, and rollback state.
+- `/v1/system/cleanup-policies`, `/v1/system/cleanup`, and `/v1/statistics` →
+  Storage and Library settings plus Library statistics.
+- `/v1/tags*`, job tags, presets, profiles, and template preview → General
+  settings, job details, and preset editor.
 
 ## Media and torrents
 
-- `/v1/media/probe`, media archive, media item summary/list/retry → Media screen
-  and media creation flow.
-- `/v1/torrents*`, engine/DHT stats, details, peers, files, seeding, and remove →
-  Torrents screen and torrent creation flow.
+- `/v1/media/probe`, archive, item summary/list/outputs/retry → Media workspace and
+  Add Download.
+- `/v1/torrents*`, engine/DHT, details, peers, files, seeding, and remove →
+  Torrents workspace, file tree, engine dialog, and Add Download.
 
 ## Automation
 
-- `/v1/rules*`, `/v1/schedules*`, and schedule executions → Automation screen.
-- Rule preview and some advanced diagnostic tables remain API-only.
+- `/v1/rules*` including preview → visual rule builder and before/after preview.
+- `/v1/schedules*` and `/v1/schedule-executions*` → schedule editor, execution
+  history, run-now, enable/disable, details, and cancellation.
 
-## Presets, profiles, and settings
+## Settings, tools, diagnostics, and setup
 
-- `/v1/presets*`, `/v1/profiles*`, and profile activation → Settings screen.
-- `/v1/settings`, validation, patch, and reset → Settings screen.
-- Executable overrides for yt-dlp, FFmpeg, rqbit, and 7-Zip plus the rqbit API
-  URL are editable through file-aware controls and validated before save.
+- `/v1/settings*`, presets and profiles → categorized Settings.
+- `/v1/components*` → setup and Settings → Tools.
+- readiness, database, backups, restore, hosts, audit, dependencies,
+  capabilities, maintenance, and statistics → Troubleshooting/advanced panels.
+- `/v1/secrets*` → type-specific secure-secret editors; secret values are never
+  returned by the API.
+- `/v1/setup*` → setup controller, installation handoff, and completion guard.
 
-## Diagnostics
+## Native boundaries
 
-- `/health/ready`, `/v1/system/database*`, dependencies, capabilities,
-  maintenance, audit, backups, restore state, host profiles, and statistics →
-  Diagnostics screen.
-
-## Frontend-only shell preferences
-
-Theme, density, material mode/intensity, optional custom backdrop override,
-navigation collapse state, and details width are local shell preferences stored
-in `localStorage`. Wallpaper geometry and DWM accent are supplied by the
-restricted `desktop_appearance` Tauri command.
-
-## External/native boundaries
-
-- Windows wallpaper/accent sampling and Explorer integration use main-window-only
-  Tauri commands.
-- `app_update_status` and `check_app_update` feed the Settings update section.
-- `main_window_ready` confirms backend/webview readiness to the detached updater
-  transaction before the previous binary is discarded.
-- Secret values are submitted once from the Settings editor to the authenticated
-  loopback backend, stored in the operating-system credential manager, and never
-  returned by the API. Create, replace, delete, and rqbit binding are connected.
-- Browser-extension capture is intentionally outside the current pass.
+- Wallpaper/accent sampling, file/open-folder/Explorer actions, installation
+  reporting, updater status/check/repair, and main-window readiness use
+  restricted Tauri commands.
+- Browser token/page/sniff/import routes remain intentionally unexposed until
+  the extension phase.

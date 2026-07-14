@@ -213,6 +213,7 @@ mod tests {
             ("get", "/v1/library"),
             ("get", "/v1/library/duplicates"),
             ("post", "/v1/library/import"),
+            ("delete", "/v1/library/import"),
             ("post", "/v1/templates/preview"),
             ("get", "/v1/presets"),
             ("get", "/v1/basket"),

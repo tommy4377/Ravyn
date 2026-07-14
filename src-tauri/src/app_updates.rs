@@ -18,9 +18,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 const METADATA_LIMIT: u64 = 512 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AUTOMATIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const AUTOMATIC_RETRY_BASE: Duration = Duration::from_secs(15 * 60);
+const AUTOMATIC_RETRY_MAX: Duration = Duration::from_secs(2 * 60 * 60);
+const UPDATE_CANCELLED_ERROR: &str = "application update cancelled";
 const UPDATE_FILENAME: &str = "ravyn-pending-update.exe";
 const UPDATE_PENDING_STATE_FILENAME: &str = "ravyn-pending-update.json";
 const UPDATE_TRANSACTION_FILENAME: &str = "ravyn-update-transaction.json";
@@ -47,6 +52,8 @@ pub enum AppUpdatePhase {
     Checking,
     UpToDate,
     Downloading,
+    Cancelling,
+    Cancelled,
     Ready,
     Installing,
     Error,
@@ -76,6 +83,9 @@ pub struct AppUpdateStatus {
     pub install_on_exit: bool,
     pub repair_mode: bool,
     pub last_result: Option<AppUpdateResult>,
+    pub last_checked_at_unix_ms: Option<u64>,
+    pub next_check_at_unix_ms: Option<u64>,
+    pub automatic_check_interval_secs: Option<u64>,
 }
 
 impl AppUpdateStatus {
@@ -93,6 +103,9 @@ impl AppUpdateStatus {
             install_on_exit: false,
             repair_mode: false,
             last_result: None,
+            last_checked_at_unix_ms: None,
+            next_check_at_unix_ms: None,
+            automatic_check_interval_secs: None,
         }
     }
 
@@ -110,6 +123,9 @@ impl AppUpdateStatus {
             install_on_exit: false,
             repair_mode: false,
             last_result: None,
+            last_checked_at_unix_ms: None,
+            next_check_at_unix_ms: None,
+            automatic_check_interval_secs: Some(AUTOMATIC_CHECK_INTERVAL.as_secs()),
         }
     }
 }
@@ -174,6 +190,8 @@ struct Inner {
     status: AppUpdateStatus,
     pending: Option<PendingUpdate>,
     in_flight: bool,
+    cancellation: Option<CancellationToken>,
+    scheduler_started: bool,
 }
 
 pub struct AppUpdateState(Mutex<Inner>);
@@ -191,6 +209,8 @@ impl Default for AppUpdateState {
             status,
             pending: None,
             in_flight: false,
+            cancellation: None,
+            scheduler_started: false,
         }))
     }
 }
@@ -424,24 +444,59 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+fn automatic_retry_delay(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return AUTOMATIC_CHECK_INTERVAL;
+    }
+    let exponent = consecutive_failures.saturating_sub(1).min(3);
+    AUTOMATIC_RETRY_BASE
+        .checked_mul(1_u32 << exponent)
+        .unwrap_or(AUTOMATIC_RETRY_MAX)
+        .min(AUTOMATIC_RETRY_MAX)
+}
+
+fn schedule_next_check(app: &AppHandle, delay: Duration) {
+    if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
+        inner.status.next_check_at_unix_ms = Some(
+            unix_timestamp_ms().saturating_add(
+                delay
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            ),
+        );
+    }
+}
+
 pub fn start_background_check(app: AppHandle) {
     let installation = crate::installation::detect();
     let installed_build =
         installation.installed && !installation.portable && !installation.development;
-    let mut automatic = false;
-    if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
-        automatic = installed_build && inner.status.configured;
+    let automatic = {
+        let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() else {
+            return;
+        };
+        let automatic = installed_build && inner.status.configured;
         inner.status.automatic = automatic;
+        inner.status.automatic_check_interval_secs = automatic
+            .then_some(AUTOMATIC_CHECK_INTERVAL.as_secs());
         if !installed_build && inner.status.configured {
             inner.status.phase = AppUpdatePhase::Disabled;
             inner.status.last_error = Some(
                 "automatic application updates are available only for installed builds".into(),
             );
         }
-    }
+        if !automatic || inner.scheduler_started {
+            false
+        } else {
+            inner.scheduler_started = true;
+            true
+        }
+    };
     if !automatic {
         return;
     }
+
     tauri::async_runtime::spawn(async move {
         let configuration = match configuration() {
             Ok(Some(configuration)) => configuration,
@@ -454,15 +509,36 @@ pub fn start_background_check(app: AppHandle) {
         if let Err(error) = recover_interrupted_update(&app) {
             tracing::warn!(%error, "failed to recover an interrupted app update");
         }
-        match restore_pending_update(&app, &configuration) {
-            Ok(true) => return,
-            Ok(false) => {}
+        let restored = match restore_pending_update(&app, &configuration) {
+            Ok(restored) => restored,
             Err(error) => {
                 tracing::warn!(%error, "discarded an invalid persisted app update");
+                false
+            }
+        };
+
+        let mut consecutive_failures = 0_u32;
+        if !restored {
+            match check_and_stage(app.clone(), false, false).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(error) => {
+                    consecutive_failures = 1;
+                    set_error(&app, error);
+                }
             }
         }
-        if let Err(error) = check_and_stage(app.clone(), false, false).await {
-            set_error(&app, error);
+
+        loop {
+            let delay = automatic_retry_delay(consecutive_failures);
+            schedule_next_check(&app, delay);
+            tokio::time::sleep(delay).await;
+            match check_and_stage(app.clone(), false, false).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    set_error(&app, error);
+                }
+            }
         }
     });
 }
@@ -505,6 +581,55 @@ pub async fn repair_now(app: AppHandle) -> Result<AppUpdateStatus, String> {
     }
 }
 
+/// Requests cancellation of an active metadata/download operation, or removes
+/// an already verified installer that was waiting for the next close.
+pub fn cancel(app: &AppHandle) -> Result<AppUpdateStatus, String> {
+    let (cancellation, clear_staged, changed) = {
+        let state = app.state::<AppUpdateState>();
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "application update state is unavailable".to_owned())?;
+        if inner.in_flight {
+            inner.status.phase = AppUpdatePhase::Cancelling;
+            inner.status.last_error = None;
+            (inner.cancellation.clone(), false, true)
+        } else if inner.pending.take().is_some() || inner.status.phase == AppUpdatePhase::Ready {
+            inner.status.phase = AppUpdatePhase::Cancelled;
+            inner.status.available_version = None;
+            inner.status.downloaded_bytes = 0;
+            inner.status.total_bytes = None;
+            inner.status.notes = None;
+            inner.status.last_error = None;
+            inner.status.install_on_exit = false;
+            inner.status.repair_mode = false;
+            (None, true, true)
+        } else {
+            (None, false, false)
+        }
+    };
+
+    if !changed {
+        return status(app);
+    }
+    if let Some(cancellation) = cancellation {
+        cancellation.cancel();
+    }
+    if clear_staged {
+        clear_persisted_pending(app)?;
+    }
+    status(app)
+}
+
+
+fn ensure_update_not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err(UPDATE_CANCELLED_ERROR.into())
+    } else {
+        Ok(())
+    }
+}
+
 async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<(), String> {
     let Some(configuration) = configuration()? else {
         return Err("application updates are not configured for this build".into());
@@ -514,6 +639,7 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
         tracing::warn!(%error, "failed to recover an interrupted app update");
     }
 
+    let cancellation = CancellationToken::new();
     let clear_existing = {
         let state = app.state::<AppUpdateState>();
         let mut inner = state
@@ -527,6 +653,7 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
             return Ok(());
         }
         inner.in_flight = true;
+        inner.cancellation = Some(cancellation.clone());
         inner.status.configured = true;
         inner.status.phase = AppUpdatePhase::Checking;
         inner.status.last_error = None;
@@ -546,17 +673,40 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
         if let Err(error) = clear_persisted_pending(&app) {
             if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
                 inner.in_flight = false;
+                inner.cancellation = None;
             }
             return Err(error);
         }
     }
 
-    let result = perform_check_and_stage(&app, &configuration, force, repair).await;
+    let result = perform_check_and_stage(&app, &configuration, force, repair, &cancellation).await;
+    let cancelled = cancellation.is_cancelled()
+        || result
+            .as_ref()
+            .is_err_and(|error| error == UPDATE_CANCELLED_ERROR);
+    if cancelled {
+        let _ = clear_persisted_pending(&app);
+    }
+
     let state = app.state::<AppUpdateState>();
     if let Ok(mut inner) = state.0.lock() {
         inner.in_flight = false;
+        inner.cancellation = None;
+        inner.status.last_checked_at_unix_ms = Some(unix_timestamp_ms());
+        if cancelled {
+            inner.pending = None;
+            inner.status.phase = AppUpdatePhase::Cancelled;
+            inner.status.available_version = None;
+            inner.status.downloaded_bytes = 0;
+            inner.status.total_bytes = None;
+            inner.status.notes = None;
+            inner.status.last_error = None;
+            inner.status.install_on_exit = false;
+            inner.status.repair_mode = false;
+        }
     }
-    result
+
+    if cancelled { Ok(()) } else { result }
 }
 
 async fn perform_check_and_stage(
@@ -564,6 +714,7 @@ async fn perform_check_and_stage(
     configuration: &UpdateConfiguration,
     force: bool,
     repair: bool,
+    cancellation: &CancellationToken,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .user_agent(format!("Ravyn/{}", env!("CARGO_PKG_VERSION")))
@@ -582,17 +733,24 @@ async fn perform_check_and_stage(
         .build()
         .map_err(|error| format!("failed to initialize the app update client: {error}"))?;
 
-    let response = client
-        .get(configuration.endpoint.clone())
-        .send()
-        .await
-        .map_err(|error| format!("failed to check for an app update: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("the app update service returned an error: {error}"))?;
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+        response = client.get(configuration.endpoint.clone()).send() => {
+            response.map_err(|error| format!("failed to check for an app update: {error}"))?
+        }
+    }
+    .error_for_status()
+    .map_err(|error| format!("the app update service returned an error: {error}"))?;
     if response.content_length().is_some_and(|size| size > METADATA_LIMIT) {
         return Err("app update metadata exceeds the maximum size".into());
     }
-    let metadata = read_response_bounded(response, METADATA_LIMIT, "app update metadata").await?;
+    let metadata = read_response_bounded(
+        response,
+        METADATA_LIMIT,
+        "app update metadata",
+        cancellation,
+    )
+    .await?;
     let signed: SignedAppUpdateManifest = serde_json::from_slice(&metadata)
         .map_err(|error| format!("app update metadata is invalid: {error}"))?;
     let manifest = signed
@@ -640,13 +798,15 @@ async fn perform_check_and_stage(
         return Ok(());
     }
 
-    let response = client
-        .get(&manifest.artifact.url)
-        .send()
-        .await
-        .map_err(|error| format!("failed to download Ravyn {}: {error}", manifest.version))?
-        .error_for_status()
-        .map_err(|error| format!("the app update download returned an error: {error}"))?;
+    ensure_update_not_cancelled(cancellation)?;
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+        response = client.get(&manifest.artifact.url).send() => {
+            response.map_err(|error| format!("failed to download Ravyn {}: {error}", manifest.version))?
+        }
+    }
+    .error_for_status()
+    .map_err(|error| format!("the app update download returned an error: {error}"))?;
     if response
         .content_length()
         .is_some_and(|size| size != manifest.artifact.size_bytes)
@@ -688,18 +848,34 @@ async fn perform_check_and_stage(
     let mut stream = response.bytes_stream();
     let mut digest = Sha256::new();
     let mut downloaded = 0_u64;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation.cancelled() => {
+                drop(output);
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return Err(UPDATE_CANCELLED_ERROR.into());
+            }
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| format!("app update download failed: {error}"))?;
         downloaded = downloaded
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| "app update size overflow".to_owned())?;
         if downloaded > manifest.artifact.size_bytes {
+            let _ = tokio::fs::remove_file(&partial_path).await;
             return Err("app update download exceeded the signed installer size".into());
         }
-        output
-            .write_all(&chunk)
-            .await
-            .map_err(|error| format!("failed to write the staged app update: {error}"))?;
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                drop(output);
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return Err(UPDATE_CANCELLED_ERROR.into());
+            }
+            result = output.write_all(&chunk) => {
+                result.map_err(|error| format!("failed to write the staged app update: {error}"))?;
+            }
+        }
         digest.update(&chunk);
         if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
             inner.status.downloaded_bytes = downloaded;
@@ -727,6 +903,7 @@ async fn perform_check_and_stage(
         let _ = tokio::fs::remove_file(&partial_path).await;
         return Err("app update SHA-256 verification failed".into());
     }
+    ensure_update_not_cancelled(cancellation)?;
     let _ = tokio::fs::remove_file(&final_path).await;
     tokio::fs::rename(&partial_path, &final_path)
         .await
@@ -736,12 +913,21 @@ async fn perform_check_and_stage(
         let _ = tokio::fs::remove_file(&final_path).await;
         return Err(error);
     }
+    if let Err(error) = ensure_update_not_cancelled(cancellation) {
+        let _ = clear_persisted_pending(app);
+        return Err(error);
+    }
 
     let state = app.state::<AppUpdateState>();
     let mut inner = state
         .0
         .lock()
         .map_err(|_| "application update state is unavailable".to_owned())?;
+    if cancellation.is_cancelled() {
+        drop(inner);
+        let _ = clear_persisted_pending(app);
+        return Err(UPDATE_CANCELLED_ERROR.into());
+    }
     inner.pending = Some(PendingUpdate {
         manifest: manifest.clone(),
         installer_path: final_path,
@@ -890,6 +1076,8 @@ fn set_error(app: &AppHandle, error: String) {
     tracing::warn!(%error, "application update check failed");
     if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
         inner.in_flight = false;
+        inner.cancellation = None;
+        inner.status.last_checked_at_unix_ms = Some(unix_timestamp_ms());
         inner.status.phase = AppUpdatePhase::Error;
         inner.status.last_error = Some(error);
         inner.status.install_on_exit = inner.pending.is_some();
@@ -1277,10 +1465,16 @@ async fn read_response_bounded(
     response: reqwest::Response,
     limit: u64,
     label: &str,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, String> {
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| format!("failed to read {label}: {error}"))?;
         let next_len = bytes.len().saturating_add(chunk.len());
         if u64::try_from(next_len).unwrap_or(u64::MAX) > limit {
@@ -1473,6 +1667,27 @@ mod tests {
         };
         assert!(!should_block_automatic_retry(Some(&succeeded), "0.3.0"));
         assert!(!should_block_automatic_retry(None, "0.3.0"));
+    }
+
+    #[test]
+    fn automatic_update_retries_back_off_and_remain_bounded() {
+        assert_eq!(automatic_retry_delay(0), AUTOMATIC_CHECK_INTERVAL);
+        assert_eq!(automatic_retry_delay(1), Duration::from_secs(15 * 60));
+        assert_eq!(automatic_retry_delay(2), Duration::from_secs(30 * 60));
+        assert_eq!(automatic_retry_delay(3), Duration::from_secs(60 * 60));
+        assert_eq!(automatic_retry_delay(4), AUTOMATIC_RETRY_MAX);
+        assert_eq!(automatic_retry_delay(u32::MAX), AUTOMATIC_RETRY_MAX);
+    }
+
+    #[test]
+    fn cancellation_tokens_are_reported_without_update_errors() {
+        let token = CancellationToken::new();
+        assert!(ensure_update_not_cancelled(&token).is_ok());
+        token.cancel();
+        assert_eq!(
+            ensure_update_not_cancelled(&token).unwrap_err(),
+            UPDATE_CANCELLED_ERROR,
+        );
     }
 
     /// Writes the generated helper script to a file so CI or a developer can

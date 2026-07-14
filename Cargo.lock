@@ -3579,6 +3579,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-mcp-bridge",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",

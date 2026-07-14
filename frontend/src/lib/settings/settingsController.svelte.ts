@@ -14,6 +14,8 @@ import {
   appUpdateStatus as readAppUpdateStatus,
   backendInfo,
   checkAppUpdate,
+  cancelAppUpdate,
+  installAppUpdateNow,
   repairApplication,
   setupInstallationInfo,
   type AppUpdateStatus,
@@ -23,6 +25,7 @@ import {
 import { connection } from "../stores/connection.svelte";
 import { navigation } from "../stores/navigation.svelte";
 import { notifications } from "../stores/notifications.svelte";
+import { appUpdateDescription, appUpdateHeading } from "./appUpdatePresentation";
 
 export type SettingsCategory =
   | "general"
@@ -101,6 +104,8 @@ export class SettingsController {
   updateStatus = $state<AppUpdateStatus | null>(null);
   updateBusy = $state(false);
   repairBusy = $state(false);
+  updateCancelBusy = $state(false);
+  updateInstallBusy = $state(false);
 
   cleanupPolicies = $state<CleanupPolicies | null>(null);
   cleanupBusy = $state(false);
@@ -326,32 +331,40 @@ export class SettingsController {
     }
   }
 
-  updateHeading(status: AppUpdateStatus): string {
-    if (status.repair_mode && status.phase === "downloading") return "Downloading repair package…";
-    if (status.repair_mode && status.phase === "ready") return `Ravyn ${status.current_version} repair is ready`;
-    if (status.repair_mode && status.phase === "installing") return "Repairing Ravyn…";
-    switch (status.phase) {
-      case "checking": return "Checking for updates…";
-      case "downloading": return `Downloading Ravyn ${status.available_version ?? "update"}…`;
-      case "ready": return `Ravyn ${status.available_version ?? "update"} is ready`;
-      case "installing": return "Installing update…";
-      case "up_to_date": return `Ravyn ${status.current_version} is up to date`;
-      case "error": return "Update check failed";
-      case "disabled": return "Application updates are unavailable";
-      default: return `Ravyn ${status.current_version}`;
+  async cancelApplicationUpdate(): Promise<void> {
+    if (this.updateCancelBusy || this.updateInstallBusy) return;
+    this.updateCancelBusy = true;
+    try {
+      this.updateStatus = await cancelAppUpdate();
+      notifications.info(
+        this.updateStatus.phase === "cancelling" ? "Stopping update download" : "Staged update removed",
+      );
+    } catch (cause) {
+      notifications.error("Couldn't cancel the application update", describeError(cause));
+      await this.loadUpdateStatus();
+    } finally {
+      this.updateCancelBusy = false;
     }
   }
 
-  updateDescription(status: AppUpdateStatus): string {
-    if (status.phase === "ready") return status.repair_mode ? "The verified installer will reinstall Ravyn after a normal close." : "The verified installer will run silently after you close Ravyn.";
-    if (status.phase === "downloading") {
-      const total = status.total_bytes ?? 0;
-      const percent = total > 0 ? Math.min(100, Math.round(status.downloaded_bytes / total * 100)) : 0;
-      return total > 0 ? `${percent}% downloaded` : "Downloading and verifying the signed installer.";
+  async installApplicationUpdateNow(): Promise<void> {
+    if (this.updateInstallBusy || this.updateCancelBusy) return;
+    this.updateInstallBusy = true;
+    try {
+      await installAppUpdateNow();
+    } catch (cause) {
+      this.updateInstallBusy = false;
+      notifications.error("Couldn't start the application update", describeError(cause));
+      await this.loadUpdateStatus();
     }
-    if (status.last_error) return status.last_error;
-    if (!status.automatic) return "Automatic updates require an installed Windows build.";
-    return "Ravyn checks in the background and installs downloaded updates only when the app closes.";
+  }
+
+  updateHeading(status: AppUpdateStatus): string {
+    return appUpdateHeading(status);
+  }
+
+  updateDescription(status: AppUpdateStatus): string {
+    return appUpdateDescription(status);
   }
 
   updateResultHeading(status: AppUpdateStatus): string {

@@ -31,6 +31,8 @@ export type AppUpdatePhase =
   | "checking"
   | "up_to_date"
   | "downloading"
+  | "cancelling"
+  | "cancelled"
   | "ready"
   | "installing"
   | "error";
@@ -56,6 +58,9 @@ export interface AppUpdateStatus {
   install_on_exit: boolean;
   repair_mode: boolean;
   last_result: AppUpdateResult | null;
+  last_checked_at_unix_ms: number | null;
+  next_check_at_unix_ms: number | null;
+  automatic_check_interval_secs: number | null;
 }
 
 export interface IntegrationRequest {
@@ -126,6 +131,14 @@ export function checkAppUpdate(): Promise<AppUpdateStatus> {
 
 export function repairApplication(): Promise<AppUpdateStatus> {
   return invoke<AppUpdateStatus>("repair_application");
+}
+
+export function cancelAppUpdate(): Promise<AppUpdateStatus> {
+  return invoke<AppUpdateStatus>("cancel_app_update");
+}
+
+export function installAppUpdateNow(): Promise<void> {
+  return invoke("install_app_update_now");
 }
 
 /** Native folder picker; returns the chosen absolute path or null. */
