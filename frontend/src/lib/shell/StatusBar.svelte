@@ -28,7 +28,9 @@
     height: 26px;
     padding: 0 var(--space-3);
     border-top: 1px solid var(--stroke-divider);
-    background: var(--bg-layer-alt);
+    background: color-mix(in srgb, var(--surface-navigation) 88%, transparent);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
     color: var(--text-secondary);
     font-size: var(--text-caption);
     flex: none;

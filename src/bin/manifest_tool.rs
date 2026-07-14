@@ -8,7 +8,13 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
-use ravyn::services::engines::{EngineManifest, SignedEngineManifest};
+use ravyn::services::{
+    app_updates::{
+        APP_UPDATE_SCHEMA_VERSION, AppUpdateArtifact, AppUpdateManifest,
+        SignedAppUpdateManifest,
+    },
+    engines::{EngineManifest, SignedEngineManifest},
+};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
@@ -59,6 +65,36 @@ enum Command {
         #[arg(long)]
         public_key: String,
     },
+    /// Create and sign application-update metadata for a Windows installer.
+    SignAppUpdate {
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        published_at: String,
+        #[arg(long, default_value = "windows-x86_64")]
+        target: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        notes: Option<String>,
+        /// 64-character hex Ed25519 private key seed. Falls back to the
+        /// RAVYN_APP_UPDATE_PRIVATE_KEY environment variable.
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify signed application-update metadata and its installer artifact.
+    VerifyAppUpdate {
+        #[arg(long)]
+        signed: PathBuf,
+        #[arg(long)]
+        artifact: Option<PathBuf>,
+        #[arg(long)]
+        public_key: String,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,6 +103,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Keygen { out } => keygen(out.as_deref()),
         Command::Sign { manifest, key, out } => sign(&manifest, key, &out),
         Command::Verify { signed, public_key } => verify(&signed, &public_key),
+        Command::SignAppUpdate {
+            version,
+            published_at,
+            target,
+            url,
+            artifact,
+            notes,
+            key,
+            out,
+        } => sign_app_update(
+            &version,
+            &published_at,
+            &target,
+            &url,
+            &artifact,
+            notes,
+            key,
+            &out,
+        ),
+        Command::VerifyAppUpdate {
+            signed,
+            artifact,
+            public_key,
+        } => verify_app_update(&signed, artifact.as_deref(), &public_key),
     }
 }
 
@@ -144,6 +204,83 @@ fn verify(
         "OK: {} channel, {} artifact(s), signature verified",
         manifest.channel,
         manifest.artifacts.len()
+    );
+    Ok(())
+}
+
+
+fn sign_app_update(
+    version: &str,
+    published_at: &str,
+    target: &str,
+    url: &str,
+    artifact_path: &std::path::Path,
+    notes: Option<String>,
+    key: Option<String>,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(artifact_path)?;
+    let filename = artifact_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("artifact path does not contain a valid UTF-8 filename")?
+        .to_owned();
+    let manifest = AppUpdateManifest {
+        schema: APP_UPDATE_SCHEMA_VERSION,
+        channel: "stable".into(),
+        version: version.trim_start_matches('v').to_owned(),
+        published_at: published_at.to_owned(),
+        notes,
+        artifact: AppUpdateArtifact {
+            target: target.to_owned(),
+            filename,
+            url: url.to_owned(),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            size_bytes: bytes.len() as u64,
+        },
+    };
+    let payload = manifest.payload()?;
+    let key_hex = key
+        .or_else(|| std::env::var("RAVYN_APP_UPDATE_PRIVATE_KEY").ok())
+        .ok_or(
+            "no private key: pass --key or set RAVYN_APP_UPDATE_PRIVATE_KEY",
+        )?;
+    let key_bytes: [u8; 32] = hex::decode(key_hex.trim())?
+        .try_into()
+        .map_err(|_| "private key must be exactly 32 bytes (64 hex characters)")?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let signed = SignedAppUpdateManifest {
+        manifest,
+        signature: hex::encode(signing_key.sign(&payload).to_bytes()),
+    };
+    signed.verify(&signing_key.verifying_key().to_bytes())?;
+    signed.verify_artifact(&bytes)?;
+    std::fs::write(out, serde_json::to_vec_pretty(&signed)?)?;
+    println!(
+        "signed app update {} -> {}",
+        signed.manifest.version,
+        out.display()
+    );
+    Ok(())
+}
+
+fn verify_app_update(
+    signed_path: &std::path::Path,
+    artifact_path: Option<&std::path::Path>,
+    public_key_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signed: SignedAppUpdateManifest =
+        serde_json::from_slice(&std::fs::read(signed_path)?)?;
+    let public_key: [u8; 32] = hex::decode(public_key_hex.trim())?
+        .try_into()
+        .map_err(|_| "public key must be exactly 32 bytes (64 hex characters)")?;
+    signed.verify(&public_key)?;
+    if let Some(path) = artifact_path {
+        signed.verify_artifact(&std::fs::read(path)?)?;
+    }
+    println!(
+        "OK: app update {} for {}, signature verified",
+        signed.manifest.version, signed.manifest.artifact.target
     );
     Ok(())
 }

@@ -1,3 +1,4 @@
+pub mod app_updates;
 pub mod browser;
 pub mod checksum;
 pub mod components;

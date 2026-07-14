@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Minimal native permissions required by the Ravyn main window.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "allow-backend-info",
+    "allow-main-window-ready",
+    "allow-app-update-status",
+    "allow-check-app-update",
+    "allow-desktop-appearance",
+    "allow-open-native-path",
+    "allow-reveal-native-path"
+  ]
+}

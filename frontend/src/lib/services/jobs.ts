@@ -17,11 +17,13 @@ import type {
   JobKind,
   JobListParams,
   JobLogRecord,
+  MediaOptions,
   JobOutput,
   JobPage,
   Page,
   PageQueryParams,
   SegmentRecord,
+  TorrentOptions,
   UpdateJob,
 } from "../api/types";
 
@@ -40,6 +42,8 @@ export interface AddDownloadInput {
   userAgent?: string;
   referer?: string;
   proxy?: string;
+  media?: MediaOptions;
+  torrent?: TorrentOptions;
 }
 
 export interface AddDownloadResult {
@@ -64,6 +68,8 @@ function buildOptions(input: AddDownloadInput): DownloadOptions {
   if (input.userAgent) options.user_agent = input.userAgent;
   if (input.referer) options.referer = input.referer;
   if (input.proxy) options.proxy = input.proxy;
+  if (input.media) options.media = input.media;
+  if (input.torrent) options.torrent = input.torrent;
   return options;
 }
 

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { Job, JobActionRecord, JobLogRecord, JobOutput } from "../api/types";
+  import type { BulkJobAction, Job, JobActionRecord, JobLogRecord, JobOutput } from "../api/types";
+  import Button from "../components/Button.svelte";
+  import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import InlineError from "../components/InlineError.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -10,14 +12,16 @@
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { notifications } from "../stores/notifications.svelte";
+  import { openNativePath, revealNativePath } from "../native/tauri";
   import { formatAbsoluteTime, formatBytes, formatEta, formatPercent, formatSpeed } from "../util/format";
-  import { presentStatus } from "./jobPresentation";
+  import { permittedActions, presentStatus } from "./jobPresentation";
 
   let { jobId, onClose }: { jobId: string; onClose: () => void } = $props();
 
   const job = $derived(jobsStore.byId.get(jobId));
   const live = $derived(jobsStore.liveProgress.get(jobId));
   const status = $derived(job ? presentStatus(job.status) : null);
+  const permitted = $derived(job ? permittedActions(job.status, job.kind) : null);
 
   let tab = $state("overview");
   const tabs: TabItem[] = [
@@ -33,6 +37,7 @@
   let logs = $state<JobLogRecord[] | null>(null);
   let activityError = $state<string | null>(null);
   let segmentSummary = $state<string | null>(null);
+  let actionBusy = $state(false);
 
   const service = $derived(connection.client ? new JobsService(connection.client) : null);
 
@@ -91,6 +96,44 @@
       notifications.warning("Couldn't copy to the clipboard");
     }
   }
+
+  async function runNativePathAction(path: string, action: "open" | "reveal"): Promise<void> {
+    try {
+      if (action === "open") await openNativePath(path);
+      else await revealNativePath(path);
+    } catch (cause) {
+      notifications.error(
+        action === "open" ? "Couldn't open this path" : "Couldn't reveal this path",
+        describeError(cause),
+      );
+    }
+  }
+
+  async function runJobAction(action: Exclude<BulkJobAction, "delete">): Promise<void> {
+    if (!service || !job || actionBusy) return;
+    actionBusy = true;
+    try {
+      const [result] = await service.bulkAction(action, [job.id]);
+      if (!result?.success) throw new Error(result?.error ?? `The ${action} action failed.`);
+      notifications.info(`${action.charAt(0).toUpperCase()}${action.slice(1)} requested`);
+      jobsStore.refreshAll();
+    } catch (error) {
+      notifications.error(`Couldn't ${action} this download`, describeError(error));
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  function retryOutputs(): void {
+    outputsError = null;
+    outputs = null;
+  }
+
+  function retryActivity(): void {
+    activityError = null;
+    actions = null;
+    logs = null;
+  }
 </script>
 
 <aside class="pane" aria-label="Download details">
@@ -107,8 +150,19 @@
     <div class="content">
       {#if tab === "overview" && status}
         <section class="overview">
-          <div class="row">
-            <StatusBadge label={status.label} severity={status.severity} icon={status.icon} spinning={status.spinning} />
+          <div class="summary-header">
+            <div class="row">
+              <StatusBadge label={status.label} severity={status.severity} icon={status.icon} spinning={status.spinning} />
+            </div>
+            <div class="job-actions" aria-label="Download actions">
+              <Button variant="subtle" onclick={() => void runNativePathAction(job.destination, "open")}><Icon name="folder-open" size={14} /> Open folder</Button>
+              {#if permitted}
+                {#if permitted.pause}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("pause")}><Icon name="pause" size={14} /> Pause</Button>{/if}
+                {#if permitted.resume}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("resume")}><Icon name="play" size={14} /> Resume</Button>{/if}
+                {#if permitted.retry}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("retry")}><Icon name="refresh" size={14} /> Retry</Button>{/if}
+                {#if permitted.cancel}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("cancel")}><Icon name="cancel" size={14} /> Cancel</Button>{/if}
+              {/if}
+            </div>
           </div>
           {#if job.error}
             <InlineError title="Last error" message={job.error} />
@@ -160,7 +214,7 @@
         </section>
       {:else if tab === "outputs"}
         {#if outputsError}
-          <InlineError title="Couldn't load outputs" message={outputsError} />
+          <InlineError title="Couldn't load outputs" message={outputsError} retry={retryOutputs} />
         {:else if outputs === null}
           <Skeleton height="80px" />
         {:else if outputs.length === 0}
@@ -172,7 +226,9 @@
                 <div class="output-row">
                   <span class="path" title={output.current_path}>{output.relative_path}</span>
                   <span class="size">{formatBytes(output.size_bytes)}</span>
-                  <IconButton icon="paste" label="Copy path" variant="subtle" onclick={() => copyPath(output.current_path)} />
+                  <IconButton icon="external-link" label="Open file" variant="subtle" onclick={() => void runNativePathAction(output.current_path, "open")} />
+                  <IconButton icon="folder-open" label="Show in Explorer" variant="subtle" onclick={() => void runNativePathAction(output.current_path, "reveal")} />
+                  <IconButton icon="copy" label="Copy path" variant="subtle" onclick={() => copyPath(output.current_path)} />
                 </div>
                 <span class="output-meta">{output.output_type} · {output.state}</span>
               </li>
@@ -181,7 +237,7 @@
         {/if}
       {:else if tab === "activity"}
         {#if activityError}
-          <InlineError title="Couldn't load activity" message={activityError} />
+          <InlineError title="Couldn't load activity" message={activityError} retry={retryActivity} />
         {:else if actions === null}
           <Skeleton height="80px" />
         {:else}
@@ -224,18 +280,20 @@
   .pane {
     display: flex;
     flex-direction: column;
-    width: 340px;
-    flex: none;
-    border-left: 1px solid var(--stroke-divider);
-    background: var(--bg-layer);
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    background: transparent;
     overflow: hidden;
   }
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    min-height: 54px;
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--stroke-divider);
+    background: var(--bg-layer-alt);
   }
   .header h2 {
     margin: 0;
@@ -250,9 +308,17 @@
     overflow-y: auto;
     padding: var(--space-4);
   }
-  .row {
-    margin-bottom: var(--space-3);
+  .summary-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    padding-bottom: var(--space-4);
+    border-bottom: 1px solid var(--stroke-divider);
   }
+  .row { margin: 0; }
+  .job-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+  .job-actions :global(.button) { min-height: 28px; padding-inline: var(--space-2); font-size: var(--text-caption); }
   dl {
     display: grid;
     grid-template-columns: max-content 1fr;

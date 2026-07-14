@@ -177,7 +177,7 @@ mod tests {
 
         let report = InstallationRecord {
             installation_mode: "installed".into(),
-            installed_exe: Some(r"C:\Users\Test\AppData\Local\Programs\Ravyn\Ravyn.exe".into()),
+            installed_exe: Some(r"C:\Users\Test\AppData\Local\Ravyn\Ravyn.exe".into()),
             installed_version: Some("0.2.0".into()),
             installed_sha256: Some("a".repeat(64)),
             integration_completed: true,

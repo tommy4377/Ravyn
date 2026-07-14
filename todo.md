@@ -13,7 +13,7 @@
 
 ### ~~4. Setup does not launch the installed copy~~
 
-`finish_setup_handoff()` spawns the executable at `%LOCALAPPDATA%\Programs\Ravyn\Ravyn.exe`, then exits via `app.exit(0)`. The installed copy boots its own backend before opening the main window.
+`finish_setup_handoff()` spawns the executable at `%LOCALAPPDATA%\Ravyn\Ravyn.exe`, then exits via `app.exit(0)`. The installed copy boots its own backend before opening the main window.
 
 ### ~~5. Registered uninstallation does not exist~~
 
@@ -91,15 +91,14 @@ A failed capability check now fails the health check (`healthy: false`) with a d
 **Still missing:**
 * explicit blocking of all dependent registrations when the copy step did not succeed for any reason.
 
-### 19. Portable mode is only detected, not fully implemented
+### 🔶 19. Portable mode is explicit, but portable data isolation is still incomplete
 
-`installation.rs:54` correctly detects portable mode (`portable: !in_install_dir`). The setup frontend (`InstallationInfo`) surfaces it.
+Setup now requires an explicit installed, portable, or development choice and persists that mode before completion. Portable/development builds are intentionally excluded from the installed-app updater.
 
 **Still missing:**
-* explicit user choice during setup;
-* data alongside the executable or configurable data-dir mode;
-* no automatic data move to `%LOCALAPPDATA%`;
-* updater compatible with portable mode.
+* a data-directory mode alongside the portable executable or an explicit portable data path;
+* migration rules that never move portable data into `%LOCALAPPDATA%` implicitly;
+* a separately designed portable update flow, if one is wanted later.
 
 ### 🔶 22. Provisioning errors are now structured, most call sites converted
 
@@ -139,20 +138,13 @@ Converted call sites: `EngineManifest::artifact()` (platform unsupported), `Sign
 
 ---
 
-### 6. The release still publishes the CLI backend, not the desktop app
+### 🔶 6. Desktop release and installer pipeline are implemented; Authenticode is still missing
 
-`.github/workflows/release.yml` copies only `target/release/ravyn.exe`. It does not build the frontend or the Tauri desktop executable.
+`.github/workflows/release.yml` now validates the frontend, tests the Rust workspace, builds the Tauri desktop, publishes NSIS/MSI/portable artifacts, generates checksums/SBOM/attestations, silently installs and launches the NSIS build, then silently uninstalls it and verifies cleanup. Release tags are required to match every project version.
 
-**Missing:**
-* frontend build;
-* `ravyn-desktop` Tauri build;
-* `RavynSetup.exe`;
-* asset/icon resources;
-* populated engine manifest;
-* binary signing;
-* installation smoke test;
-* test launch of the installed copy;
-* uninstallation test.
+**Still missing:**
+* Authenticode signing for the executable and installers;
+* a full UI-driven clean-machine setup/download/update test rather than the current process-level startup smoke test.
 
 ---
 
@@ -166,50 +158,52 @@ The low-level `EngineManager::rollback()` (`engines.rs:471-495`) still only veri
 
 `setup_state` (migration `0024_setup_installation.sql`) now carries `installation_mode`, `installed_exe`, `installed_version`, `installed_sha256`, `integration_completed`, `integration_errors` (JSON array), and `relaunch_pending`. `Repository::save_installation_report()`/`load_setup_state()` (`src/storage/setup.rs`) persist and round-trip an `InstallationRecord` independently of `completed`/`completed_at`, so reporting installation before setup finishes doesn't mark it complete, and completing setup afterward doesn't erase the installation report (covered by `installation_report_round_trips_independently_of_completion`).
 
-A new `POST /v1/setup/installation` endpoint (`src/api/routes/setup.rs`) accepts the report — validating `installation_mode` against `{installed, portable, development}`, `installed_sha256` as 64 hex characters, and bounding field lengths and the number/size of `integration_errors` — and `GET /v1/setup` now returns the persisted result under `installation`. The Tauri desktop shell (out of backend scope) still needs to actually call this endpoint after `apply_windows_integration`/`installation::detect()` run, but the backend side of the contract is complete.
+A new `POST /v1/setup/installation` endpoint (`src/api/routes/setup.rs`) accepts the report — validating `installation_mode` against `{installed, portable, development}`, `installed_sha256` as 64 hex characters, and bounding field lengths and the number/size of `integration_errors` — and `GET /v1/setup` returns the persisted result under `installation`. The setup frontend now calls this endpoint, and both frontend policy and backend completion validation reject an unverified installation state.
 
 ---
 
-### 20. Real repair and application update do not exist yet
+### 🔶 20. Signed silent application updates are implemented; health-confirmed rollback and repair remain
 
-The release generates `ravyn-release.json` with checksums, but no code consumes it as an updater.
+Installed Windows builds now check a compile-time HTTPS feed, verify Ed25519-signed metadata, stream the NSIS installer into a private staging directory, enforce signed size/SHA-256, expose passive status in Settings, reverify the staged file on close, run the current-user installer silently after the process exits, and relaunch Ravyn. Tagged releases generate and verify `ravyn-app-update.json` automatically. Portable/development builds do not self-update.
 
-**Missing:**
-* checking a remote release;
-* verifying signed metadata;
-* downloading a new application;
-* replacing the executable;
-* restarting;
-* verifying readiness;
-* rollback;
-* repairing missing or corrupted files.
+**Still missing:**
+* confirmation that the newly installed version reaches backend/UI readiness before the previous version is considered disposable;
+* automatic rollback to a retained previous application binary after failed readiness;
+* a persisted updater result/error marker across process restarts;
+* repair of missing or corrupted application files;
+* a full two-version updater E2E test on Windows.
 
 ---
 
-### 23. Privileged Tauri commands are not sufficiently constrained
+### 🔶 23. Tauri commands are isolated, backend-authorized, and process-idempotent; persisted consent remains
 
-The commands (`apply_windows_integration`, `finish_setup_handoff`, etc.) are available via the invoke handler without verification of:
-* calling window;
-* setup not yet completed;
-* allowed mode;
-* single execution;
-* persisted consent.
+Setup and main use separate capability files, each sensitive command validates the caller window label in Rust, release builds do not grant the debug MCP bridge, and a production CSP is active. Setup-native commands now verify the authenticated database-backed `/v1/setup` state, and an in-process command guard serializes integration, restart, and handoff transitions so duplicate successful calls are rejected. Setup API mutations are rejected after completion.
 
-The main window should not be able to freely call setup commands.
+**Still missing:**
+* a persisted one-shot native nonce/consent record that survives a process restart;
+* durable idempotency records for each individual Windows integration operation;
+* UI-driven hostile-order/race tests against a real WebView2 build.
 
 ---
 
-### 25. CI and release do not explicitly verify the entire desktop workspace
+### 🔶 25. CI verifies and packages the desktop; full clean-machine product E2E remains
 
-Workflows run `cargo` but do not include:
-* `npm ci`;
-* `npm run check`;
-* `npm run test`;
-* `npm run build`;
+The Windows workflow now runs `npm ci`, frontend check/test/build, `cargo test --locked --workspace --all-targets`, Tauri bundling, signed update-feed generation, NSIS install/startup smoke testing, uninstall verification, SBOM, checksums, and attestations.
 
-before the Tauri build. Windows tests on a clean machine (install → restart → readiness → download test → update → rollback → uninstall) are also missing.
+**Still missing:**
+* UI automation through first-run setup;
+* a real download test in the installed app;
+* update from version N to N+1 with readiness confirmation;
+* rollback validation;
+* DPI, accessibility, and WebView2 clean-machine coverage.
 
 ---
+
+### ✅ 26. Synthetic Windows wallpaper/accent bridge and Explorer actions
+
+The main window now receives a cached copy of the current Windows wallpaper, standard wallpaper positioning metadata, monitor/virtual-desktop geometry, DPI/frame offsets, DWM colorization color, and transparency preference through a capability-restricted Tauri command. Svelte keeps the desktop plane aligned during window movement, derives separate accessible light/dark accent palettes, and retains a custom-image override. Output paths can be opened or revealed through validated absolute-path native commands.
+
+**Remaining edge case:** separate wallpaper images assigned independently to different monitors require a future `IDesktopWallpaper` provider; current positioning supports the active wallpaper and Span geometry.
 
 # Exact order to complete it
 
@@ -221,14 +215,14 @@ The correct order now is:
 4. ~~Implement `RqbitProcessManager` and HTTP health check.~~ ✅
 5. ~~Actually launch the installed copy and close the original setup.~~ ✅
 6. ~~Implement `--uninstall`.~~ ✅
-7. **Make Ravyn executable install/update/rollback transactional.**
+7. 🔶 **Make Ravyn executable install/update/rollback transactional.** — install and signed install-on-close update are implemented; readiness-confirmed rollback/repair remain.
 8. ~~Persist desktop installation mode and result in the setup backend.~~ ✅
 9. ~~Correct version comparison, detected version, and capability checks.~~ ✅
 10. ~~Add global limit, cleanup, and close cancellation race conditions.~~ ✅ (partial for cleanup)
-11. **Build the desktop in CI and publish it in the release.**
+11. ~~Build the desktop in CI and publish it in the release.~~ ✅
 12. 🔶 Add end-to-end tests on Windows. (Backend-testable provisioning gaps closed — concurrency limiter, archive-member/URL validation, install/rollback/cleanup, setup-installation report — the mock-HTTPS-server download path is a deliberate follow-up; desktop-side install/uninstall/launch tests remain.)
-13. ~~Apply per-process authentication and restrict Tauri commands.~~ ✅ (partial for command restriction)
-14. **Update documentation and capability matrix.**
+13. 🔶 Apply per-process authentication and restrict Tauri commands. — process token, capabilities, CSP, and caller checks are implemented; one-shot persisted consent remains.
+14. 🔶 **Update documentation and capability matrix.** — desktop release/updater documents are current; the broader historical matrix still needs periodic reconciliation.
 
 ---
 
@@ -239,18 +233,18 @@ The correct order now is:
 The real remaining blocks are:
 
 ```text
-real manifest
-+ desktop release
-+ uninstall/application update (uninstall done, update pending)
-+ command restriction and CI verification
-+ e2e tests
+remote component manifest + 7-Zip decision
++ Authenticode signing
++ updater readiness confirmation / rollback / repair
++ one-shot native setup consent
++ full Windows product E2E tests
 ```
 
 Until these blocks are resolved, Ravyn may have a powerful backend but not an installable and reliable desktop beta.
 
 I also verified all migrations present in the ZIP:
 
-* **23 migrations applied**;
+* **24 migrations present**;
 * **32 tables**;
 * **44 indexes**;
 * `PRAGMA integrity_check: ok`.

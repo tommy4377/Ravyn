@@ -13,6 +13,23 @@ use crate::services::{
 /// Longest accepted library path, in UTF-8 bytes.
 const MAX_LIBRARY_PATH_BYTES: usize = 4096;
 
+/// Setup mutations are intentionally one-way. Once the lifecycle is committed,
+/// repair and update flows must use dedicated APIs instead of silently
+/// reopening first-run privileges.
+pub(super) async fn ensure_setup_mutable(s: &ApiState) -> Result<()> {
+    if s
+        .repository
+        .load_setup_state()
+        .await?
+        .is_some_and(|state| state.completed)
+    {
+        return Err(crate::error::RavynError::Conflict(
+            "setup has already been completed".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SetupLifecycleState {
@@ -93,19 +110,46 @@ fn paths_equivalent(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
+fn installation_ready(installation: Option<&crate::storage::InstallationRecord>) -> bool {
+    let Some(installation) = installation else {
+        return false;
+    };
+    if !installation.integration_completed {
+        return false;
+    }
+    let executable_ready = installation
+        .installed_exe
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .is_some_and(|path| std::path::Path::new(path).is_file());
+    let version_ready = installation
+        .installed_version
+        .as_deref()
+        .is_some_and(|version| !version.trim().is_empty());
+    let checksum_ready = installation.installed_sha256.as_deref().is_some_and(|sha256| {
+        sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+
+    INSTALLATION_MODES.contains(&installation.installation_mode.as_str())
+        && executable_ready
+        && version_ready
+        && checksum_ready
+}
+
 fn setup_lifecycle(
     completed: bool,
     features_selected: bool,
     library_prepared: bool,
+    installation_ready: bool,
     restart_required: bool,
 ) -> SetupLifecycleState {
     if restart_required {
         SetupLifecycleState::RestartRequired
     } else if completed {
         SetupLifecycleState::Completed
-    } else if features_selected && library_prepared {
+    } else if features_selected && library_prepared && installation_ready {
         SetupLifecycleState::ReadyToComplete
-    } else if features_selected || library_prepared {
+    } else if features_selected || library_prepared || installation_ready {
         SetupLifecycleState::InProgress
     } else {
         SetupLifecycleState::NotStarted
@@ -125,11 +169,16 @@ pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<Se
     };
     let completed = record.as_ref().is_some_and(|r| r.completed);
     let features_selected = selections.is_some();
-    let ready_to_complete = features_selected && library_prepared && !restart_required;
+    let installation_is_ready = installation_ready(
+        record.as_ref().and_then(|state| state.installation.as_ref()),
+    );
+    let ready_to_complete =
+        features_selected && library_prepared && installation_is_ready && !restart_required;
     let lifecycle = setup_lifecycle(
         completed,
         features_selected,
         library_prepared,
+        installation_is_ready,
         restart_required,
     );
 
@@ -169,6 +218,7 @@ pub(super) async fn prepare_library(
     State(s): State<ApiState>,
     Json(request): Json<PrepareLibraryRequest>,
 ) -> Result<Json<PrepareLibraryResponse>> {
+    ensure_setup_mutable(&s).await?;
     let result: Result<PrepareLibraryResponse> = async {
         let trimmed = request.path.trim();
         if trimmed.is_empty() {
@@ -269,6 +319,7 @@ pub(super) async fn report_installation(
     State(s): State<ApiState>,
     Json(request): Json<ReportInstallationRequest>,
 ) -> Result<Json<SetupStateResponse>> {
+    ensure_setup_mutable(&s).await?;
     if !INSTALLATION_MODES.contains(&request.installation_mode.as_str()) {
         return Err(crate::error::RavynError::Invalid(format!(
             "installation_mode must be one of {INSTALLATION_MODES:?}"
@@ -313,6 +364,17 @@ pub(super) async fn report_installation(
 }
 
 pub(super) async fn complete_setup(State(s): State<ApiState>) -> Result<Json<SetupStateResponse>> {
+    ensure_setup_mutable(&s).await?;
+    let setup_record = s.repository.load_setup_state().await?;
+    if !installation_ready(
+        setup_record
+            .as_ref()
+            .and_then(|record| record.installation.as_ref()),
+    ) {
+        return Err(crate::error::RavynError::Conflict(
+            "a verified installed, portable, or development application must be reported before setup can be completed".into(),
+        ));
+    }
     let selections = s.repository.load_feature_selections().await?;
     if selections.is_none() {
         return Err(crate::error::RavynError::Conflict(
@@ -396,17 +458,46 @@ mod tests {
     #[test]
     fn lifecycle_requires_restart_before_completion() {
         assert_eq!(
-            setup_lifecycle(false, true, true, true),
+            setup_lifecycle(false, true, true, true, true),
             SetupLifecycleState::RestartRequired
         );
         assert_eq!(
-            setup_lifecycle(false, true, true, false),
+            setup_lifecycle(false, true, true, true, false),
             SetupLifecycleState::ReadyToComplete
         );
         assert_eq!(
-            setup_lifecycle(true, true, true, false),
+            setup_lifecycle(true, true, true, true, false),
             SetupLifecycleState::Completed
         );
+    }
+
+    #[test]
+    fn lifecycle_stays_in_progress_until_installation_is_verified() {
+        assert_eq!(
+            setup_lifecycle(false, true, true, false, false),
+            SetupLifecycleState::InProgress
+        );
+    }
+
+    #[test]
+    fn installation_readiness_requires_a_real_executable_and_checksum() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("Ravyn.exe");
+        std::fs::write(&executable, b"ravyn").unwrap();
+        let installation = crate::storage::InstallationRecord {
+            installation_mode: "portable".into(),
+            installed_exe: Some(executable.display().to_string()),
+            installed_version: Some("0.2.0".into()),
+            installed_sha256: Some("a".repeat(64)),
+            integration_completed: true,
+            integration_errors: Vec::new(),
+            relaunch_pending: false,
+        };
+        assert!(installation_ready(Some(&installation)));
+        assert!(!installation_ready(Some(&crate::storage::InstallationRecord {
+            integration_completed: false,
+            ..installation
+        })));
     }
 
     #[test]

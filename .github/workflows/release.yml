@@ -11,51 +11,210 @@ permissions:
   attestations: write
   artifact-metadata: write
 
-# Reproducibility: dependency versions are pinned by Cargo.lock (--locked),
-# timestamps are pinned to the tagged commit, and absolute build paths are
-# remapped so archives built from the same tag are byte-comparable.
 env:
   RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/ravyn"
 
 jobs:
-  windows:
+  windows-desktop:
     runs-on: windows-2025
     environment: release
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Validate frontend
+        shell: pwsh
+        run: |
+          npm run check --prefix frontend
+          npm test --prefix frontend
+          npm run build --prefix frontend
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate synchronized release versions
+        shell: pwsh
+        run: |
+          $tauri = (Get-Content 'src-tauri\tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $frontend = (Get-Content 'frontend\package.json' -Raw | ConvertFrom-Json).version
+          $root = ([regex]::Match((Get-Content 'Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          $desktop = ([regex]::Match((Get-Content 'src-tauri\Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          $versions = @($tauri, $frontend, $root, $desktop) | Select-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Ravyn versions are not synchronized: tauri=$tauri frontend=$frontend root=$root desktop=$desktop"
+          }
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($tagVersion -ne $tauri) {
+              throw "Release tag v$tagVersion does not match application version $tauri"
+            }
+          }
+
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Validate application-update signing configuration
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.RAVYN_APP_UPDATE_PRIVATE_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_PRIVATE_KEY)) {
+            throw 'RAVYN_APP_UPDATE_PRIVATE_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_PUBLIC_KEY)) {
+            throw 'RAVYN_APP_UPDATE_PUBLIC_KEY is required for tagged releases.'
+          }
+
+      - name: Build Tauri desktop bundles
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          RAVYN_APP_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ravyn-app-update.json
+          RAVYN_APP_UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+        with:
+          projectPath: src-tauri
+          retryAttempts: 1
+          uploadUpdaterJson: false
+
+      - name: Collect desktop artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $bundleRoot = Join-Path $env:GITHUB_WORKSPACE 'target\release\bundle'
+          $installers = Get-ChildItem $bundleRoot -Recurse -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' }
+          if (-not $installers) {
+            throw "Tauri did not produce an NSIS or MSI installer under $bundleRoot"
+          }
+          foreach ($installer in $installers) {
+            Copy-Item $installer.FullName (Join-Path 'dist' $installer.Name)
+          }
+
+          $desktopExe = Join-Path $env:GITHUB_WORKSPACE 'target\release\Ravyn.exe'
+          if (-not (Test-Path $desktopExe)) {
+            throw "The desktop executable was not produced at $desktopExe"
+          }
+          Copy-Item $desktopExe 'dist\Ravyn-portable.exe'
+          Compress-Archive -Path 'dist\Ravyn-portable.exe' -DestinationPath 'dist\ravyn-windows-x86_64-portable.zip'
+          Remove-Item 'dist\Ravyn-portable.exe'
+
+      - name: Generate signed application-update metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          RAVYN_APP_UPDATE_PRIVATE_KEY: ${{ secrets.RAVYN_APP_UPDATE_PRIVATE_KEY }}
+          RAVYN_APP_UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem 'dist\*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'No NSIS installer is available for the update feed.' }
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $publishedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $assetUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($installer.Name)"
+          cargo run --locked --release -p ravyn --bin manifest_tool -- sign-app-update `
+            --version $version `
+            --published-at $publishedAt `
+            --url $assetUrl `
+            --artifact $installer.FullName `
+            --notes 'A signed Ravyn update is ready. See the GitHub release notes for details.' `
+            --out 'dist\ravyn-app-update.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- verify-app-update `
+            --signed 'dist\ravyn-app-update.json' `
+            --artifact $installer.FullName `
+            --public-key $env:RAVYN_APP_UPDATE_PUBLIC_KEY
+
+      - name: Smoke-test NSIS installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem 'target\release\bundle\nsis\*-setup.exe' |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'The NSIS setup executable was not produced.'
+          }
+
+          & $installer.FullName /S
+          if ($LASTEXITCODE -ne 0) {
+            throw "NSIS installation failed with exit code $LASTEXITCODE"
+          }
+
+          $installedExe = Join-Path $env:LOCALAPPDATA 'Ravyn\Ravyn.exe'
+          $uninstaller = Join-Path $env:LOCALAPPDATA 'Ravyn\uninstall.exe'
+          if (-not (Test-Path $installedExe)) {
+            throw "Installed executable not found at $installedExe"
+          }
+          if (-not (Test-Path $uninstaller)) {
+            throw "Tauri uninstaller not found at $uninstaller"
+          }
+
+          $registration = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Ravyn'
+          if (-not $registration.InstallLocation) {
+            throw 'The installer did not register an installation location.'
+          }
+
+          $env:RAVYN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ravyn-smoke-data'
+          $process = Start-Process -FilePath $installedExe -PassThru
+          Start-Sleep -Seconds 10
+          if ($process.HasExited) {
+            throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+          }
+          Stop-Process -Id $process.Id -Force
+
+          & $uninstaller /S
+          if ($LASTEXITCODE -ne 0) {
+            throw "NSIS uninstallation failed with exit code $LASTEXITCODE"
+          }
+          Start-Sleep -Seconds 2
+          if (Test-Path $installedExe) {
+            throw 'The smoke-test uninstall left the desktop executable behind.'
+          }
+
       - name: Generate CycloneDX SBOM
         shell: pwsh
         run: |
           cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --format json
-          New-Item -ItemType Directory -Force dist | Out-Null
           $sbom = Get-ChildItem -Recurse -Filter '*.cdx.json' | Select-Object -First 1
           if (-not $sbom) { throw 'cargo-cyclonedx did not produce a JSON SBOM' }
           Copy-Item $sbom.FullName dist\ravyn.cdx.json
-      - name: Package and checksum
+
+      - name: Generate SHA-256 checksums
         shell: pwsh
         run: |
-          Copy-Item target\release\ravyn.exe dist\ravyn.exe
-          Compress-Archive -Path dist\ravyn.exe -DestinationPath dist\ravyn-windows-x86_64.zip
-          $hash = (Get-FileHash dist\ravyn-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash *ravyn-windows-x86_64.zip" | Set-Content -NoNewline dist\ravyn-windows-x86_64.zip.sha256
+          Get-ChildItem dist -File |
+            Where-Object { $_.Extension -notin '.sha256' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash *$($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+            }
+
       - uses: actions/attest@v4
         with:
-          subject-path: dist/ravyn-windows-x86_64.zip
-      - uses: actions/attest@v4
-        with:
-          subject-path: dist/ravyn-windows-x86_64.zip
-          sbom-path: dist/ravyn.cdx.json
+          subject-path: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ravyn-windows-x86_64
+          name: ravyn-windows-desktop-x86_64
           path: dist/*
           if-no-files-found: error
 
-  portable:
+  backend-portable:
     strategy:
       fail-fast: false
       matrix:
@@ -68,8 +227,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release
+      - run: cargo test --locked -p ravyn --all-targets
+      - run: cargo build --locked --release -p ravyn
       - name: Package and checksum
         shell: bash
         run: |
@@ -89,7 +248,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, portable]
+    needs: [windows-desktop, backend-portable]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -98,7 +257,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Generate updater metadata
+      - name: Generate release metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -106,8 +265,8 @@ jobs:
           published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           {
             echo '{'
-            echo "  \"schema\": 1,"
-            echo "  \"channel\": \"stable\","
+            echo '  "schema": 1,'
+            echo '  "channel": "stable",'
             echo "  \"version\": \"${version}\","
             echo "  \"published_at\": \"${published_at}\","
             echo "  \"source_commit\": \"${GITHUB_SHA}\","

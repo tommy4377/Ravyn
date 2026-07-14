@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import Button from "./Button.svelte";
   import Dialog from "./Dialog.svelte";
   import InlineError from "./InlineError.svelte";
@@ -14,6 +15,7 @@
     error = null,
     onConfirm,
     onClose,
+    details,
   }: {
     open: boolean;
     title: string;
@@ -25,11 +27,15 @@
     error?: string | null;
     onConfirm: () => void;
     onClose: () => void;
+    details?: Snippet;
   } = $props();
 </script>
 
 <Dialog {open} {title} size="small" preventClose={busy} onClose={() => !busy && onClose()}>
   <p class="message">{message}</p>
+  {#if details}
+    <div class="details">{@render details()}</div>
+  {/if}
   {#if error}
     <InlineError title="Couldn't complete this action" message={error} />
   {/if}
@@ -51,4 +57,5 @@
     margin: 0;
     color: var(--text-secondary);
   }
+  .details { margin-top: var(--space-4); }
 </style>

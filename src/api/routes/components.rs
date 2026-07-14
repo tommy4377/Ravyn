@@ -115,6 +115,7 @@ pub(super) async fn save_feature_selections(
     State(s): State<ApiState>,
     Json(request): Json<SaveFeatureSelections>,
 ) -> Result<(StatusCode, Json<ComponentOverviewResponse>)> {
+    super::setup::ensure_setup_mutable(&s).await?;
     let mut seen = std::collections::BTreeSet::new();
     for selection in &request.features {
         if !seen.insert(selection.feature) {

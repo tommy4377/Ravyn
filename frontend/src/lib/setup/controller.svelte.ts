@@ -14,14 +14,17 @@ import type {
   ComponentOverview,
   ComponentState,
   FeatureId,
+  InstallationMode,
   RavynEvent,
   SetupProfile,
   SetupState,
 } from "../api/types";
+import { buildIntegrationRequest } from "./installationPolicy";
 import {
   applyWindowsIntegration,
   backendInfo,
   finishSetupHandoff,
+  restartApplication,
   setupInstallationInfo,
   type InstallationInfo,
   type IntegrationReport,
@@ -74,6 +77,7 @@ export class SetupController {
   installation = $state<InstallationInfo | null>(null);
   setupState = $state<SetupState | null>(null);
   mode = $state<SetupMode>("first-run");
+  applicationMode = $state<InstallationMode>("installed");
 
   // Flow
   step = $state<SetupStep>("welcome");
@@ -100,6 +104,8 @@ export class SetupController {
   // Provisioning
   progress = $state<Map<ComponentId, ComponentProgress>>(new Map());
   integrationReport = $state<IntegrationReport | null>(null);
+  installationReported = $state(false);
+  installationReady = $state(false);
   provisioningStarted = $state(false);
   provisioningFinished = $state(false);
 
@@ -125,6 +131,9 @@ export class SetupController {
       this.setupState = setupState;
       this.overview = overview;
       this.applyDetection(setupState, installation);
+      this.installationReported = setupState.installation !== null;
+      this.installationReady =
+        setupState.installation?.integration_completed === true;
       this.libraryPath =
         setupState.library_root ?? this.defaultLibraryPath();
       this.libraryPrepared = setupState.library_prepared;
@@ -134,6 +143,9 @@ export class SetupController {
           overview.features.filter((f) => f.enabled).map((f) => f.feature),
         );
         this.features.add("standard_downloads");
+      }
+      if (setupState.features_selected && setupState.library_prepared) {
+        this.step = "preferences";
       }
     } catch (error) {
       this.connectionError = describeError(error);
@@ -146,6 +158,10 @@ export class SetupController {
     state: SetupState,
     installation: InstallationInfo,
   ): void {
+    this.applicationMode = installation.development
+      ? "development"
+      : (state.installation?.installation_mode ?? "installed");
+
     if (!installation.installed && !state.completed) {
       this.mode = "first-run";
     } else if (!state.completed) {
@@ -226,6 +242,19 @@ export class SetupController {
     }
   }
 
+  setApplicationMode(mode: InstallationMode): void {
+    if (this.installation?.development) {
+      this.applicationMode = "development";
+      return;
+    }
+    this.applicationMode = mode;
+    if (mode !== "installed") {
+      this.startMenuShortcut = false;
+      this.desktopShortcut = false;
+      this.launchAtStartup = false;
+    }
+  }
+
   toggleFeature(feature: FeatureId, enabled: boolean): void {
     if (feature === "standard_downloads") return;
     const next = new Set(this.features);
@@ -281,27 +310,15 @@ export class SetupController {
     }
   }
 
-  /** Run installation + provisioning (install stage). */
+  /** Run application setup and component provisioning. */
   async runInstallation(): Promise<void> {
     if (!this.client) return;
     this.provisioningStarted = true;
     this.provisioningFinished = false;
     this.stepError = null;
 
-    // 1. Windows integration (application install, shortcuts, registration).
-    try {
-      this.integrationReport = await applyWindowsIntegration({
-        install_application: true,
-        register_installed_app: true,
-        start_menu_shortcut: this.startMenuShortcut,
-        desktop_shortcut: this.desktopShortcut,
-        launch_at_startup: this.launchAtStartup,
-      });
-    } catch (error) {
-      this.stepError = describeError(error);
-    }
+    await this.runApplicationInstallation();
 
-    // 2. Component provisioning for enabled features.
     const pending = this.componentsToInstall();
     for (const component of pending) {
       try {
@@ -319,6 +336,84 @@ export class SetupController {
       }
     }
     this.updateProvisioningFinished();
+  }
+
+  private async runApplicationInstallation(): Promise<void> {
+    if (!this.client || !this.installation) return;
+    this.installationReported = false;
+    this.installationReady = false;
+
+    try {
+      if (this.applicationMode === "installed") {
+        const request = buildIntegrationRequest(
+          this.applicationMode,
+          this.installation,
+          {
+            startMenuShortcut: this.startMenuShortcut,
+            desktopShortcut: this.desktopShortcut,
+            launchAtStartup: this.launchAtStartup,
+          },
+        );
+        if (!request) {
+          throw new Error("installed mode did not produce an integration request");
+        }
+        this.integrationReport = await applyWindowsIntegration(request);
+      } else {
+        const reason =
+          this.applicationMode === "development"
+            ? "development build runs in place"
+            : "portable mode selected";
+        const verified =
+          this.installation.exe_path.length > 0 &&
+          this.installation.exe_sha256 !== null;
+        this.integrationReport = {
+          steps: [
+            {
+              step: "install_application",
+              applied: false,
+              skipped_reason: reason,
+              error: verified ? null : "the running executable could not be verified",
+            },
+          ],
+          install_dir: this.installation.install_dir,
+          installed_exe: this.installation.exe_path || null,
+          installed_version: this.installation.app_version,
+          installed_sha256: this.installation.exe_sha256,
+          integration_completed: verified,
+          integration_errors: verified
+            ? []
+            : ["the running executable could not be verified"],
+        };
+      }
+
+      this.setupState = await this.client.reportInstallation({
+        installation_mode: this.applicationMode,
+        installed_exe: this.integrationReport.installed_exe,
+        installed_version: this.integrationReport.installed_version,
+        installed_sha256: this.integrationReport.installed_sha256,
+        integration_completed: this.integrationReport.integration_completed,
+        integration_errors: this.integrationReport.integration_errors,
+        relaunch_pending:
+          this.applicationMode === "installed" && this.launchAfterSetup,
+      });
+      this.installationReported = true;
+      this.installationReady =
+        this.setupState.installation?.integration_completed === true;
+      if (!this.installationReady) {
+        this.stepError =
+          this.integrationReport.integration_errors[0] ??
+          "Ravyn could not verify the selected application mode.";
+      }
+    } catch (error) {
+      this.stepError = describeError(error);
+      this.installationReported = false;
+      this.installationReady = false;
+    }
+  }
+
+  async retryApplicationInstallation(): Promise<void> {
+    this.stepError = null;
+    await this.runApplicationInstallation();
   }
 
   componentsToInstall(): ComponentId[] {
@@ -392,9 +487,24 @@ export class SetupController {
     }
   }
 
+  canCompleteSetup(): boolean {
+    return (
+      this.provisioningFinished &&
+      this.installationReported &&
+      this.installationReady &&
+      this.setupState?.restart_required !== true
+    );
+  }
+
   /** Commit setup completion (done stage entry). */
   async completeSetup(): Promise<boolean> {
     if (!this.client) return false;
+    if (!this.canCompleteSetup()) {
+      this.stepError = this.setupState?.restart_required
+        ? "Ravyn must restart its background service before setup can be completed with the selected library."
+        : "The application installation must be verified before setup can be completed.";
+      return false;
+    }
     this.busy = true;
     try {
       this.setupState = await this.client.completeSetup();
@@ -407,11 +517,25 @@ export class SetupController {
     }
   }
 
+  async restartForPendingSettings(): Promise<void> {
+    this.stepError = null;
+    try {
+      await restartApplication();
+    } catch (error) {
+      this.stepError = describeError(error);
+    }
+  }
+
   /** Deterministic handoff to the main window. */
   async openRavyn(): Promise<void> {
     this.stepError = null;
     try {
-      await finishSetupHandoff(this.integrationReport?.installed_exe ?? undefined);
+      await finishSetupHandoff(
+        this.applicationMode === "installed"
+          ? (this.integrationReport?.installed_exe ?? undefined)
+          : undefined,
+        this.launchAfterSetup,
+      );
       // Installed mode exits this portable/setup process after launching the
       // installed copy. Portable mode creates the current-process main window.
     } catch (error) {

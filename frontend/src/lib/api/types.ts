@@ -42,13 +42,31 @@ export interface ComponentStatus {
   state: ComponentState;
   enabled: boolean;
   managed_version: string | null;
+  detected_version: string | null;
   managed_path: string | null;
   custom_path: string | null;
   effective_path: string | null;
+  available_version: string | null;
+  rollback_available: boolean;
   error_message: string | null;
   last_checked_at: string | null;
+  verified_at: string | null;
   install_started_at: string | null;
   install_completed_at: string | null;
+}
+
+export interface ComponentHealth {
+  component: ComponentId;
+  healthy: boolean;
+  path: string | null;
+  version: string | null;
+  message: string | null;
+}
+
+export interface EngineCleanupReport {
+  removed_versions: string[];
+  removed_temp_files: string[];
+  bytes_freed: number;
 }
 
 export interface ComponentOverview {
@@ -64,8 +82,40 @@ export interface FeatureSelection {
   enabled: boolean;
 }
 
+export type SetupLifecycleState =
+  | "not_started"
+  | "in_progress"
+  | "restart_required"
+  | "ready_to_complete"
+  | "completed";
+
+export type InstallationMode = "installed" | "portable" | "development";
+
+export interface SetupInstallationState {
+  installation_mode: InstallationMode;
+  installed_exe: string | null;
+  installed_version: string | null;
+  installed_sha256: string | null;
+  integration_completed: boolean;
+  integration_errors: string[];
+  relaunch_pending: boolean;
+}
+
+export interface ReportInstallationRequest {
+  installation_mode: InstallationMode;
+  installed_exe: string | null;
+  installed_version: string | null;
+  installed_sha256: string | null;
+  integration_completed: boolean;
+  integration_errors: string[];
+  relaunch_pending: boolean;
+}
+
 export interface SetupState {
   completed: boolean;
+  lifecycle: SetupLifecycleState;
+  ready_to_complete: boolean;
+  restart_required: boolean;
   completed_at: string | null;
   completed_app_version: string | null;
   app_version: string;
@@ -75,6 +125,7 @@ export interface SetupState {
   library_root: string | null;
   library_prepared: boolean;
   data_dir: string;
+  installation: SetupInstallationState | null;
 }
 
 export interface PrepareLibraryResult {
@@ -378,6 +429,649 @@ export interface ImportResult {
   truncated: boolean;
   items: ImportItemResult[];
 }
+
+
+// --- Library / basket / torrents / automation / settings / diagnostics ---
+
+export type LibraryCategory =
+  | "downloads"
+  | "videos"
+  | "music"
+  | "documents"
+  | "images"
+  | "archives"
+  | "torrents"
+  | "playlists"
+  | "temporary"
+  | "other";
+
+export type LibraryEntryState = "active" | "trashed" | "missing";
+
+export interface LibraryEntry {
+  id: string;
+  job_id: string | null;
+  source_url: string;
+  mirrors: string[];
+  sha256: string | null;
+  size_bytes: number | null;
+  path: string;
+  filename: string;
+  category: LibraryCategory;
+  mime_type: string | null;
+  media_metadata: unknown;
+  torrent_metadata: unknown;
+  tags: string[];
+  trust: unknown | null;
+  state: LibraryEntryState;
+  trash_path: string | null;
+  imported: boolean;
+  downloaded_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LibraryListParams extends PageQueryParams {
+  q?: string;
+  category?: LibraryCategory;
+  state?: LibraryEntryState;
+  tag?: string;
+  mime?: string;
+  downloaded_from?: string;
+  downloaded_to?: string;
+}
+
+export interface LibraryImportRequest {
+  path: string;
+  tags?: string[];
+  max_entries?: number;
+  max_depth?: number;
+}
+
+export interface LibraryImportStatus {
+  run_id: string | null;
+  running: boolean;
+  root: string | null;
+  scanned: number;
+  imported: number;
+  duplicates: number;
+  skipped: number;
+  errors: string[];
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface VerifyLibraryReport {
+  checked: number;
+  missing: number;
+}
+
+export interface RelocationReport {
+  scanned: number;
+  repaired: number;
+  unmatched: number;
+}
+
+export interface DuplicateCandidate {
+  entry: LibraryEntry;
+  matches: string[];
+}
+
+export interface CleanupPolicies {
+  temporary_max_age_days: number;
+  trash_retention_days: number;
+  log_retention_days: number;
+  cache_retention_days: number;
+}
+
+export interface CleanupReport {
+  temporary_files_removed: number;
+  temporary_bytes_removed: number;
+  cache_files_removed: number;
+  cache_bytes_removed: number;
+  trash_entries_purged: number;
+  job_logs_removed: number;
+}
+
+export interface DownloadPresetPayload {
+  destination: string | null;
+  filename_template: string | null;
+  priority: number | null;
+  speed_limit_bps: number | null;
+  duplicate_policy: string | null;
+  options: DownloadOptions | null;
+  template_variables: Record<string, string>;
+  scheduler: unknown | null;
+  rules: string[];
+  metadata: unknown;
+}
+
+export interface DownloadPreset {
+  id: string;
+  name: string;
+  payload: DownloadPresetPayload;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PutDownloadPreset {
+  name: string;
+  payload: Partial<DownloadPresetPayload>;
+}
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  settings_patch: PersistentSettingsPatch;
+  default_preset_id: string | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PutUserProfile {
+  name: string;
+  settings_patch: PersistentSettingsPatch;
+  default_preset_id: string | null;
+}
+
+export interface ActivateProfileResponse {
+  profile: UserProfile;
+  restart_required: boolean;
+}
+
+export interface BasketItem {
+  id: string;
+  position: number;
+  request: CreateJob;
+  preset_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BasketStartItemResult {
+  basket_item_id: string;
+  job: Job | null;
+  error: string | null;
+}
+
+export interface BasketStartResult {
+  items: BasketStartItemResult[];
+  started: number;
+  failed: number;
+}
+
+export interface TorrentRecord {
+  job_id: string;
+  torrent_id: string;
+  info_hash: string | null;
+  name: string | null;
+  state: string;
+  downloaded_bytes: number;
+  uploaded_bytes: number;
+  total_bytes: number | null;
+  download_speed_bps: number;
+  upload_speed_bps: number;
+  peers_connected: number;
+  seeders: number;
+  leechers: number;
+  raw: unknown;
+  updated_at: string;
+}
+
+export interface TorrentFile {
+  index: number;
+  path: string;
+  size_bytes: number | null;
+}
+
+export interface TorrentProbeRequest {
+  source: string;
+  destination?: string | null;
+  file_regex?: string | null;
+}
+
+export interface TorrentProbe {
+  torrent_id: string | null;
+  info_hash: string | null;
+  name: string | null;
+  total_bytes: number | null;
+  files: TorrentFile[];
+  raw: unknown;
+}
+
+export interface TorrentDetails {
+  torrent_id: string;
+  info_hash: string | null;
+  name: string | null;
+  state: string | null;
+  total_bytes: number | null;
+  files: TorrentFile[];
+  raw: unknown;
+}
+
+export interface TorrentSnapshot {
+  torrent_id: string;
+  info_hash: string | null;
+  name: string | null;
+  state: string;
+  downloaded_bytes: number;
+  uploaded_bytes: number;
+  total_bytes: number | null;
+  download_speed_bps: number;
+  upload_speed_bps: number;
+  peers_connected: number;
+  seeders: number;
+  leechers: number;
+  finished: boolean;
+  progress: number | null;
+  raw: unknown;
+}
+
+export interface TorrentPeer {
+  address: string | null;
+  client: string | null;
+  state: string | null;
+  downloaded_bytes: number | null;
+  uploaded_bytes: number | null;
+  download_speed_bps: number | null;
+  upload_speed_bps: number | null;
+  raw: unknown;
+}
+
+export interface TorrentPeerStats {
+  peers: TorrentPeer[];
+  raw: unknown;
+}
+
+export interface TorrentGlobalStats {
+  downloaded_bytes: number | null;
+  uploaded_bytes: number | null;
+  download_speed_bps: number | null;
+  upload_speed_bps: number | null;
+  active_torrents: number | null;
+  raw: unknown;
+}
+
+export interface TorrentDhtStats {
+  id: string;
+  outstanding_requests: number;
+  routing_table_size: number;
+  routing_table_size_v6: number;
+}
+
+export interface TorrentSeedingState {
+  job_id: string;
+  torrent_id: string;
+  started_at: string;
+  stopped_at: string | null;
+  stop_reason: string | null;
+  last_ratio: number | null;
+  updated_at: string;
+}
+
+export interface MediaProbeRequest {
+  url: string;
+  cookies_from_browser?: string | null;
+  cookies_file?: string | null;
+  proxy?: string | null;
+}
+
+export interface MediaFormat {
+  format_id: string;
+  extension: string | null;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  bitrate_kbps: number | null;
+  audio_bitrate_kbps: number | null;
+  filesize: number | null;
+  filesize_approx: number | null;
+  protocol: string | null;
+  note: string | null;
+}
+
+export interface MediaProbe {
+  id: string | null;
+  title: string | null;
+  description: string | null;
+  webpage_url: string | null;
+  extractor: string | null;
+  duration: number | null;
+  live_status: string | null;
+  thumbnail: string | null;
+  uploader: string | null;
+  playlist_count: number | null;
+  formats: MediaFormat[];
+  subtitles: string[];
+  automatic_captions: string[];
+}
+
+export interface MediaItemRecord {
+  id: string;
+  job_id: string;
+  item_key: string;
+  extractor: string | null;
+  media_id: string | null;
+  title: string | null;
+  webpage_url: string | null;
+  playlist_id: string | null;
+  playlist_title: string | null;
+  playlist_index: number | null;
+  playlist_count: number | null;
+  extension: string | null;
+  state: string;
+  output_path: string | null;
+  output_id: string | null;
+  retry_job_id: string | null;
+  error: string | null;
+  metadata: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MediaItemSummary {
+  job_id: string;
+  total: number;
+  planned: number;
+  downloading: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  retried: number;
+  playlist_id: string | null;
+  playlist_title: string | null;
+  declared_playlist_count: number | null;
+}
+
+export interface MediaArchiveRecord {
+  extractor: string;
+  media_id: string;
+  first_job_id: string | null;
+  last_job_id: string | null;
+  last_output_id: string | null;
+  webpage_url: string | null;
+  downloaded_at: string;
+  metadata: unknown;
+}
+
+export interface MediaItemRetryResult {
+  item_id: string;
+  job: Job | null;
+  error_code: string | null;
+  error: string | null;
+}
+
+export interface RetryFailedMediaItemsResponse {
+  attempted: number;
+  accepted: number;
+  failed: number;
+  results: MediaItemRetryResult[];
+}
+
+export interface RuleMatcher {
+  domains: string[];
+  extensions: string[];
+  mime_types: string[];
+  url_regex: string | null;
+}
+
+export interface RuleActions {
+  destination: string | null;
+  tags: string[];
+  speed_limit_bps: number | null;
+  post_actions: PostAction[];
+}
+
+export interface AutomationRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  matcher: RuleMatcher;
+  actions: RuleActions;
+}
+
+export interface RuleInput {
+  name: string;
+  enabled: boolean;
+  priority: number;
+  matcher: RuleMatcher;
+  actions: RuleActions;
+}
+
+export type ScheduleMode = "download" | "sniff_resources";
+export type ScheduleOverlapPolicy = "skip" | "queue" | "replace" | "allow_parallel";
+export type ScheduleMissedRunPolicy = "skip" | "run_once" | "catch_up";
+
+export interface ScheduleInput {
+  enabled: boolean;
+  source: string;
+  kind: JobKind;
+  destination: string;
+  mode: ScheduleMode;
+  automation: unknown | null;
+  interval_seconds: number | null;
+  cron_expression: string | null;
+  next_run_at: string | null;
+  timezone_offset_minutes: number;
+  timezone_name: string | null;
+  overlap_policy: ScheduleOverlapPolicy;
+  missed_run_policy: ScheduleMissedRunPolicy;
+  max_catch_up_runs: number;
+  paused_until: string | null;
+  options: DownloadOptions;
+}
+
+export interface ScheduleExecutionRecord {
+  id: string;
+  schedule_id: string;
+  intended_run_at: string;
+  state: string;
+  summary: unknown | null;
+  error: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface ScheduleRecord {
+  id: string;
+  enabled: boolean;
+  source: string;
+  kind: JobKind;
+  destination: string;
+  mode: ScheduleMode;
+  interval_seconds: number | null;
+  cron_expression: string | null;
+  next_run_at: string;
+  timezone_offset_minutes: number;
+  timezone_name: string | null;
+  overlap_policy: ScheduleOverlapPolicy;
+  missed_run_policy: ScheduleMissedRunPolicy;
+  max_catch_up_runs: number;
+  catch_up_runs: number;
+  paused_until: string | null;
+  options: DownloadOptions;
+  last_run_at: string | null;
+  failure_count: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PersistentSettings {
+  download_dir: string | null;
+  library_root: string | null;
+  library_auto_organize: boolean;
+  library_category_overrides: Record<string, LibraryCategory>;
+  max_active: number;
+  max_segments: number;
+  segment_threshold_mib: number;
+  max_connections_per_host: number;
+  global_speed_limit_bps: number;
+  bandwidth_schedule: unknown;
+  ytdlp: string;
+  ffmpeg: string;
+  rqbit: string;
+  rqbit_api: string;
+  rqbit_credentials_secret_id: string | null;
+  seven_zip: string;
+  auto_provision: boolean;
+  max_extract_mib: number;
+  max_extract_files: number;
+  max_extract_depth: number;
+  max_extract_ratio: number;
+  max_retries: number;
+  host_circuit_threshold: number;
+  host_circuit_cooldown_secs: number;
+  max_torrent_mib: number;
+  max_html_mib: number;
+  max_sniff_resources: number;
+  max_batch_urls: number;
+  connect_timeout_secs: number;
+  read_timeout_secs: number;
+  media_probe_timeout_secs: number;
+  media_probe_max_mib: number;
+  rqbit_timeout_secs: number;
+  rqbit_stats_timeout_secs: number;
+  torrent_refresh_concurrency: number;
+  image_converter: string;
+  avif_quality: number;
+  cookie_dir: string | null;
+  api_request_timeout_secs: number;
+  api_max_concurrent_requests: number;
+  api_rate_limit_per_minute: number;
+  api_rate_limit_burst: number;
+}
+
+export type PersistentSettingsPatch = Partial<PersistentSettings>;
+
+export interface SettingsResponse {
+  values: PersistentSettings;
+  application: Record<string, "live" | "backend_restart">;
+  restart_required: boolean;
+}
+
+export interface SettingsIssue {
+  field: string;
+  message: string;
+}
+
+export interface SettingsValidationResponse {
+  valid: boolean;
+  restart_required: boolean;
+  issues: SettingsIssue[];
+}
+
+export interface ReadinessStatus {
+  ready: boolean;
+  database_writable: boolean;
+  download_root_writable: boolean;
+  progress_writer_running: boolean;
+  accepting_tasks: boolean;
+}
+
+export interface DatabaseStatus {
+  integrity: string;
+}
+
+export interface DependencyStatus {
+  name: string;
+  available: boolean;
+  path: string;
+  version: string | null;
+  compatibility: "compatible" | "incompatible" | "unknown";
+  missing_capabilities: string[];
+  error: string | null;
+}
+
+export interface TorrentDependencyStatus {
+  api_url: string;
+  available: boolean;
+  server: string | null;
+  version: string | null;
+  compatibility: "compatible" | "incompatible" | "unknown";
+  missing_required_apis: string[];
+  error: string | null;
+}
+
+export interface DependenciesStatus {
+  media: DependencyStatus[];
+  torrent: TorrentDependencyStatus;
+}
+
+export interface SystemCapabilities {
+  backend_version: string;
+  api_version: string;
+  database_version: number;
+  supported_job_kinds: JobKind[];
+  external_tools: DependenciesStatus;
+  available_features: string[];
+  disabled_features: string[];
+  platform: string;
+  authentication_modes: string[];
+}
+
+export interface AuditRecord {
+  id: number | string;
+  timestamp?: string;
+  created_at?: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  outcome: string;
+  metadata?: unknown;
+  [key: string]: unknown;
+}
+
+export interface AuditChainStatus {
+  valid: boolean;
+  chained_entries: number;
+  head: string | null;
+}
+
+export interface BackupRecord {
+  name: string;
+  size_bytes: number;
+  modified_at: string | null;
+}
+
+export interface BackupVerification {
+  name: string;
+  integrity: string;
+}
+
+export interface PendingRestore {
+  backup_name: string;
+  requested_at: string;
+  phase: "staged" | "applied";
+}
+
+export interface RestoreResultRecord {
+  backup_name: string;
+  outcome: string;
+  completed_at: string;
+  message: string;
+}
+
+export interface RestoreStatus {
+  pending: PendingRestore | null;
+  last_result: RestoreResultRecord | null;
+  restart_required: boolean;
+}
+
+export interface HostProfile {
+  host: string;
+  successful_downloads: number;
+  failed_downloads: number;
+  consecutive_failures: number;
+  average_throughput_bps: number | null;
+  range_failures: number;
+  circuit_open_until: string | null;
+  last_error: string | null;
+}
+
 
 // --- Events (Server-Sent Events on /v1/events) ---
 

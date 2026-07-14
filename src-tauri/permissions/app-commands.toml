@@ -1,0 +1,54 @@
+[[permission]]
+identifier = "allow-backend-info"
+description = "Allows a Ravyn window to obtain the loopback backend endpoint and process-scoped API token."
+commands.allow = ["backend_info"]
+
+[[permission]]
+identifier = "allow-setup-installation-info"
+description = "Allows only the setup capability to inspect the running Ravyn executable and installation state."
+commands.allow = ["setup_installation_info"]
+
+[[permission]]
+identifier = "allow-apply-windows-integration"
+description = "Allows only the setup capability to install and register Ravyn for the current Windows user."
+commands.allow = ["apply_windows_integration"]
+
+[[permission]]
+identifier = "allow-finish-setup-handoff"
+description = "Allows only the setup capability to finish setup and hand off to the verified application copy."
+commands.allow = ["finish_setup_handoff"]
+
+[[permission]]
+identifier = "allow-restart-application"
+description = "Allows only the setup capability to restart Ravyn after settings that require a fresh backend are persisted."
+commands.allow = ["restart_application"]
+
+[[permission]]
+identifier = "allow-main-window-ready"
+description = "Allows only the main capability to reveal the main window after its backend connection is ready."
+commands.allow = ["main_window_ready"]
+
+[[permission]]
+identifier = "allow-app-update-status"
+description = "Allows the main Ravyn window to read the signed background application-update state."
+commands.allow = ["app_update_status"]
+
+[[permission]]
+identifier = "allow-check-app-update"
+description = "Allows the main Ravyn window to manually recheck and stage a signed application update."
+commands.allow = ["check_app_update"]
+
+[[permission]]
+identifier = "allow-desktop-appearance"
+description = "Allows the main Ravyn window to read cached Windows wallpaper geometry and accent metadata for its synthetic backdrop."
+commands.allow = ["desktop_appearance"]
+
+[[permission]]
+identifier = "allow-open-native-path"
+description = "Allows the main Ravyn window to open an existing absolute local file or folder through Windows."
+commands.allow = ["open_native_path"]
+
+[[permission]]
+identifier = "allow-reveal-native-path"
+description = "Allows the main Ravyn window to reveal an existing absolute local path in Windows Explorer."
+commands.allow = ["reveal_native_path"]

@@ -4,10 +4,12 @@
   let {
     text,
     placement = "bottom",
+    disabled = false,
     children,
   }: {
     text: string;
     placement?: "top" | "bottom" | "left" | "right";
+    disabled?: boolean;
     children: Snippet;
   } = $props();
 
@@ -15,6 +17,7 @@
   let showTimer: ReturnType<typeof setTimeout> | null = null;
 
   function show(): void {
+    if (disabled) return;
     showTimer = setTimeout(() => {
       visible = true;
     }, 400);
@@ -28,15 +31,15 @@
 </script>
 
 <span
-  class="tooltip-host"
+  class="tooltip-host tooltip-wrapper"
   role="presentation"
   onmouseenter={show}
   onmouseleave={hide}
-  onfocusin={() => (visible = true)}
+  onfocusin={() => { if (!disabled) visible = true; }}
   onfocusout={hide}
 >
   {@render children()}
-  {#if visible && text}
+  {#if visible && text && !disabled}
     <span class="tooltip {placement}" role="tooltip">{text}</span>
   {/if}
 </span>

@@ -177,6 +177,138 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the app_update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-app-update-status",
+          "markdownDescription": "Enables the app_update_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the apply_windows_integration command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-apply-windows-integration",
+          "markdownDescription": "Enables the apply_windows_integration command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the backend_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-backend-info",
+          "markdownDescription": "Enables the backend_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_app_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-app-update",
+          "markdownDescription": "Enables the check_app_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_appearance command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-appearance",
+          "markdownDescription": "Enables the desktop_appearance command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the finish_setup_handoff command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-finish-setup-handoff",
+          "markdownDescription": "Enables the finish_setup_handoff command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the main_window_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-main-window-ready",
+          "markdownDescription": "Enables the main_window_ready command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_native_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-native-path",
+          "markdownDescription": "Enables the open_native_path command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the restart_application command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-restart-application",
+          "markdownDescription": "Enables the restart_application command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reveal_native_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reveal-native-path",
+          "markdownDescription": "Enables the reveal_native_path command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the setup_installation_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-setup-installation-info",
+          "markdownDescription": "Enables the setup_installation_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the app_update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-app-update-status",
+          "markdownDescription": "Denies the app_update_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the apply_windows_integration command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-apply-windows-integration",
+          "markdownDescription": "Denies the apply_windows_integration command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the backend_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-backend-info",
+          "markdownDescription": "Denies the backend_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_app_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-app-update",
+          "markdownDescription": "Denies the check_app_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_appearance command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-appearance",
+          "markdownDescription": "Denies the desktop_appearance command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the finish_setup_handoff command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-finish-setup-handoff",
+          "markdownDescription": "Denies the finish_setup_handoff command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the main_window_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-main-window-ready",
+          "markdownDescription": "Denies the main_window_ready command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_native_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-native-path",
+          "markdownDescription": "Denies the open_native_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the restart_application command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-restart-application",
+          "markdownDescription": "Denies the restart_application command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reveal_native_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reveal-native-path",
+          "markdownDescription": "Denies the reveal_native_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the setup_installation_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-setup-installation-info",
+          "markdownDescription": "Denies the setup_installation_info command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

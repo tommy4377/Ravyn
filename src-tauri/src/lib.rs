@@ -3,9 +3,13 @@
 //! Embeds the Ravyn backend in-process, decides whether to open the setup or
 //! the main window, and exposes the native commands the setup flow needs.
 
+mod app_updates;
+mod appearance;
 mod backend;
 mod installation;
 mod integration;
+mod setup_guard;
+mod shell_paths;
 mod uninstall;
 
 use tauri::Manager;
@@ -21,10 +25,61 @@ async fn backend_info(state: tauri::State<'_, BackendHandle>) -> Result<BackendI
     state.wait_ready(BACKEND_READY_TIMEOUT).await
 }
 
+#[derive(serde::Deserialize)]
+struct BackendSetupState {
+    completed: bool,
+}
+
+/// Read the backend setup state through the same authenticated loopback API
+/// used by the webview. This keeps the database-backed lifecycle authoritative
+/// even when a compromised setup page attempts to call native commands out of
+/// order.
+async fn backend_setup_completed(state: &BackendHandle) -> Result<bool, String> {
+    let info = state.wait_ready(BACKEND_READY_TIMEOUT).await?;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/setup", info.base_url))
+        .bearer_auth(info.api_token)
+        .send()
+        .await
+        .map_err(|error| format!("failed to read the backend setup state: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the backend rejected the setup-state check with HTTP {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<BackendSetupState>()
+        .await
+        .map(|state| state.completed)
+        .map_err(|error| format!("failed to decode the backend setup state: {error}"))
+}
+
+async fn require_backend_setup_state(
+    state: &BackendHandle,
+    expected_completed: bool,
+) -> Result<(), String> {
+    let completed = backend_setup_completed(state).await?;
+    if completed == expected_completed {
+        Ok(())
+    } else if expected_completed {
+        Err("setup must be completed in the backend before opening Ravyn".into())
+    } else {
+        Err("setup has already been completed in the backend".into())
+    }
+}
+
 /// Detect the installation state of the running executable.
 #[tauri::command]
-fn setup_installation_info() -> installation::InstallationInfo {
-    installation::detect()
+async fn setup_installation_info(
+    window: tauri::WebviewWindow,
+    backend: tauri::State<'_, BackendHandle>,
+    guard: tauri::State<'_, setup_guard::SetupCommandGuard>,
+) -> Result<installation::InstallationInfo, String> {
+    require_window(&window, "setup")?;
+    guard.ensure_setup_window_allowed()?;
+    require_backend_setup_state(&backend, false).await?;
+    Ok(installation::detect())
 }
 
 /// Apply the Windows integration selected during setup.
@@ -32,11 +87,24 @@ fn setup_installation_info() -> installation::InstallationInfo {
 /// Runs on a blocking thread because shortcut creation shells out.
 #[tauri::command]
 async fn apply_windows_integration(
+    window: tauri::WebviewWindow,
     request: integration::IntegrationRequest,
+    backend: tauri::State<'_, BackendHandle>,
+    guard: tauri::State<'_, setup_guard::SetupCommandGuard>,
 ) -> Result<integration::IntegrationReport, String> {
-    tauri::async_runtime::spawn_blocking(move || integration::apply(&request))
+    require_window(&window, "setup")?;
+    guard.ensure_setup_window_allowed()?;
+    require_backend_setup_state(&backend, false).await?;
+    guard.begin_integration()?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || integration::apply(&request))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string());
+    let completed = result
+        .as_ref()
+        .is_ok_and(|report| report.integration_completed);
+    guard.finish_integration(completed)?;
+    result
 }
 
 /// Complete setup by launching the verified installed copy when one was
@@ -45,9 +113,37 @@ async fn apply_windows_integration(
 /// deterministically applied.
 #[tauri::command]
 async fn finish_setup_handoff(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     installed_exe: Option<String>,
+    launch_after_setup: bool,
+    backend: tauri::State<'_, BackendHandle>,
+    guard: tauri::State<'_, setup_guard::SetupCommandGuard>,
 ) -> Result<(), String> {
+    require_window(&window, "setup")?;
+    guard.ensure_setup_window_allowed()?;
+    require_backend_setup_state(&backend, true).await?;
+    guard.begin_handoff()?;
+
+    let result = prepare_setup_handoff(&app, installed_exe, launch_after_setup);
+    guard.finish_handoff(result.is_ok())?;
+    let should_exit = result?;
+    if should_exit {
+        app.exit(0);
+    }
+    Ok(())
+}
+
+/// Prepare the setup handoff and report whether the current process should
+/// exit after the guard has committed the transition.
+fn prepare_setup_handoff(
+    app: &tauri::AppHandle,
+    installed_exe: Option<String>,
+    launch_after_setup: bool,
+) -> Result<bool, String> {
+    if !launch_after_setup {
+        return Ok(true);
+    }
     if let Some(installed_exe) = installed_exe {
         let expected = installation::default_install_dir()
             .map(std::path::PathBuf::from)
@@ -55,7 +151,9 @@ async fn finish_setup_handoff(
             .join("Ravyn.exe");
         let supplied = std::path::PathBuf::from(installed_exe);
         if !same_path(&expected, &supplied) || !expected.is_file() {
-            return Err("the setup handoff target is not the verified installed Ravyn executable".into());
+            return Err(
+                "the setup handoff target is not the verified installed Ravyn executable".into(),
+            );
         }
         let working_directory = expected
             .parent()
@@ -64,15 +162,55 @@ async fn finish_setup_handoff(
             .current_dir(working_directory)
             .spawn()
             .map_err(|error| format!("failed to launch the installed Ravyn copy: {error}"))?;
-        app.exit(0);
-        return Ok(());
+        return Ok(true);
     }
 
     // Portable/development mode remains in the current process.
-    if app.get_webview_window("main").is_some() {
-        return Ok(());
+    if app.get_webview_window("main").is_none() {
+        create_main_window(app, false).map_err(|error| error.to_string())?;
     }
-    create_main_window(&app, false).map_err(|e| e.to_string())?;
+    Ok(false)
+}
+
+fn require_window(window: &tauri::WebviewWindow, expected: &str) -> Result<(), String> {
+    if window.label() == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "command is only available to the {expected} window"
+        ))
+    }
+}
+
+/// Restart the desktop process so persisted settings that require a fresh
+/// backend configuration can take effect during setup.
+#[tauri::command]
+async fn restart_application(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    backend: tauri::State<'_, BackendHandle>,
+    guard: tauri::State<'_, setup_guard::SetupCommandGuard>,
+) -> Result<(), String> {
+    require_window(&window, "setup")?;
+    guard.ensure_setup_window_allowed()?;
+    require_backend_setup_state(&backend, false).await?;
+    guard.begin_restart()?;
+
+    let result = (|| {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve the Ravyn executable: {error}"))?;
+        let working_directory = executable
+            .parent()
+            .ok_or_else(|| "the Ravyn executable has no parent directory".to_owned())?;
+        std::process::Command::new(&executable)
+            .current_dir(working_directory)
+            .spawn()
+            .map_err(|error| format!("failed to restart Ravyn: {error}"))?;
+        Ok::<(), String>(())
+    })();
+    guard.finish_restart(result.is_ok())?;
+    result?;
+    app.exit(0);
     Ok(())
 }
 
@@ -86,10 +224,70 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
+
+
+/// Open an existing file in its Windows default application or open a folder.
+#[tauri::command]
+async fn open_native_path(
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(move || shell_paths::open(&path))
+        .await
+        .map_err(|error| format!("the native open worker failed: {error}"))?
+}
+
+/// Reveal an existing file in Explorer, or open the directory itself.
+#[tauri::command]
+async fn reveal_native_path(
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(move || shell_paths::reveal(&path))
+        .await
+        .map_err(|error| format!("the Explorer worker failed: {error}"))?
+}
+
+/// Return the Windows wallpaper and accent metadata used by the synthetic backdrop.
+#[tauri::command]
+async fn desktop_appearance(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<appearance::DesktopAppearance, String> {
+    require_window(&window, "main")?;
+    appearance::read(app, window).await
+}
+
+/// Return the current silent application-update state.
+#[tauri::command]
+fn app_update_status(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<app_updates::AppUpdateStatus, String> {
+    require_window(&window, "main")?;
+    app_updates::status(&app)
+}
+
+/// Manually recheck the signed application-update feed.
+#[tauri::command]
+async fn check_app_update(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<app_updates::AppUpdateStatus, String> {
+    require_window(&window, "main")?;
+    app_updates::check_now(app).await
+}
+
 /// Called by the main window frontend once it has verified the backend
 /// connection. Shows the main window, focuses it, then closes setup.
 #[tauri::command]
-async fn main_window_ready(app: tauri::AppHandle) -> Result<(), String> {
+async fn main_window_ready(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window does not exist".to_owned())?;
@@ -98,6 +296,7 @@ async fn main_window_ready(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(setup) = app.get_webview_window("setup") {
         setup.close().map_err(|e| e.to_string())?;
     }
+    app_updates::start_background_check(app);
     Ok(())
 }
 
@@ -151,13 +350,38 @@ pub fn run() {
 
     builder
         .manage(handle.clone())
+        .manage(setup_guard::SetupCommandGuard::default())
+        .manage(app_updates::AppUpdateState::default())
         .invoke_handler(tauri::generate_handler![
             backend_info,
             setup_installation_info,
             apply_windows_integration,
             finish_setup_handoff,
+            restart_application,
             main_window_ready,
+            app_update_status,
+            check_app_update,
+            desktop_appearance,
+            open_native_path,
+            reveal_native_path,
         ])
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                match app_updates::install_pending_on_close(window.app_handle()) {
+                    Ok(true) => {
+                        api.prevent_close();
+                        window.app_handle().exit(0);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "failed to schedule the staged app update");
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let backend = handle.clone();
@@ -172,6 +396,13 @@ pub fn run() {
                         false
                     }
                 };
+                if let Err(error) = app_handle
+                    .state::<setup_guard::SetupCommandGuard>()
+                    .initialize(setup_completed)
+                {
+                    tracing::error!(%error, "failed to initialize the native setup guard");
+                    return;
+                }
                 let result = if setup_completed {
                     create_main_window(&app_handle, true).map(|_| ())
                 } else {

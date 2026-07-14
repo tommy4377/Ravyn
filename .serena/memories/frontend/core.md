@@ -1,12 +1,4 @@
-# Frontend map
-
-- Svelte 5 (runes) + TypeScript + Vite, **no SvelteKit**. Plain multi-window Tauri 2 app: `frontend/src/App.svelte` branches on `getCurrentWindow().label` ("setup" vs "main") to render `SetupApp.svelte` or `AppShell.svelte`. No client router; navigation is store-driven (`stores/navigation.svelte.ts`).
-- No Tailwind, no shadcn-svelte as a dependency. Styling is a hand-authored Fluent-Design-2 token system (`frontend/src/styles/tokens.css`, CSS custom properties, light/dark/forced-colors via `[data-theme]`/`[data-density]` on `<html>`). shadcn-svelte MCP is reference-only for accessible component *structure*, per `AGENTS.md`.
-- Layered architecture: `lib/api/` (transport.ts + errors.ts + client.ts=`RavynClient` + types.ts, all wire types mirrored from `src/core/models.rs`/`src/api/routes/*`) → `lib/services/` (domain façades, e.g. `JobsService`) → `lib/stores/` (Svelte-5-rune singletons: `connection`, `jobsStore`, `navigation`, `notifications`, plus per-view `SelectionStore` instances) → screens in `lib/shell/` (chrome) and per-domain folders (`lib/downloads/`, `lib/setup/`).
-- Reactivity rule: use `SvelteMap`/`SvelteSet` from `svelte/reactivity` for any Map/Set held in `$state`-like store classes — plain `Map` in a class field is NOT deeply reactive on `.set()`/`.delete()`. `jobsStore.byId`/`liveProgress`, `SelectionStore.ids` all use this.
-- Only nav sections with a real connected screen appear in `NavigationView` — no placeholder pages (design-plan rule). As of this checkout only "Downloads" is wired.
-- Setup flow (`lib/setup/`) is a complete, tested, backend-connected vertical slice — treat it as the reference implementation for new slices, not something to redesign.
-- Vitest env is `node` (not jsdom/browser); `.svelte.ts` store files are compiled by the Svelte vite-plugin so rune syntax works in plain `*.test.ts` files that import them.
-- Detailed Downloads-slice architecture (event coalescing, permitted-action mapping, virtualization): `mem:frontend/downloads`.
-- Living docs kept in sync with frontend work, at repo root: `BACKEND_CAPABILITY_MATRIX.md`, `API_UI_MAP.md`, `SCREEN_INVENTORY.md`, `DESKTOP_RELEASE_CHECKLIST.md`. Update these with every completed vertical slice.
-- Known environment gap: `cargo tauri dev`'s `beforeDevCommand` in `src-tauri/tauri.conf.json` resolves `../frontend` against the wrong cwd and fails with ENOENT. Workaround: run `npm run dev` in `frontend/` and `cargo run --no-default-features` in `src-tauri/` separately (bypasses the broken hook). Not fixed — it's backend/shell config.
+# Frontend boundary
+- No `.svelte`, `.ts`, `.js`, or `package.json` frontend exists in the current repository checkout.
+- Serena is configured with Svelte language support for future files, but there is presently nothing to index or map beyond that capability.
+- Backend-only scope remains authoritative unless the user explicitly adds frontend work.

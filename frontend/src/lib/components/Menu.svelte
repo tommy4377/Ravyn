@@ -138,9 +138,11 @@
     display: flex;
     flex-direction: column;
     border-radius: var(--radius-layer);
-    border: 1px solid var(--stroke-control);
-    background: var(--bg-layer);
+    border: 1px solid var(--stroke-surface);
+    background: var(--surface-flyout);
     box-shadow: var(--shadow-flyout);
+    backdrop-filter: blur(28px) saturate(125%);
+    -webkit-backdrop-filter: blur(28px) saturate(125%);
   }
   .separator {
     height: 1px;

@@ -5,6 +5,8 @@
     placeholder = "",
     disabled = false,
     readonly = false,
+    inputmode,
+    type = "text",
     error = "",
     oninput,
   }: {
@@ -13,6 +15,8 @@
     placeholder?: string;
     disabled?: boolean;
     readonly?: boolean;
+    inputmode?: "none" | "text" | "tel" | "url" | "email" | "numeric" | "decimal" | "search";
+    type?: "text" | "number" | "password" | "email" | "url";
     error?: string;
     oninput?: (value: string) => void;
   } = $props();
@@ -26,7 +30,8 @@
     id="{id}-input"
     class="input"
     class:invalid={!!error}
-    type="text"
+    {type}
+    {inputmode}
     bind:value
     {placeholder}
     {disabled}
