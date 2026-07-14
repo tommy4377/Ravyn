@@ -227,7 +227,10 @@ mod tests {
         tokio::fs::write(&temporary_file, b"temporary")
             .await
             .unwrap();
-        std::fs::File::open(&temporary_file)
+        // Windows requires write access to change file times.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary_file)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(old))
             .unwrap();
@@ -235,7 +238,9 @@ mod tests {
         tokio::fs::create_dir_all(&cache_directory).await.unwrap();
         let cache_file = cache_directory.join("old.cache");
         tokio::fs::write(&cache_file, b"cache").await.unwrap();
-        std::fs::File::open(&cache_file)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&cache_file)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(old))
             .unwrap();

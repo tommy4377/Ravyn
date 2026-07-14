@@ -17,11 +17,14 @@ import type {
   JobKind,
   JobListParams,
   JobLogRecord,
+  MediaOptions,
   JobOutput,
   JobPage,
   Page,
   PageQueryParams,
   SegmentRecord,
+  TorrentOptions,
+  TrustReport,
   UpdateJob,
 } from "../api/types";
 
@@ -40,6 +43,11 @@ export interface AddDownloadInput {
   userAgent?: string;
   referer?: string;
   proxy?: string;
+  proxySecretId?: string;
+  cookiesSecretId?: string;
+  authenticationHeaderSecretId?: string;
+  media?: MediaOptions;
+  torrent?: TorrentOptions;
 }
 
 export interface AddDownloadResult {
@@ -64,6 +72,13 @@ function buildOptions(input: AddDownloadInput): DownloadOptions {
   if (input.userAgent) options.user_agent = input.userAgent;
   if (input.referer) options.referer = input.referer;
   if (input.proxy) options.proxy = input.proxy;
+  if (input.proxySecretId) options.proxy_secret_id = input.proxySecretId;
+  if (input.cookiesSecretId) options.cookies_secret_id = input.cookiesSecretId;
+  if (input.authenticationHeaderSecretId) {
+    options.authentication_header_secret_id = input.authenticationHeaderSecretId;
+  }
+  if (input.media) options.media = input.media;
+  if (input.torrent) options.torrent = input.torrent;
   return options;
 }
 
@@ -120,6 +135,34 @@ export class JobsService {
 
   logs(id: string, params?: PageQueryParams, signal?: AbortSignal): Promise<Page<JobLogRecord>> {
     return this.client.listJobLogs(id, params, signal);
+  }
+
+  tags(id: string, signal?: AbortSignal): Promise<string[]> {
+    return this.client.getJobTags(id, signal);
+  }
+
+  replaceTags(id: string, tags: string[]): Promise<string[]> {
+    return this.client.replaceJobTags(id, tags);
+  }
+
+  trust(id: string, signal?: AbortSignal): Promise<TrustReport> {
+    return this.client.getJobTrust(id, signal);
+  }
+
+  /** Create a download from a Metalink (.metalink / .meta4) XML document. */
+  addMetalink(document: string, options?: {
+    destination?: string;
+    priority?: number;
+    speedLimitBps?: number;
+    overwrite?: boolean;
+  }): Promise<Job> {
+    return this.client.createMetalinkJob({
+      document,
+      destination: options?.destination || undefined,
+      priority: options?.priority,
+      speed_limit_bps: options?.speedLimitBps,
+      overwrite: options?.overwrite,
+    });
   }
 
   /**

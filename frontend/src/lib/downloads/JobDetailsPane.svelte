@@ -1,6 +1,8 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { Job, JobActionRecord, JobLogRecord, JobOutput } from "../api/types";
+  import type { BulkJobAction, Job, JobActionRecord, JobLogRecord, JobOutput, TrustReport } from "../api/types";
+  import Button from "../components/Button.svelte";
+  import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import InlineError from "../components/InlineError.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -10,20 +12,23 @@
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { notifications } from "../stores/notifications.svelte";
+  import { openNativePath, revealNativePath } from "../native/tauri";
   import { formatAbsoluteTime, formatBytes, formatEta, formatPercent, formatSpeed } from "../util/format";
-  import { presentStatus } from "./jobPresentation";
+  import { permittedActions, presentStatus } from "./jobPresentation";
 
   let { jobId, onClose }: { jobId: string; onClose: () => void } = $props();
 
   const job = $derived(jobsStore.byId.get(jobId));
   const live = $derived(jobsStore.liveProgress.get(jobId));
   const status = $derived(job ? presentStatus(job.status) : null);
+  const permitted = $derived(job ? permittedActions(job.status, job.kind) : null);
 
   let tab = $state("overview");
   const tabs: TabItem[] = [
     { id: "overview", label: "Overview" },
     { id: "outputs", label: "Outputs" },
     { id: "activity", label: "Activity" },
+    { id: "security", label: "Security" },
     { id: "advanced", label: "Advanced" },
   ];
 
@@ -33,6 +38,13 @@
   let logs = $state<JobLogRecord[] | null>(null);
   let activityError = $state<string | null>(null);
   let segmentSummary = $state<string | null>(null);
+  let actionBusy = $state(false);
+  let trust = $state<TrustReport | null>(null);
+  let trustError = $state<string | null>(null);
+  let tags = $state<string[] | null>(null);
+  let tagsDraft = $state("");
+  let tagsEditing = $state(false);
+  let tagsBusy = $state(false);
 
   const service = $derived(connection.client ? new JobsService(connection.client) : null);
 
@@ -49,12 +61,27 @@
       logs = null;
       activityError = null;
       segmentSummary = null;
+      trust = null;
+      trustError = null;
+      tags = null;
+      tagsDraft = "";
+      tagsEditing = false;
       tab = "overview";
       loadedForJobId = jobId;
     }
 
     if (!service || !jobId) return;
-    if (tab === "outputs" && outputs === null) {
+    if (tab === "overview" && tags === null) {
+      service
+        .tags(jobId)
+        .then((names) => (tags = names))
+        .catch(() => (tags = []));
+    } else if (tab === "security" && trust === null && trustError === null) {
+      service
+        .trust(jobId)
+        .then((report) => (trust = report))
+        .catch((error) => (trustError = describeError(error)));
+    } else if (tab === "outputs" && outputs === null) {
       service
         .outputs(jobId)
         .then((page) => (outputs = page.items))
@@ -91,6 +118,72 @@
       notifications.warning("Couldn't copy to the clipboard");
     }
   }
+
+  async function runNativePathAction(path: string, action: "open" | "reveal"): Promise<void> {
+    try {
+      if (action === "open") await openNativePath(path);
+      else await revealNativePath(path);
+    } catch (cause) {
+      notifications.error(
+        action === "open" ? "Couldn't open this path" : "Couldn't reveal this path",
+        describeError(cause),
+      );
+    }
+  }
+
+  async function runJobAction(action: Exclude<BulkJobAction, "delete">): Promise<void> {
+    if (!service || !job || actionBusy) return;
+    actionBusy = true;
+    try {
+      const [result] = await service.bulkAction(action, [job.id]);
+      if (!result?.success) throw new Error(result?.error ?? `The ${action} action failed.`);
+      notifications.info(`${action.charAt(0).toUpperCase()}${action.slice(1)} requested`);
+      jobsStore.refreshAll();
+    } catch (error) {
+      notifications.error(`Couldn't ${action} this download`, describeError(error));
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  function startTagEditing(): void {
+    tagsDraft = (tags ?? []).join(", ");
+    tagsEditing = true;
+  }
+
+  async function saveTags(): Promise<void> {
+    if (!service || tagsBusy) return;
+    tagsBusy = true;
+    try {
+      const next = tagsDraft
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0);
+      tags = await service.replaceTags(jobId, next);
+      tagsEditing = false;
+      notifications.info("Tags updated");
+    } catch (error) {
+      notifications.error("Couldn't update tags", describeError(error));
+    } finally {
+      tagsBusy = false;
+    }
+  }
+
+  function retryTrust(): void {
+    trustError = null;
+    trust = null;
+  }
+
+  function retryOutputs(): void {
+    outputsError = null;
+    outputs = null;
+  }
+
+  function retryActivity(): void {
+    activityError = null;
+    actions = null;
+    logs = null;
+  }
 </script>
 
 <aside class="pane" aria-label="Download details">
@@ -107,8 +200,19 @@
     <div class="content">
       {#if tab === "overview" && status}
         <section class="overview">
-          <div class="row">
-            <StatusBadge label={status.label} severity={status.severity} icon={status.icon} spinning={status.spinning} />
+          <div class="summary-header">
+            <div class="row">
+              <StatusBadge label={status.label} severity={status.severity} icon={status.icon} spinning={status.spinning} />
+            </div>
+            <div class="job-actions" aria-label="Download actions">
+              <Button variant="subtle" onclick={() => void runNativePathAction(job.destination, "open")}><Icon name="folder-open" size={14} /> Open folder</Button>
+              {#if permitted}
+                {#if permitted.pause}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("pause")}><Icon name="pause" size={14} /> Pause</Button>{/if}
+                {#if permitted.resume}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("resume")}><Icon name="play" size={14} /> Resume</Button>{/if}
+                {#if permitted.retry}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("retry")}><Icon name="refresh" size={14} /> Retry</Button>{/if}
+                {#if permitted.cancel}<Button variant="subtle" disabled={actionBusy} onclick={() => void runJobAction("cancel")}><Icon name="cancel" size={14} /> Cancel</Button>{/if}
+              {/if}
+            </div>
           </div>
           {#if job.error}
             <InlineError title="Last error" message={job.error} />
@@ -142,10 +246,34 @@
               <dt>Expected SHA-256</dt>
               <dd class="wrap mono">{job.expected_sha256}</dd>
             {/if}
-            {#if job.options_json.tags?.length}
-              <dt>Tags</dt>
-              <dd>{job.options_json.tags.join(", ")}</dd>
-            {/if}
+            <dt>Tags</dt>
+            <dd>
+              {#if tagsEditing}
+                <div class="tag-editor">
+                  <input
+                    class="tag-input"
+                    type="text"
+                    bind:value={tagsDraft}
+                    placeholder="tag-one, tag-two"
+                    aria-label="Tags, comma separated"
+                    disabled={tagsBusy}
+                    onkeydown={(event) => {
+                      if (event.key === "Enter") void saveTags();
+                      else if (event.key === "Escape") tagsEditing = false;
+                    }}
+                  />
+                  <Button variant="subtle" disabled={tagsBusy} onclick={() => void saveTags()}>Save</Button>
+                  <Button variant="subtle" disabled={tagsBusy} onclick={() => (tagsEditing = false)}>Cancel</Button>
+                </div>
+              {:else}
+                <span class="tag-row">
+                  <span>{tags === null ? "Loading…" : tags.length > 0 ? tags.join(", ") : "None"}</span>
+                  {#if tags !== null}
+                    <IconButton icon="edit" label="Edit tags" variant="subtle" onclick={startTagEditing} />
+                  {/if}
+                </span>
+              {/if}
+            </dd>
             <dt>Added</dt>
             <dd>{formatAbsoluteTime(job.created_at)}</dd>
             {#if job.started_at}
@@ -160,7 +288,7 @@
         </section>
       {:else if tab === "outputs"}
         {#if outputsError}
-          <InlineError title="Couldn't load outputs" message={outputsError} />
+          <InlineError title="Couldn't load outputs" message={outputsError} retry={retryOutputs} />
         {:else if outputs === null}
           <Skeleton height="80px" />
         {:else if outputs.length === 0}
@@ -172,7 +300,9 @@
                 <div class="output-row">
                   <span class="path" title={output.current_path}>{output.relative_path}</span>
                   <span class="size">{formatBytes(output.size_bytes)}</span>
-                  <IconButton icon="paste" label="Copy path" variant="subtle" onclick={() => copyPath(output.current_path)} />
+                  <IconButton icon="external-link" label="Open file" variant="subtle" onclick={() => void runNativePathAction(output.current_path, "open")} />
+                  <IconButton icon="folder-open" label="Show in Explorer" variant="subtle" onclick={() => void runNativePathAction(output.current_path, "reveal")} />
+                  <IconButton icon="copy" label="Copy path" variant="subtle" onclick={() => copyPath(output.current_path)} />
                 </div>
                 <span class="output-meta">{output.output_type} · {output.state}</span>
               </li>
@@ -181,7 +311,7 @@
         {/if}
       {:else if tab === "activity"}
         {#if activityError}
-          <InlineError title="Couldn't load activity" message={activityError} />
+          <InlineError title="Couldn't load activity" message={activityError} retry={retryActivity} />
         {:else if actions === null}
           <Skeleton height="80px" />
         {:else}
@@ -210,6 +340,36 @@
             </ul>
           {/if}
         {/if}
+      {:else if tab === "security"}
+        {#if trustError}
+          <InlineError title="Couldn't load the trust report" message={trustError} retry={retryTrust} />
+        {:else if trust === null}
+          <Skeleton height="120px" />
+        {:else}
+          <div class="trust-summary trust-{trust.level}">
+            <Icon name="shield" size={20} />
+            <div>
+              <strong>Trust score: {trust.score}/100</strong>
+              <span class="trust-level">{trust.level}</span>
+            </div>
+          </div>
+          <p class="muted trust-note">
+            Advisory evaluation of the download source. It informs, it does not block.
+          </p>
+          <ul class="trust-factors">
+            {#each trust.factors as factor (factor.code)}
+              <li class="trust-factor" class:satisfied={factor.satisfied}>
+                <span class="factor-points" class:positive={factor.points > 0 && factor.satisfied}>
+                  {factor.satisfied ? (factor.points > 0 ? `+${factor.points}` : factor.points) : "—"}
+                </span>
+                <div>
+                  <span class="factor-label">{factor.label}</span>
+                  <span class="factor-explanation">{factor.explanation}</span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       {:else if tab === "advanced"}
         <h3 class="subheading">Segments</h3>
         <p class="muted">{segmentSummary ?? "Loading…"}</p>
@@ -224,18 +384,20 @@
   .pane {
     display: flex;
     flex-direction: column;
-    width: 340px;
-    flex: none;
-    border-left: 1px solid var(--stroke-divider);
-    background: var(--bg-layer);
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    background: transparent;
     overflow: hidden;
   }
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    min-height: 54px;
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--stroke-divider);
+    background: var(--bg-layer-alt);
   }
   .header h2 {
     margin: 0;
@@ -250,9 +412,17 @@
     overflow-y: auto;
     padding: var(--space-4);
   }
-  .row {
-    margin-bottom: var(--space-3);
+  .summary-header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    padding-bottom: var(--space-4);
+    border-bottom: 1px solid var(--stroke-divider);
   }
+  .row { margin: 0; }
+  .job-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+  .job-actions :global(.button) { min-height: 28px; padding-inline: var(--space-2); font-size: var(--text-caption); }
   dl {
     display: grid;
     grid-template-columns: max-content 1fr;
@@ -339,6 +509,84 @@
   }
   .log-time {
     flex: none;
+    color: var(--text-tertiary);
+  }
+  .tag-row {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .tag-editor {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .tag-input {
+    flex: 1;
+    min-width: 0;
+    min-height: 26px;
+    padding: 0 var(--space-2);
+    font: inherit;
+    font-size: var(--text-caption);
+    color: var(--text-primary);
+    background: var(--bg-subtle);
+    border: 1px solid var(--stroke-divider);
+    border-radius: var(--radius-control);
+  }
+  .trust-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid var(--stroke-divider);
+    border-radius: var(--radius-control);
+    background: var(--bg-subtle);
+  }
+  .trust-summary strong {
+    display: block;
+  }
+  .trust-level {
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    text-transform: capitalize;
+  }
+  .trust-note {
+    font-size: var(--text-caption);
+    margin: var(--space-2) 0 var(--space-3);
+  }
+  .trust-factors {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .trust-factor {
+    display: flex;
+    gap: var(--space-2);
+    font-size: var(--text-caption);
+    color: var(--text-secondary);
+  }
+  .trust-factor.satisfied {
+    color: var(--text-primary);
+  }
+  .factor-points {
+    flex: none;
+    width: 32px;
+    text-align: right;
+    font-family: "Consolas", ui-monospace, monospace;
+    color: var(--text-tertiary);
+  }
+  .factor-points.positive {
+    color: var(--status-success, #2e7d32);
+  }
+  .factor-label {
+    display: block;
+    font-weight: 600;
+  }
+  .factor-explanation {
+    display: block;
     color: var(--text-tertiary);
   }
   .json {

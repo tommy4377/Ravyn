@@ -108,7 +108,9 @@
     z-index: 300;
     display: grid;
     place-items: center;
-    background: rgba(0, 0, 0, 0.35);
+    background: color-mix(in srgb, #000 38%, transparent);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
     padding: var(--space-6);
   }
   .dialog {
@@ -117,9 +119,11 @@
     max-height: calc(100vh - var(--space-12));
     width: 100%;
     border-radius: var(--radius-layer);
-    background: var(--bg-layer);
+    background: var(--surface-flyout);
     box-shadow: var(--shadow-flyout);
-    border: 1px solid var(--stroke-control);
+    border: 1px solid var(--stroke-surface);
+    backdrop-filter: blur(30px) saturate(128%);
+    -webkit-backdrop-filter: blur(30px) saturate(128%);
   }
   .dialog.small {
     max-width: 380px;

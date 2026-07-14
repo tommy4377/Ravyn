@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { pickFolder } from "../native/tauri";
+  import { pickExecutable, pickFolder } from "../native/tauri";
   import IconButton from "./IconButton.svelte";
 
   let {
@@ -8,18 +8,22 @@
     placeholder = "",
     hint,
     error = "",
+    mode = "folder",
   }: {
     value?: string;
     label: string;
     placeholder?: string;
     hint?: string;
     error?: string;
+    mode?: "folder" | "executable";
   } = $props();
 
   const id = $props.id();
 
   async function browse(): Promise<void> {
-    const picked = await pickFolder(value || undefined);
+    const picked = mode === "executable"
+      ? await pickExecutable(value || undefined)
+      : await pickFolder(value || undefined);
     if (picked) value = picked;
   }
 </script>
@@ -37,7 +41,7 @@
       aria-invalid={error ? "true" : undefined}
       aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
     />
-    <IconButton icon="folder-open" label="Browse for a folder" onclick={browse} />
+    <IconButton icon={mode === "executable" ? "file" : "folder-open"} label={mode === "executable" ? "Browse for an executable" : "Browse for a folder"} onclick={browse} />
   </div>
   {#if error}
     <p class="error" id="{id}-error">{error}</p>

@@ -7,6 +7,7 @@ use std::{
 
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header::LOCATION};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,6 +27,17 @@ const MANIFEST_SCHEMA: u32 = 1;
 pub struct EngineManifest {
     pub schema_version: u32,
     pub channel: String,
+    /// Monotonic release sequence used to prevent remote manifest downgrade
+    /// and replay attacks. Embedded development manifests may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<u64>,
+    /// UTC publication time for remote release manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<DateTime<Utc>>,
+    /// UTC expiry time after which a remote manifest may only be used through
+    /// the explicitly bounded last-known-good grace period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     pub artifacts: Vec<EngineArtifact>,
 }
 
@@ -115,6 +127,37 @@ impl EngineManifest {
             )));
         }
         validate_token(&self.channel, "channel")?;
+        match (
+            self.manifest_version,
+            self.generated_at.as_ref(),
+            self.expires_at.as_ref(),
+        ) {
+            (None, None, None) => {}
+            (Some(version), Some(generated_at), Some(expires_at)) => {
+                if version == 0 {
+                    return Err(RavynError::Invalid(
+                        "engine manifest version must be greater than zero".into(),
+                    ));
+                }
+                if expires_at <= generated_at {
+                    return Err(RavynError::Invalid(
+                        "engine manifest expiry must be after its generation time".into(),
+                    ));
+                }
+                if expires_at.signed_duration_since(generated_at.clone())
+                    > ChronoDuration::days(90)
+                {
+                    return Err(RavynError::Invalid(
+                        "engine manifest validity window may not exceed 90 days".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(RavynError::Invalid(
+                    "remote engine manifest metadata must include version, generated_at, and expires_at together".into(),
+                ));
+            }
+        }
         if self.artifacts.len() > 256 {
             return Err(RavynError::Invalid(
                 "engine manifest contains too many artifacts".into(),
@@ -131,6 +174,41 @@ impl EngineManifest {
             }
         }
         Ok(())
+    }
+
+    /// Applies the additional freshness and channel rules required for a
+    /// remotely distributed manifest. Embedded manifests intentionally remain
+    /// valid without release metadata so development builds can start offline.
+    pub fn validate_remote(&self, expected_channel: &str, now: DateTime<Utc>) -> Result<()> {
+        self.validate()?;
+        if self.channel != expected_channel {
+            return Err(RavynError::Invalid(format!(
+                "engine manifest channel {} does not match configured channel {expected_channel}",
+                self.channel
+            )));
+        }
+        let (_, generated_at, expires_at) = self.remote_metadata().ok_or_else(|| {
+            RavynError::Invalid(
+                "remote engine manifests require version and validity metadata".into(),
+            )
+        })?;
+        if generated_at > now + ChronoDuration::minutes(10) {
+            return Err(RavynError::Invalid(
+                "engine manifest generation time is unreasonably far in the future".into(),
+            ));
+        }
+        if expires_at <= now {
+            return Err(RavynError::Invalid("engine manifest has expired".into()));
+        }
+        Ok(())
+    }
+
+    pub fn remote_metadata(&self) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
+        Some((
+            self.manifest_version?,
+            self.generated_at.clone()?,
+            self.expires_at.clone()?,
+        ))
     }
 
     pub fn artifact(&self, engine: &str, target: &str) -> Result<&EngineArtifact> {
@@ -1199,8 +1277,30 @@ mod tests {
         let manifest = EngineManifest {
             schema_version: MANIFEST_SCHEMA,
             channel: "stable".into(),
+            manifest_version: None,
+            generated_at: None,
+            expires_at: None,
             artifacts: vec![item.clone(), item],
         };
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn remote_manifest_requires_complete_fresh_metadata() {
+        let now = Utc::now();
+        let mut manifest = EngineManifest {
+            schema_version: MANIFEST_SCHEMA,
+            channel: "stable".into(),
+            manifest_version: Some(4),
+            generated_at: Some(now - ChronoDuration::hours(1)),
+            expires_at: Some(now + ChronoDuration::days(7)),
+            artifacts: vec![artifact(b"remote engine")],
+        };
+        manifest.validate_remote("stable", now).unwrap();
+        assert!(manifest.validate_remote("beta", now).is_err());
+        manifest.expires_at = Some(now - ChronoDuration::seconds(1));
+        assert!(manifest.validate_remote("stable", now).is_err());
+        manifest.generated_at = None;
         assert!(manifest.validate().is_err());
     }
 
@@ -1210,6 +1310,9 @@ mod tests {
         let manifest = EngineManifest {
             schema_version: MANIFEST_SCHEMA,
             channel: "stable".into(),
+            manifest_version: None,
+            generated_at: None,
+            expires_at: None,
             artifacts: vec![artifact(b"signed engine")],
         };
         let signature = signing_key.sign(&serde_json::to_vec(&manifest).unwrap());

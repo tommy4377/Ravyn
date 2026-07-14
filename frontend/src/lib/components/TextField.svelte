@@ -5,7 +5,10 @@
     placeholder = "",
     disabled = false,
     readonly = false,
+    inputmode,
+    type = "text",
     error = "",
+    hint,
     oninput,
   }: {
     value?: string;
@@ -13,7 +16,10 @@
     placeholder?: string;
     disabled?: boolean;
     readonly?: boolean;
+    inputmode?: "none" | "text" | "tel" | "url" | "email" | "numeric" | "decimal" | "search";
+    type?: "text" | "number" | "password" | "email" | "url";
     error?: string;
+    hint?: string;
     oninput?: (value: string) => void;
   } = $props();
 
@@ -26,17 +32,20 @@
     id="{id}-input"
     class="input"
     class:invalid={!!error}
-    type="text"
+    {type}
+    {inputmode}
     bind:value
     {placeholder}
     {disabled}
     {readonly}
     aria-invalid={error ? "true" : undefined}
-    aria-describedby={error ? `${id}-error` : undefined}
+    aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
     oninput={() => oninput?.(value)}
   />
   {#if error}
     <p class="error" id="{id}-error" role="alert">{error}</p>
+  {:else if hint}
+    <p class="hint" id="{id}-hint">{hint}</p>
   {/if}
 </div>
 
@@ -72,9 +81,11 @@
   .input.invalid {
     border-bottom-color: var(--status-error);
   }
+  .hint,
   .error {
     margin: 0;
     font-size: var(--text-caption);
-    color: var(--status-error);
   }
+  .hint { color: var(--text-secondary); }
+  .error { color: var(--status-error); }
 </style>

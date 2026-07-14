@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-setup-installation-info"
+description = "Enables the setup_installation_info command without any pre-configured scope."
+commands.allow = ["setup_installation_info"]
+
+[[permission]]
+identifier = "deny-setup-installation-info"
+description = "Denies the setup_installation_info command without any pre-configured scope."
+commands.deny = ["setup_installation_info"]

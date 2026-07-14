@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reveal-native-path"
+description = "Enables the reveal_native_path command without any pre-configured scope."
+commands.allow = ["reveal_native_path"]
+
+[[permission]]
+identifier = "deny-reveal-native-path"
+description = "Denies the reveal_native_path command without any pre-configured scope."
+commands.deny = ["reveal_native_path"]

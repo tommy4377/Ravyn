@@ -197,7 +197,7 @@ Recommended default locations:
 
 ```text
 Application:
-%LOCALAPPDATA%\Programs\Ravyn
+%LOCALAPPDATA%\Ravyn
 
 Application data:
 %LOCALAPPDATA%\Ravyn

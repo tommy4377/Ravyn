@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IntegrationRequest {
     pub install_application: bool,
     pub register_installed_app: bool,
@@ -29,6 +29,10 @@ pub struct IntegrationReport {
     pub steps: Vec<StepResult>,
     pub install_dir: Option<String>,
     pub installed_exe: Option<String>,
+    pub installed_version: Option<String>,
+    pub installed_sha256: Option<String>,
+    pub integration_completed: bool,
+    pub integration_errors: Vec<String>,
 }
 
 fn ok(step: &str) -> StepResult {
@@ -55,6 +59,44 @@ fn failed(step: &str, error: String) -> StepResult {
         applied: false,
         skipped_reason: None,
         error: Some(error),
+    }
+}
+
+fn finish_report(
+    steps: Vec<StepResult>,
+    install_dir: Option<String>,
+    installed_exe: Option<std::path::PathBuf>,
+    registration_required: bool,
+) -> IntegrationReport {
+    let installed_sha256 = installed_exe
+        .as_deref()
+        .and_then(|path| crate::installation::sha256_file(path).ok());
+    let registration_completed = !registration_required
+        || steps
+            .iter()
+            .any(|step| step.step == "register_installed_app" && step.applied);
+    let integration_errors = steps
+        .iter()
+        .filter_map(|step| {
+            step.error
+                .as_ref()
+                .map(|error| format!("{}: {error}", step.step))
+        })
+        .collect::<Vec<_>>();
+    let integration_completed = installed_exe
+        .as_deref()
+        .is_some_and(std::path::Path::is_file)
+        && installed_sha256.is_some()
+        && registration_completed;
+
+    IntegrationReport {
+        steps,
+        install_dir,
+        installed_exe: installed_exe.map(|path| path.display().to_string()),
+        installed_version: integration_completed.then(|| env!("CARGO_PKG_VERSION").to_owned()),
+        installed_sha256,
+        integration_completed,
+        integration_errors,
     }
 }
 
@@ -101,33 +143,46 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
                 "cannot resolve the executable or install directory".into(),
             )),
         }
+    } else if source_exe
+        .as_deref()
+        .is_some_and(|_| crate::installation::current_executable_is_installed())
+    {
+        installed_exe = source_exe.clone();
+        steps.push(skipped(
+            "install_application",
+            "the application is already managed by the Windows installer",
+        ));
     } else {
         steps.push(skipped("install_application", "not requested"));
     }
 
-    // An explicitly requested installation is transactional from the caller's
-    // perspective: never register or shortcut the source executable when the
-    // copy step failed or was intentionally skipped for a development build.
-    if request.install_application && installed_exe.is_none() {
-        for step in [
-            "register_installed_app",
-            "start_menu_shortcut",
-            "desktop_shortcut",
-            "launch_at_startup",
+    // Native registrations must always target a verified installed executable.
+    // Never fall back to the setup, portable, or development binary because
+    // those paths can disappear and would leave broken Windows registrations.
+    let dependent_registration_requested = request.register_installed_app
+        || request.start_menu_shortcut
+        || request.desktop_shortcut
+        || request.launch_at_startup;
+    if dependent_registration_requested && installed_exe.is_none() {
+        for (step, requested) in [
+            ("register_installed_app", request.register_installed_app),
+            ("start_menu_shortcut", request.start_menu_shortcut),
+            ("desktop_shortcut", request.desktop_shortcut),
+            ("launch_at_startup", request.launch_at_startup),
         ] {
             steps.push(skipped(
                 step,
-                "application installation did not produce an installed executable",
+                if requested {
+                    "no verified installed executable is available"
+                } else {
+                    "not requested"
+                },
             ));
         }
-        return IntegrationReport {
-            steps,
-            install_dir,
-            installed_exe: None,
-        };
+        return finish_report(steps, install_dir, None, request.register_installed_app);
     }
 
-    let effective_exe = installed_exe.clone().or(source_exe);
+    let effective_exe = installed_exe.clone();
 
     // 2. Installed Apps registration.
     if request.register_installed_app {
@@ -193,11 +248,12 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         steps.push(skipped("launch_at_startup", "not requested"));
     }
 
-    IntegrationReport {
+    finish_report(
         steps,
         install_dir,
-        installed_exe: installed_exe.map(|p| p.display().to_string()),
-    }
+        installed_exe,
+        request.register_installed_app,
+    )
 }
 
 fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
@@ -210,7 +266,9 @@ fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Res
     // executable but not overwriting it in place).
     let staged = dir.join(".ravyn.install.tmp");
     std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
-    if sha256_file(source)? != sha256_file(&staged)? {
+    if crate::installation::sha256_file(source)?
+        != crate::installation::sha256_file(&staged)?
+    {
         let _ = std::fs::remove_file(&staged);
         return Err("staged executable checksum does not match the source".into());
     }
@@ -233,23 +291,6 @@ fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Res
         return Err(error.to_string());
     }
     Ok(())
-}
-
-fn sha256_file(path: &std::path::Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// A freshly launched installed copy calls this only after its backend is

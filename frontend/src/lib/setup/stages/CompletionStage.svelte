@@ -26,7 +26,7 @@
     : "Everything you selected is installed."}
   showBack={false}
   onnext={() => void controller.openRavyn()}
-  nextLabel="Open Ravyn"
+  nextLabel={controller.launchAfterSetup ? "Open Ravyn" : "Finish"}
 >
   {#if controller.stepError}
     <InlineError

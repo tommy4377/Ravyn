@@ -14,6 +14,8 @@ export interface RequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   headers?: Record<string, string>;
+  /** Non-success statuses that still carry a valid response payload. */
+  acceptedStatuses?: number[];
 }
 
 function buildUrl(baseUrl: string, path: string, query?: RequestOptions["query"]): string {
@@ -66,7 +68,8 @@ export async function httpRequest<T>(
     clearTimeout(timeout);
   }
 
-  if (!response.ok) {
+  const accepted = response.ok || options?.acceptedStatuses?.includes(response.status) === true;
+  if (!accepted) {
     let parsed: ApiErrorBody;
     try {
       parsed = (await response.json()) as ApiErrorBody;
@@ -80,8 +83,12 @@ export async function httpRequest<T>(
     throw new ApiError(response.status, parsed);
   }
 
-  if (response.status === 204 || response.status === 202) {
+  if (response.status === 204) {
     return undefined as T;
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return (await response.text()) as T;
   }
   return (await response.json()) as T;
 }

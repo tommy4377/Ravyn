@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-backend-info"
+description = "Enables the backend_info command without any pre-configured scope."
+commands.allow = ["backend_info"]
+
+[[permission]]
+identifier = "deny-backend-info"
+description = "Denies the backend_info command without any pre-configured scope."
+commands.deny = ["backend_info"]

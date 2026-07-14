@@ -127,6 +127,28 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub auto_provision: bool,
+    /// Optional HTTPS endpoint serving a signed component manifest. Release
+    /// builds may also provide RAVYN_COMPONENT_MANIFEST_ENDPOINT at compile time.
+    #[arg(long, env = "RAVYN_COMPONENT_MANIFEST_ENDPOINT")]
+    pub component_manifest_endpoint: Option<String>,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_CHANNEL",
+        default_value = "stable"
+    )]
+    pub component_manifest_channel: String,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_REFRESH_SECS",
+        default_value_t = 21_600
+    )]
+    pub component_manifest_refresh_secs: u64,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS",
+        default_value_t = 604_800
+    )]
+    pub component_manifest_stale_grace_secs: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_MIB", default_value_t = 10_240)]
     pub max_extract_mib: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_FILES", default_value_t = 100_000)]
@@ -170,6 +192,17 @@ impl Config {
     }
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs)
+    }
+    pub fn effective_component_manifest_endpoint(&self) -> Option<&str> {
+        self.component_manifest_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                option_env!("RAVYN_COMPONENT_MANIFEST_ENDPOINT")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
     }
     pub fn effective_cookie_dir(&self) -> PathBuf {
         self.cookie_dir
@@ -319,6 +352,36 @@ impl Config {
             return Err(crate::error::RavynError::Invalid(
                 "RAVYN_HOST_CIRCUIT_COOLDOWN_SECS must be between 1 and 86400".into(),
             ));
+        }
+        if self.component_manifest_channel != "stable" {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_CHANNEL currently supports only stable".into(),
+            ));
+        }
+        if self.component_manifest_refresh_secs < 300
+            || self.component_manifest_refresh_secs > 604_800
+        {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_REFRESH_SECS must be between 300 and 604800".into(),
+            ));
+        }
+        if self.component_manifest_stale_grace_secs > 2_592_000 {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS may not exceed 2592000".into(),
+            ));
+        }
+        if let Some(endpoint) = self.effective_component_manifest_endpoint() {
+            let endpoint = url::Url::parse(endpoint)?;
+            if endpoint.scheme() != "https"
+                || endpoint.host_str().is_none()
+                || !endpoint.username().is_empty()
+                || endpoint.password().is_some()
+                || endpoint.fragment().is_some()
+            {
+                return Err(crate::error::RavynError::Invalid(
+                    "RAVYN_COMPONENT_MANIFEST_ENDPOINT must be an HTTPS URL without credentials or fragments".into(),
+                ));
+            }
         }
         if self.max_extract_mib == 0 || self.max_extract_mib > 1_048_576 {
             return Err(crate::error::RavynError::Invalid(

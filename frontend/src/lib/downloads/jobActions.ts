@@ -1,10 +1,7 @@
 /**
  * Builds the row/bulk action menu from the exact permitted-action set for a
- * job. There is deliberately no "open containing folder" action: Ravyn has
- * no Tauri command for revealing a path in Explorer yet (only the 5
- * setup-only commands exist), so offering it would violate the "never add
- * a control without implemented behavior" rule. Output paths are instead
- * shown as copyable text in the job details Outputs tab.
+ * job. File and Explorer actions live in the details pane because only the
+ * output records contain the final verified paths after post-processing.
  */
 
 import type { Job } from "../api/types";

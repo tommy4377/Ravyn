@@ -34,10 +34,20 @@
   showBack={false}
   onnext={next}
   nextLabel="Continue"
-  nextDisabled={!controller.provisioningFinished}
+  nextDisabled={!controller.canCompleteSetup()}
   busy={controller.busy}
 >
-  {#if controller.stepError}
+  {#if controller.setupState?.restart_required}
+    <InlineError
+      title="Background service restart required"
+      message="The selected library is prepared, but Ravyn must restart its background service before setup can be completed."
+    />
+    <div class="restart-action">
+      <Button onclick={() => void controller.restartForPendingSettings()}>
+        Restart Ravyn
+      </Button>
+    </div>
+  {:else if controller.stepError}
     <InlineError title="Installation problem" message={controller.stepError} />
   {/if}
 
@@ -62,6 +72,13 @@
           </span>
         </div>
       {/each}
+      {#if !controller.installationReady}
+        <div class="row-actions">
+          <Button onclick={() => void controller.retryApplicationInstallation()}>
+            Retry application setup
+          </Button>
+        </div>
+      {/if}
     </section>
   {:else}
     <section class="group" aria-label="Application installation">
@@ -144,6 +161,9 @@
 </script>
 
 <style>
+  .restart-action {
+    display: flex;
+  }
   .group {
     display: flex;
     flex-direction: column;

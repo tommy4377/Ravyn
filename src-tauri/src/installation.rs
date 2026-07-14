@@ -12,7 +12,7 @@ use serde::Serialize;
 pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Ravyn";
 
 /// Default installed-mode application directory below `%LOCALAPPDATA%`.
-pub const INSTALL_SUBDIR: &str = r"Programs\Ravyn";
+pub const INSTALL_SUBDIR: &str = r"Ravyn";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallationInfo {
@@ -30,18 +30,25 @@ pub struct InstallationInfo {
     pub portable: bool,
     /// True for debug builds running from the development tree.
     pub development: bool,
+    /// SHA-256 of the running executable, when it could be read.
+    pub exe_sha256: Option<String>,
 }
 
 pub fn detect() -> InstallationInfo {
-    let exe_path = std::env::current_exe()
-        .map(|p| p.display().to_string())
+    let executable = std::env::current_exe().ok();
+    let exe_path = executable
+        .as_ref()
+        .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let exe_sha256 = executable
+        .as_deref()
+        .and_then(|path| sha256_file(path).ok());
     let (installed, installed_version, install_dir) = read_registration();
 
     let in_install_dir = match &install_dir {
-        Some(dir) if !dir.is_empty() => normalized(&exe_path).starts_with(&normalized(dir)),
+        Some(dir) if !dir.is_empty() => path_is_within(&exe_path, dir),
         _ => default_install_dir()
-            .map(|dir| normalized(&exe_path).starts_with(&normalized(&dir)))
+            .map(|dir| path_is_within(&exe_path, &dir))
             .unwrap_or(false),
     };
 
@@ -53,10 +60,30 @@ pub fn detect() -> InstallationInfo {
         install_dir,
         portable: !in_install_dir,
         development: cfg!(debug_assertions),
+        exe_sha256,
     }
 }
 
-/// Default installed-mode directory, e.g. `%LOCALAPPDATA%\Programs\Ravyn`.
+
+/// Compute the SHA-256 of an executable or staged application file.
+pub fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Default installed-mode directory, e.g. `%LOCALAPPDATA%\Ravyn`.
 pub fn default_install_dir() -> Option<String> {
     #[cfg(windows)]
     {
@@ -71,7 +98,32 @@ pub fn default_install_dir() -> Option<String> {
 }
 
 fn normalized(path: &str) -> String {
-    path.replace('/', "\\").to_ascii_lowercase()
+    path.trim().trim_matches('"').replace('/', "\\").to_ascii_lowercase()
+}
+
+/// Return whether an executable path is inside the supplied installation root.
+/// Registry values written by NSIS may be quoted, so both values are sanitized
+/// before the comparison.
+pub fn path_is_within(path: &str, root: &str) -> bool {
+    let path = normalized(path);
+    let mut root = normalized(root);
+    while root.ends_with('\\') {
+        root.pop();
+    }
+    path == root || path.starts_with(&format!("{root}\\"))
+}
+
+/// Whether the current process is already running from Ravyn's trusted
+/// per-user installation directory. This covers both the Tauri NSIS installer
+/// and Ravyn's portable-to-installed handoff without relying solely on a
+/// registry entry.
+pub fn current_executable_is_installed() -> bool {
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    let executable = executable.display().to_string();
+    default_install_dir()
+        .is_some_and(|root| path_is_within(&executable, &root))
 }
 
 #[cfg(windows)]
@@ -93,4 +145,33 @@ fn read_registration() -> (bool, Option<String>, Option<String>) {
 #[cfg(not(windows))]
 fn read_registration() -> (bool, Option<String>, Option<String>) {
     (false, None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_is_within;
+
+    #[test]
+    fn accepts_quoted_installer_paths_case_insensitively() {
+        assert!(path_is_within(
+            r#"C:\Users\Tommy\AppData\Local\Ravyn\Ravyn.exe"#,
+            r#""C:\Users\Tommy\AppData\Local\Ravyn""#,
+        ));
+    }
+
+    #[test]
+    fn rejects_sibling_directories_with_the_same_prefix() {
+        assert!(!path_is_within(
+            r#"C:\Users\Tommy\AppData\Local\Ravyn-old\Ravyn.exe"#,
+            r#"C:\Users\Tommy\AppData\Local\Ravyn"#,
+        ));
+    }
+
+    #[test]
+    fn treats_the_root_itself_as_inside() {
+        assert!(path_is_within(
+            r#"C:\Users\Tommy\AppData\Local\Ravyn"#,
+            r#"C:\Users\Tommy\AppData\Local\Ravyn\"#,
+        ));
+    }
 }

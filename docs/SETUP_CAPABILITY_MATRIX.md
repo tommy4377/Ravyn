@@ -8,7 +8,9 @@
 
 | Backend source | User goal | Exposure | UI representation | Backend dependency | Risk | Status |
 |---|---|---|---|---|---|---|
-| `GET /v1/components` | See feature catalog, component states, platform support | Primary | Setup feature selection + provisioning screens | `ComponentOverviewResponse` | Low | connected |
+| `GET /v1/components` | See feature catalog, component states, platform support | Primary | Setup feature selection + provisioning screens | `ComponentOverviewResponse` | Low | tested |
+| `GET /v1/components/manifest` | Inspect signed catalog source, revision, freshness, and fallback state | Advanced | Components catalog status row | `ManifestRefreshStatus` | Low | tested |
+| `POST /v1/components/manifest` | Force an HTTPS conditional refresh and signature/replay validation | Advanced | Components “Refresh catalog” action | `ManifestRefreshStatus` | Medium | tested |
 | `POST /v1/components/features` | Persist selected setup profile + features | Primary | Setup type + feature selection stages | `SaveFeatureSelections` | Low | connected |
 | `POST /v1/components/{id}/install` | Install a managed component | Primary | Provisioning stage rows, retry action | `InstallComponentRequest` | Medium | connected |
 | `POST /v1/components/{id}/cancel` | Cancel a running installation | Primary | Provisioning cancel action | — | Medium | connected |
@@ -34,7 +36,7 @@ Setup profiles (`SetupProfile`): `minimal`, `recommended`, `full`, `custom`.
 
 Component ids on the wire (`ComponentId`): `ytdlp`, `ffmpeg`, `rqbit`, `seven_zip` (route path accepts `yt-dlp`, `ffmpeg`, `rqbit`, `7zip`).
 
-Component states (`ComponentState`, snake_case): `not_installed`, `queued`, `downloading`, `verifying`, `installing`, `installed`, `update_available`, `failed`, `unsupported`, `custom_path`.
+Component states (`ComponentState`, snake_case): `not_installed`, `queued`, `downloading`, `verifying`, `installing`, `installed`, `update_available`, `failed`, `unsupported`, `cancelled`, `custom_path`, `custom_path_invalid`.
 
 Every state maps to UI text, Fluent icon, accessible description, and permitted actions in
 `frontend/src/lib/setup/componentStates.ts`.
@@ -90,5 +92,5 @@ empty built-in manifest (per-row Retry offered), setup completion via
 ## 7. Known gaps / follow-ups
 
 - `GET /v1/settings` preference subset not yet surfaced in Preferences stage (theme is frontend + Windows; close behavior belongs to main app).
-- Built-in engine manifest is empty until release artifact data is populated; components report `unsupported` in dev unless a manifest file is provided under `RAVYN_DATA_DIR/engines/manifest.json`.
+- Development builds can use the embedded catalogue or a signed operator override. Tagged release builds additionally publish and consume the signed remote catalogue described in `docs/COMPONENT_MANIFESTS.md`.
 - Uninstall entry point (plan §21 Phase 2 item 12) not yet implemented.
