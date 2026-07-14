@@ -2,25 +2,33 @@
   import { describeError } from "../api/errors";
   import type { Job, MediaArchiveRecord, MediaItemOutputRecord, MediaItemRecord, MediaItemSummary } from "../api/types";
   import Button from "../components/Button.svelte";
+  import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
+  import DetailsPane from "../components/DetailsPane.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import InlineError from "../components/InlineError.svelte";
-  import MetricCard from "../components/MetricCard.svelte";
-  import PageHeader from "../components/PageHeader.svelte";
+  import ListDetailsLayout from "../components/ListDetailsLayout.svelte";
+  import MenuButton from "../components/MenuButton.svelte";
+  import type { MenuItem } from "../components/Menu.svelte";
+  import PageCommandBar from "../components/PageCommandBar.svelte";
+  import PageScaffold from "../components/PageScaffold.svelte";
   import SearchBox from "../components/SearchBox.svelte";
   import StatusBadge from "../components/StatusBadge.svelte";
   import Surface from "../components/Surface.svelte";
+  import Tabs from "../components/Tabs.svelte";
+  import { openNativePath, revealNativePath } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
-  import { openNativePath, revealNativePath } from "../native/tauri";
-  import { formatAbsoluteTime, formatBytes, formatPercent, jobDisplayName } from "../util/format";
+  import { formatAbsoluteTime, formatBytes, jobDisplayName } from "../util/format";
+  import { mediaActivity, mediaProgress, uniqueProducedFiles, type MediaDetailTab } from "./mediaPresentation";
 
   type MediaTab = "downloads" | "archive";
 
   let activeTab = $state<MediaTab>("downloads");
+  let detailTab = $state<MediaDetailTab>("overview");
   let jobs = $state<Job[]>([]);
   let archive = $state<MediaArchiveRecord[]>([]);
   let search = $state("");
@@ -33,28 +41,52 @@
   let detailsError = $state<string | null>(null);
   let retryBusy = $state<string | null>(null);
   let retryAllBusy = $state(false);
-  let expandedItemId = $state<string | null>(null);
-  let expandedOutputs = $state<MediaItemOutputRecord[] | null>(null);
-  let expandedOutputsError = $state<string | null>(null);
+
+  let producedFiles = $state<MediaItemOutputRecord[]>([]);
+  let outputsLoading = $state(false);
+  let outputsError = $state<string | null>(null);
+  let outputsForJob = $state<string | null>(null);
+
   let archiveTarget = $state<MediaArchiveRecord | null>(null);
   let archiveBusy = $state(false);
   let archiveError = $state<string | null>(null);
 
+  const selectedJob = $derived(jobs.find((job) => job.id === selectedJobId) ?? null);
   const visibleJobs = $derived(search.trim()
     ? jobs.filter((job) => `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase().includes(search.toLowerCase()))
     : jobs);
   const visibleArchive = $derived(search.trim()
     ? archive.filter((entry) => `${entry.extractor} ${entry.media_id} ${entry.webpage_url ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     : archive);
-  const selectedJob = $derived(jobs.find((job) => job.id === selectedJobId) ?? null);
   const completedJobs = $derived(jobs.filter((job) => job.status === "completed").length);
+  const activeJobs = $derived(jobs.filter((job) => ["queued", "probing", "downloading", "post_processing"].includes(job.status)).length);
+  const failedJobs = $derived(jobs.filter((job) => job.status === "failed").length);
   const failedItems = $derived(items.filter((item) => item.state === "failed").length);
+  const activity = $derived(mediaActivity(items));
+  const summaryItems = $derived<SummaryItem[]>([
+    { label: "media jobs", value: jobs.length.toLocaleString() },
+    { label: "active", value: activeJobs.toLocaleString(), tone: activeJobs ? "success" : "default" },
+    { label: "completed", value: completedJobs.toLocaleString() },
+    { label: "failed", value: failedJobs.toLocaleString(), tone: failedJobs ? "error" : "default" },
+    { label: "archive entries", value: archive.length.toLocaleString() },
+  ]);
+
+  const viewTabs = [
+    { id: "downloads", label: "Downloads" },
+    { id: "archive", label: "Archive" },
+  ];
+  const detailTabs = [
+    { id: "overview", label: "Overview" },
+    { id: "items", label: "Items" },
+    { id: "files", label: "Produced files" },
+    { id: "activity", label: "Activity" },
+  ];
 
   function statusSeverity(status: string): "neutral" | "info" | "success" | "warning" | "error" {
     if (status === "completed") return "success";
     if (status === "failed") return "error";
-    if (status === "partial" || status === "paused") return "warning";
-    if (["queued", "probing", "downloading", "post_processing"].includes(status)) return "info";
+    if (status === "partial" || status === "paused" || status === "skipped") return "warning";
+    if (["queued", "probing", "downloading", "post_processing", "planned"].includes(status)) return "info";
     return "neutral";
   }
 
@@ -96,11 +128,37 @@
     }
   }
 
+  async function loadProducedFiles(jobId: string): Promise<void> {
+    if (!connection.client || outputsLoading) return;
+    outputsLoading = true;
+    outputsError = null;
+    const records: MediaItemOutputRecord[] = [];
+    try {
+      const currentItems = [...items];
+      for (let offset = 0; offset < currentItems.length; offset += 8) {
+        const chunk = currentItems.slice(offset, offset + 8);
+        const chunkOutputs = await Promise.all(
+          chunk.map((item) => connection.client!.listMediaItemOutputs(jobId, item.id).catch(() => [])),
+        );
+        if (selectedJobId !== jobId) return;
+        records.push(...chunkOutputs.flat());
+      }
+      producedFiles = uniqueProducedFiles(records);
+      outputsForJob = jobId;
+    } catch (cause) {
+      if (selectedJobId === jobId) outputsError = describeError(cause);
+    } finally {
+      if (selectedJobId === jobId) outputsLoading = false;
+    }
+  }
+
   $effect(() => { void load(); });
+
   $effect(() => {
-    expandedItemId = null;
-    expandedOutputs = null;
-    expandedOutputsError = null;
+    producedFiles = [];
+    outputsForJob = null;
+    outputsError = null;
+    detailTab = "overview";
     if (!selectedJobId) {
       summary = null;
       items = [];
@@ -110,31 +168,25 @@
     void loadDetails(selectedJobId);
   });
 
-  async function toggleItemOutputs(item: MediaItemRecord): Promise<void> {
-    if (expandedItemId === item.id) {
-      expandedItemId = null;
-      expandedOutputs = null;
-      expandedOutputsError = null;
-      return;
+  $effect(() => {
+    detailTab;
+    items.length;
+    if (detailTab === "files" && selectedJobId && outputsForJob !== selectedJobId && !detailsLoading) {
+      void loadProducedFiles(selectedJobId);
     }
-    if (!connection.client) return;
-    expandedItemId = item.id;
-    expandedOutputs = null;
-    expandedOutputsError = null;
-    try {
-      const outputs = await connection.client.listMediaItemOutputs(item.job_id, item.id);
-      if (expandedItemId === item.id) expandedOutputs = outputs;
-    } catch (cause) {
-      if (expandedItemId === item.id) expandedOutputsError = describeError(cause);
-    }
-  }
+  });
+
+  $effect(() => {
+    activeTab;
+    if (activeTab === "archive") selectedJobId = null;
+  });
 
   async function runNativePathAction(path: string, action: "open" | "reveal"): Promise<void> {
     try {
       if (action === "open") await openNativePath(path);
       else await revealNativePath(path);
     } catch (cause) {
-      notifications.error(action === "open" ? "Couldn't open this path" : "Couldn't reveal this path", describeError(cause));
+      notifications.error(action === "open" ? "Couldn't open this file" : "Couldn't show this file in Explorer", describeError(cause));
     }
   }
 
@@ -173,7 +225,7 @@
     archiveError = null;
     try {
       await connection.client.removeMediaArchive(archiveTarget.extractor, archiveTarget.media_id);
-      notifications.info("Archive entry removed");
+      notifications.info("Archive entry removed", "The downloaded file was not deleted.");
       archiveTarget = null;
       await load();
     } catch (cause) {
@@ -182,176 +234,249 @@
       archiveBusy = false;
     }
   }
+
+  function moreItems(): MenuItem[] {
+    return [
+      { id: "refresh", label: "Refresh", icon: "refresh", onSelect: () => void load() },
+    ];
+  }
 </script>
 
-<div class="page">
-  <PageHeader eyebrow="Downloads" title="Media" description="Video, audio, playlists, item history, and the anti-duplicate archive.">
-    {#snippet actions()}
-      <Button onclick={() => void load()}><Icon name="refresh" size={16} /> Refresh</Button>
-      <Button variant="accent" onclick={() => navigation.requestAdd("media")}><Icon name="add" size={16} /> Add media</Button>
-    {/snippet}
-  </PageHeader>
+<PageScaffold title="Media" summary="Video, audio, playlists, produced files, and duplicate prevention.">
+  {#snippet actions()}
+    <Button variant="accent" onclick={() => navigation.requestAdd("media")}><Icon name="add" size={16} /> Add media</Button>
+  {/snippet}
 
-  <div class="metrics">
-    <MetricCard label="Media downloads" value={jobs.length.toLocaleString()} detail={`${completedJobs} completed`} icon="video" />
-    <MetricCard label="Archive entries" value={archive.length.toLocaleString()} detail="Used to prevent duplicate downloads" icon="archive" />
-    <MetricCard label="Selected items" value={(summary?.total ?? 0).toLocaleString()} detail={selectedJob ? jobDisplayName(selectedJob.source, selectedJob.filename) : "Select a media job"} icon="list" />
-    <MetricCard label="Failed items" value={failedItems.toLocaleString()} detail={failedItems > 0 ? "Can be retried individually or together" : "No failed selected items"} icon="warning" />
-  </div>
+  {#snippet commandBar()}
+    <PageCommandBar ariaLabel="Media commands">
+      {#snippet leading()}
+        <Tabs tabs={viewTabs} bind:selected={activeTab} />
+      {/snippet}
+      {#snippet actions()}
+        <SearchBox bind:value={search} label="Search media" placeholder={activeTab === "downloads" ? "Search media downloads" : "Search archive"} />
+        <MenuButton label="More" icon="more" items={moreItems()} variant="subtle" />
+      {/snippet}
+    </PageCommandBar>
+  {/snippet}
 
-  <div class="command-row">
-    <div class="tabs" aria-label="Media view">
-      <button type="button" class:active={activeTab === "downloads"} onclick={() => (activeTab = "downloads")}>Downloads</button>
-      <button type="button" class:active={activeTab === "archive"} onclick={() => { activeTab = "archive"; selectedJobId = null; }}>Archive</button>
-    </div>
-    <SearchBox bind:value={search} label="Search media" placeholder={activeTab === "downloads" ? "Search media downloads" : "Search archive"} />
-  </div>
+  {#snippet status()}
+    <div class="status-strip"><CompactSummary items={summaryItems} ariaLabel="Media summary" /></div>
+  {/snippet}
 
-  <div class="workspace" class:with-details={activeTab === "downloads" && !!selectedJob}>
-    <Surface padding="none" class="main-list">
-      {#if error}
-        <div class="state"><InlineError title="Couldn't load media" message={error} retry={() => void load()} /></div>
-      {:else if loading}
-        <div class="state muted">Loading media history…</div>
-      {:else if activeTab === "downloads"}
-        {#if visibleJobs.length === 0}
-          <EmptyState icon="video" title="No media downloads" message={search ? "No media jobs match the current search." : "Add a video, audio item, or playlist to begin."}>
-            {#if !search}<Button variant="accent" onclick={() => navigation.requestAdd("media")}>Add media</Button>{/if}
-          </EmptyState>
-        {:else}
-          <div class="list-header" aria-hidden="true"><span>Name</span><span>Progress</span><span>Size</span><span>Status</span></div>
-          <div class="rows">
-            {#each visibleJobs as job (job.id)}
-              <button type="button" class="job-row" class:selected={selectedJobId === job.id} onclick={() => (selectedJobId = job.id)}>
-                <span class="name-cell"><span class="media-icon"><Icon name="video" size={18} /></span><span><strong>{jobDisplayName(job.source, job.filename)}</strong><small>{job.source}</small></span></span>
-                <span class="progress-cell"><span class="progress-track"><span style={`width:${job.total_bytes ? Math.min(100, job.downloaded_bytes / job.total_bytes * 100) : 0}%`}></span></span><small>{formatPercent(job.downloaded_bytes, job.total_bytes)}</small></span>
-                <span>{formatBytes(job.total_bytes)}</span>
-                <span><StatusBadge label={job.status.replaceAll("_", " ")} severity={statusSeverity(job.status)} /></span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      {:else if visibleArchive.length === 0}
-        <EmptyState icon="archive" title="Media archive is empty" message={search ? "No archive records match the current search." : "Completed media downloads are recorded here to prevent accidental duplicates."} />
-      {:else}
-        <div class="archive-header" aria-hidden="true"><span>Media ID</span><span>Extractor</span><span>Downloaded</span><span></span></div>
-        <div class="rows">
-          {#each visibleArchive as entry (`${entry.extractor}:${entry.media_id}`)}
-            <div class="archive-row"><span><strong>{entry.media_id}</strong><small>{entry.webpage_url ?? "No source URL stored"}</small></span><span>{entry.extractor}</span><span>{formatAbsoluteTime(entry.downloaded_at)}</span><IconButton icon="trash" label="Remove archive entry" variant="subtle" onclick={() => { archiveTarget = entry; archiveError = null; }} /></div>
-          {/each}
-        </div>
-      {/if}
-    </Surface>
-
-    {#if activeTab === "downloads" && selectedJob}
-      <aside class="details">
-        <header><div><span class="media-icon large"><Icon name="video" size={21} /></span><span><h2>{jobDisplayName(selectedJob.source, selectedJob.filename)}</h2><small>{summary?.playlist_title ?? selectedJob.status.replaceAll("_", " ")}</small></span></div><IconButton icon="close" label="Close details" variant="subtle" onclick={() => (selectedJobId = null)} /></header>
-        <div class="details-body">
-          {#if detailsError}
-            <InlineError title="Couldn't load media items" message={detailsError} retry={() => selectedJobId && void loadDetails(selectedJobId)} />
-          {:else if detailsLoading}
-            <p class="muted">Loading media items…</p>
+  <div class="workspace">
+    <ListDetailsLayout detailsOpen={activeTab === "downloads" && !!selectedJob} detailsLabel="Media download details" detailsWidth="450px">
+      {#snippet list()}
+        <Surface padding="none" class="media-list">
+          {#if error}
+            <div class="state"><InlineError title="Couldn't load media" message={error} retry={() => void load()} /></div>
+          {:else if loading}
+            <div class="state muted">Loading media history…</div>
+          {:else if activeTab === "downloads"}
+            {#if visibleJobs.length === 0}
+              <EmptyState icon="video" title="No media downloads" message={search ? "No media jobs match the current search." : "Add a video, audio item, or playlist to begin."}>
+                {#if !search}<Button variant="accent" onclick={() => navigation.requestAdd("media")}>Add media</Button>{/if}
+              </EmptyState>
+            {:else}
+              <div class="list-header" aria-hidden="true"><span>Name</span><span>Progress</span><span>Size</span><span>Status</span></div>
+              <div class="rows" role="listbox" aria-label="Media downloads">
+                {#each visibleJobs as job (job.id)}
+                  {@const progress = mediaProgress(job)}
+                  <button type="button" class="job-row" class:selected={selectedJobId === job.id} role="option" aria-selected={selectedJobId === job.id} onclick={() => (selectedJobId = job.id)}>
+                    <span class="name-cell"><span class="media-icon"><Icon name="video" size={18} /></span><span><strong>{jobDisplayName(job.source, job.filename)}</strong><small>{job.source}</small></span></span>
+                    <span class="progress-cell"><span class="progress-track"><span style={`width:${progress}%`}></span></span><small>{progress.toFixed(0)}% · {formatBytes(job.downloaded_bytes)}</small></span>
+                    <span>{formatBytes(job.total_bytes)}</span>
+                    <span><StatusBadge label={job.status.replaceAll("_", " ")} severity={statusSeverity(job.status)} /></span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          {:else if visibleArchive.length === 0}
+            <EmptyState icon="archive" title="Media archive is empty" message={search ? "No archive records match the current search." : "Completed media downloads are recorded here to prevent accidental duplicates."} />
           {:else}
-            <div class="summary-grid">
-              <div><strong>{summary?.completed ?? 0}</strong><small>Completed</small></div>
-              <div><strong>{summary?.downloading ?? 0}</strong><small>Downloading</small></div>
-              <div><strong>{summary?.failed ?? 0}</strong><small>Failed</small></div>
-              <div><strong>{summary?.skipped ?? 0}</strong><small>Skipped</small></div>
-            </div>
-            {#if (summary?.failed ?? 0) > 0}<Button variant="accent" disabled={retryAllBusy} onclick={() => void retryFailed()}><Icon name="refresh" size={16} /> {retryAllBusy ? "Retrying…" : "Retry all failed"}</Button>{/if}
-            <div class="item-list">
-              {#each items as item (item.id)}
-                <div class="item-row"><span class="item-state {statusSeverity(item.state)}"><Icon name={item.state === "completed" ? "check-circle" : item.state === "failed" ? "alert-circle" : "video"} size={16} /></span><span><strong>{item.title ?? item.item_key}</strong><small>{item.playlist_index ? `${item.playlist_index}${item.playlist_count ? ` of ${item.playlist_count}` : ""}` : item.output_path ?? item.webpage_url ?? item.state}</small>{#if item.error}<em>{item.error}</em>{/if}</span><StatusBadge label={item.state} severity={statusSeverity(item.state)} /><span class="item-buttons"><IconButton icon={expandedItemId === item.id ? "chevron-up" : "chevron-down"} label={expandedItemId === item.id ? "Hide produced files" : "Show produced files"} variant="subtle" onclick={() => void toggleItemOutputs(item)} />{#if item.state === "failed"}<IconButton icon="refresh" label="Retry item" variant="subtle" disabled={retryBusy === item.id} onclick={() => void retryItem(item)} />{/if}</span></div>
-                {#if expandedItemId === item.id}
-                  <div class="item-outputs">
-                    {#if expandedOutputsError}
-                      <InlineError title="Couldn't load produced files" message={expandedOutputsError} retry={() => void toggleItemOutputs(item)} />
-                    {:else if expandedOutputs === null}
-                      <p class="muted">Loading produced files…</p>
-                    {:else if expandedOutputs.length === 0}
-                      <p class="muted">No files recorded for this item yet.</p>
-                    {:else}
-                      {#each expandedOutputs as record (record.output.id)}
-                        <div class="output-row">
-                          <span class="output-path" title={record.output.current_path}>{record.output.relative_path}</span>
-                          <span class="output-role">{record.role}</span>
-                          <span class="output-size">{formatBytes(record.output.size_bytes)}</span>
-                          <IconButton icon="external-link" label="Open file" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "open")} />
-                          <IconButton icon="folder-open" label="Show in Explorer" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "reveal")} />
-                        </div>
-                      {/each}
-                    {/if}
-                  </div>
-                {/if}
+            <div class="archive-header" aria-hidden="true"><span>Media</span><span>Extractor</span><span>Downloaded</span><span></span></div>
+            <div class="rows" aria-label="Media archive">
+              {#each visibleArchive as entry (`${entry.extractor}:${entry.media_id}`)}
+                <div class="archive-row">
+                  <span><strong>{entry.media_id}</strong><small>{entry.webpage_url ?? "No source URL stored"}</small></span>
+                  <span>{entry.extractor}</span>
+                  <span>{formatAbsoluteTime(entry.downloaded_at)}</span>
+                  <IconButton icon="trash" label="Remove archive entry" variant="subtle" onclick={() => { archiveTarget = entry; archiveError = null; }} />
+                </div>
               {/each}
-              {#if items.length === 0}<EmptyState icon="list" title="No media item records" message="Single-file downloads may not expose a playlist item list until processing begins." />{/if}
             </div>
           {/if}
-        </div>
-      </aside>
-    {/if}
-  </div>
-</div>
+        </Surface>
+      {/snippet}
 
-<ConfirmDialog open={!!archiveTarget} title="Remove archive entry?" message="Ravyn may allow this media item to be downloaded again after the archive record is removed. No downloaded file is deleted." confirmLabel="Remove entry" destructive busy={archiveBusy} error={archiveError} onConfirm={() => void removeArchiveEntry()} onClose={() => !archiveBusy && (archiveTarget = null)} />
+      {#snippet details()}
+        {#if selectedJob}
+          <DetailsPane
+            title={jobDisplayName(selectedJob.source, selectedJob.filename)}
+            subtitle={summary?.playlist_title ?? selectedJob.status.replaceAll("_", " ")}
+            icon="video"
+            tabs={detailTabs}
+            bind:selectedTab={detailTab}
+            onClose={() => (selectedJobId = null)}
+          >
+            {#if detailsError}
+              <InlineError title="Couldn't load media details" message={detailsError} retry={() => selectedJobId && void loadDetails(selectedJobId)} />
+            {:else if detailsLoading}
+              <p class="muted">Loading media details…</p>
+            {:else if detailTab === "overview"}
+              <div class="detail-stack">
+                <div class="detail-summary">
+                  <span><strong>{summary?.completed ?? 0}</strong> completed</span>
+                  <span><strong>{summary?.downloading ?? 0}</strong> downloading</span>
+                  <span class:has-error={(summary?.failed ?? 0) > 0}><strong>{summary?.failed ?? 0}</strong> failed</span>
+                  <span><strong>{summary?.skipped ?? 0}</strong> skipped</span>
+                </div>
+                {#if (summary?.failed ?? 0) > 0}
+                  <Button variant="accent" disabled={retryAllBusy} onclick={() => void retryFailed()}><Icon name="refresh" size={16} /> {retryAllBusy ? "Retrying…" : "Retry all failed"}</Button>
+                {/if}
+                <dl>
+                  <dt>Status</dt><dd>{selectedJob.status.replaceAll("_", " ")}</dd>
+                  <dt>Source</dt><dd class="wrap">{selectedJob.source}</dd>
+                  <dt>Destination</dt><dd class="wrap mono">{selectedJob.destination}</dd>
+                  <dt>Downloaded</dt><dd>{formatBytes(selectedJob.downloaded_bytes)}</dd>
+                  <dt>Total size</dt><dd>{formatBytes(selectedJob.total_bytes)}</dd>
+                  <dt>Created</dt><dd>{formatAbsoluteTime(selectedJob.created_at)}</dd>
+                  {#if selectedJob.completed_at}<dt>Completed</dt><dd>{formatAbsoluteTime(selectedJob.completed_at)}</dd>{/if}
+                  {#if summary?.playlist_title}<dt>Playlist</dt><dd>{summary.playlist_title}</dd>{/if}
+                  {#if summary?.declared_playlist_count}<dt>Declared items</dt><dd>{summary.declared_playlist_count}</dd>{/if}
+                </dl>
+              </div>
+            {:else if detailTab === "items"}
+              {#if items.length === 0}
+                <EmptyState icon="list" title="No media item records" message="Single-file downloads may not expose an item list until processing begins." />
+              {:else}
+                <div class="item-list">
+                  {#each items as item (item.id)}
+                    <div class="item-row">
+                      <span class="item-state" data-tone={statusSeverity(item.state)}><Icon name={item.state === "completed" ? "check-circle" : item.state === "failed" ? "alert-circle" : "video"} size={16} /></span>
+                      <span class="item-copy"><strong>{item.title ?? item.item_key}</strong><small>{item.playlist_index ? `${item.playlist_index}${item.playlist_count ? ` of ${item.playlist_count}` : ""}` : item.output_path ?? item.webpage_url ?? item.state}</small>{#if item.error}<em>{item.error}</em>{/if}</span>
+                      <StatusBadge label={item.state} severity={statusSeverity(item.state)} />
+                      {#if item.state === "failed"}<IconButton icon="refresh" label="Retry item" variant="subtle" disabled={retryBusy === item.id} onclick={() => void retryItem(item)} />{/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {:else if detailTab === "files"}
+              {#if outputsError}
+                <InlineError title="Couldn't load produced files" message={outputsError} retry={() => selectedJobId && void loadProducedFiles(selectedJobId)} />
+              {:else if outputsLoading || outputsForJob !== selectedJob.id}
+                <p class="muted">Collecting produced files…</p>
+              {:else if producedFiles.length === 0}
+                <EmptyState icon="file" title="No produced files recorded" message="Files will appear here after media items finish processing." />
+              {:else}
+                <div class="output-list">
+                  {#each producedFiles as record (record.output.id)}
+                    <div class="output-row">
+                      <Icon name={record.output.output_type === "audio" ? "music" : record.output.output_type === "thumbnail" ? "image" : "file"} size={17} />
+                      <span><strong>{record.output.relative_path}</strong><small>{record.role} · {formatBytes(record.output.size_bytes)}</small></span>
+                      <IconButton icon="external-link" label="Open file" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "open")} />
+                      <IconButton icon="folder-open" label="Show in Explorer" variant="subtle" onclick={() => void runNativePathAction(record.output.current_path, "reveal")} />
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {:else}
+              {#if activity.length === 0}
+                <EmptyState icon="clock" title="No activity recorded" message="Media item state changes will appear here." />
+              {:else}
+                <div class="timeline">
+                  {#each activity as item (item.id)}
+                    <div class="timeline-entry" data-tone={statusSeverity(item.state)}>
+                      <span class="timeline-dot"></span>
+                      <div><strong>{item.title ?? item.item_key}</strong><small>{item.state.replaceAll("_", " ")} · {formatAbsoluteTime(item.updated_at)}</small>{#if item.error}<p>{item.error}</p>{/if}</div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+          </DetailsPane>
+        {/if}
+      {/snippet}
+    </ListDetailsLayout>
+  </div>
+</PageScaffold>
+
+<ConfirmDialog
+  open={!!archiveTarget}
+  title="Remove archive entry?"
+  message="Ravyn may allow this media item to be downloaded again. No downloaded file is deleted."
+  confirmLabel="Remove entry"
+  destructive
+  busy={archiveBusy}
+  error={archiveError}
+  onConfirm={() => void removeArchiveEntry()}
+  onClose={() => !archiveBusy && (archiveTarget = null)}
+/>
 
 <style>
-  .page { height: 100%; display: flex; flex-direction: column; min-width: 0; }
-  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); padding: 0 var(--page-padding) var(--space-4); }
-  .command-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 0 var(--page-padding) var(--space-4); }
-  .tabs { display: inline-flex; padding: 3px; border: 1px solid var(--stroke-control); border-radius: var(--radius-medium); background: var(--bg-control); }
-  .tabs button { min-height: 30px; padding: 0 var(--space-3); border: 0; border-radius: calc(var(--radius-medium) - 2px); color: var(--text-secondary); background: transparent; }
-  .tabs button.active { color: var(--text-primary); background: var(--surface-card); box-shadow: var(--shadow-control); font-weight: 600; }
-  .command-row :global(.search-box) { width: min(440px, 48vw); }
-  .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; gap: var(--space-3); padding: 0 var(--page-padding) var(--page-padding); }
-  .workspace.with-details { grid-template-columns: minmax(0, 1fr) minmax(360px, 420px); }
-  :global(.main-list) { display: flex; flex-direction: column; min-height: 0; }
+  .workspace { height: 100%; min-height: 0; padding: 0 var(--page-padding) var(--page-padding); }
+  .status-strip { min-height: 38px; display: flex; align-items: center; padding: 0 var(--page-padding); border-bottom: 1px solid var(--stroke-divider); }
+  :global(.media-list) { height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: 0; border-color: var(--stroke-divider); background: var(--surface-content); }
   .state { padding: var(--space-6); }
   .muted { color: var(--text-secondary); }
-  .list-header, .job-row { display: grid; grid-template-columns: minmax(240px, 1.7fr) minmax(150px, 1fr) 100px 120px; align-items: center; gap: var(--space-3); }
-  .archive-header, .archive-row { display: grid; grid-template-columns: minmax(240px, 1.7fr) 120px 180px 36px; align-items: center; gap: var(--space-3); }
+  .list-header, .job-row { display: grid; grid-template-columns: minmax(250px, 1.8fr) minmax(170px, 1fr) 100px 130px; align-items: center; gap: var(--space-3); }
+  .archive-header, .archive-row { display: grid; grid-template-columns: minmax(250px, 1.8fr) 120px 180px 36px; align-items: center; gap: var(--space-3); }
   .list-header, .archive-header { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
   .rows { flex: 1; min-height: 0; overflow: auto; }
   .job-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); color: var(--text-primary); background: transparent; text-align: left; }
   .job-row:hover, .archive-row:hover { background: var(--bg-subtle-hover); }
-  .job-row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
+  .job-row.selected { background: color-mix(in srgb, var(--accent-subtle) 52%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .name-cell { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .name-cell > span:last-child, .archive-row > span:first-child { display: flex; min-width: 0; flex-direction: column; }
+  .media-icon { width: 30px; height: 30px; flex: none; display: grid; place-items: center; color: var(--text-secondary); }
+  .name-cell > span:last-child, .archive-row > span:first-child { min-width: 0; display: flex; flex-direction: column; }
   .name-cell strong, .name-cell small, .archive-row strong, .archive-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .name-cell small, .archive-row small, .details header small { color: var(--text-tertiary); font-size: var(--text-caption); }
-  .media-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
-  .media-icon.large { width: 40px; height: 40px; }
+  .name-cell small, .archive-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
   .progress-cell { display: flex; flex-direction: column; gap: 4px; }
   .progress-cell small { color: var(--text-tertiary); }
   .progress-track { height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-subtle); }
   .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent-default); }
   .archive-row { min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
-  .details { min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--stroke-surface); border-radius: var(--radius-layer); background: var(--surface-card); }
-  .details > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .details > header > div, .details > header > div > span:last-child { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .details > header > div > span:last-child { align-items: flex-start; flex-direction: column; gap: 0; }
-  .details h2 { max-width: 280px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-body-strong); }
-  .details-body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4); }
-  .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin-bottom: var(--space-4); }
-  .summary-grid div { display: flex; flex-direction: column; padding: var(--space-3); border-radius: var(--radius-medium); background: var(--bg-subtle); }
-  .summary-grid strong { font-size: var(--text-subtitle); }
-  .summary-grid small { color: var(--text-tertiary); }
-  .item-list { display: flex; flex-direction: column; margin-top: var(--space-4); }
-  .item-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 54px; padding: var(--space-2) 0; border-bottom: 1px solid var(--stroke-divider); }
-  .item-row > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; }
-  .item-row strong, .item-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .item-row small { color: var(--text-tertiary); }
-  .item-row em { color: var(--status-error); font-size: var(--text-caption); font-style: normal; }
-  .item-buttons { display: flex; align-items: center; gap: var(--space-1); }
-  .item-outputs { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--stroke-divider); background: var(--bg-subtle); border-radius: var(--radius-control); }
-  .output-row { display: flex; align-items: center; gap: var(--space-2); min-height: 32px; }
-  .output-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Consolas", ui-monospace, monospace; font-size: var(--text-caption); }
-  .output-role, .output-size { flex: none; color: var(--text-tertiary); font-size: var(--text-caption); }
-  .item-state { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-medium); color: var(--text-tertiary); background: var(--bg-subtle); }
-  .item-state.success { color: var(--status-success); background: var(--status-success-bg); }
-  .item-state.error { color: var(--status-error); background: var(--status-error-bg); }
-  @media (max-width: 1120px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .list-header, .job-row { grid-template-columns: minmax(220px, 1.5fr) minmax(140px, 1fr) 110px; } .list-header span:nth-child(3), .job-row > span:nth-child(3) { display: none; } }
-  @media (max-width: 900px) { .workspace.with-details { grid-template-columns: minmax(0, 1fr); } .details { position: absolute; inset: 0 var(--page-padding) var(--page-padding); z-index: 20; background: var(--surface-overlay); backdrop-filter: blur(30px); } }
-  @media (max-width: 720px) { .command-row { align-items: stretch; flex-direction: column; } .command-row :global(.search-box) { width: 100%; } .archive-header, .archive-row { grid-template-columns: minmax(0, 1fr) 36px; } .archive-header span:nth-child(2), .archive-header span:nth-child(3), .archive-row > span:nth-child(2), .archive-row > span:nth-child(3) { display: none; } }
-  @media (max-width: 620px) { .metrics { grid-template-columns: 1fr; } .list-header, .job-row { grid-template-columns: minmax(0, 1fr) 100px; } .list-header span:nth-child(2), .job-row > span:nth-child(2) { display: none; } .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .detail-stack { display: flex; flex-direction: column; gap: var(--space-4); }
+  .detail-summary { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); padding-bottom: var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-secondary); font-size: var(--text-caption); }
+  .detail-summary span { display: inline-flex; gap: 4px; }
+  .detail-summary strong { color: var(--text-primary); }
+  .detail-summary .has-error strong { color: var(--status-error); }
+  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0; }
+  dt { color: var(--text-secondary); }
+  dd { min-width: 0; margin: 0; }
+  .wrap { word-break: break-word; }
+  .mono { font: 12px/18px Consolas, ui-monospace, monospace; }
+  .item-list, .output-list, .timeline { display: flex; flex-direction: column; }
+  .item-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 56px; padding: var(--space-2) 0; border-bottom: 1px solid var(--stroke-divider); }
+  .item-copy, .output-row > span { min-width: 0; display: flex; flex-direction: column; }
+  .item-copy strong, .item-copy small, .output-row strong, .output-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-copy small, .output-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .item-copy em { color: var(--status-error); font-size: var(--text-caption); font-style: normal; white-space: normal; }
+  .item-state { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-tertiary); }
+  .item-state[data-tone="success"] { color: var(--status-success); }
+  .item-state[data-tone="error"] { color: var(--status-error); }
+  .item-state[data-tone="warning"] { color: var(--status-warning); }
+  .output-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-2); min-height: 52px; border-bottom: 1px solid var(--stroke-divider); }
+  .timeline-entry { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--space-2); padding: 0 0 var(--space-4); }
+  .timeline-entry::before { content: ""; position: absolute; left: 5px; top: 12px; bottom: -2px; width: 1px; background: var(--stroke-divider); }
+  .timeline-entry:last-child::before { display: none; }
+  .timeline-dot { width: 11px; height: 11px; margin-top: 4px; border: 2px solid var(--surface-content); border-radius: 50%; background: var(--text-tertiary); box-shadow: 0 0 0 1px var(--stroke-control); }
+  .timeline-entry[data-tone="success"] .timeline-dot { background: var(--status-success); }
+  .timeline-entry[data-tone="error"] .timeline-dot { background: var(--status-error); }
+  .timeline-entry[data-tone="warning"] .timeline-dot { background: var(--status-warning); }
+  .timeline-entry div { min-width: 0; display: flex; flex-direction: column; }
+  .timeline-entry small { color: var(--text-tertiary); }
+  .timeline-entry p { margin: var(--space-1) 0 0; color: var(--status-error); font-size: var(--text-caption); }
+  @media (max-width: 1120px) {
+    .list-header, .job-row { grid-template-columns: minmax(220px, 1.5fr) minmax(150px, 1fr) 120px; }
+    .list-header span:nth-child(3), .job-row > span:nth-child(3) { display: none; }
+  }
+  @media (max-width: 720px) {
+    .archive-header, .archive-row { grid-template-columns: minmax(0, 1fr) 36px; }
+    .archive-header span:nth-child(2), .archive-header span:nth-child(3), .archive-row > span:nth-child(2), .archive-row > span:nth-child(3) { display: none; }
+    .list-header { display: none; }
+    .job-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .job-row > span:nth-child(2), .job-row > span:nth-child(3) { display: none; }
+    .item-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .item-row > :global(button) { grid-column: 3; }
+  }
 </style>

@@ -15,6 +15,7 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatBytes, formatDuration } from "../util/format";
+  import { detectSource } from "./sourceDetection";
 
   let {
     open,
@@ -32,6 +33,8 @@
 
   let kind = $state<DialogKind>("http");
   let source = $state("");
+  let manualKind = $state<DialogKind | null>(null);
+  let lastAutoProbeKey = $state("");
   let destination = $state("");
   let filename = $state("");
   let expectedSha256 = $state("");
@@ -70,7 +73,9 @@
   $effect(() => {
     if (open) {
       source = initialSource;
-      kind = initialKind;
+      manualKind = initialKind === "http" ? null : initialKind;
+      kind = manualKind ?? detectSource(initialSource).kind;
+      lastAutoProbeKey = "";
       error = null;
       clearProbe();
       void loadSecretReferences();
@@ -78,6 +83,7 @@
   });
 
   const lines = $derived(source.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("//")));
+  const detection = $derived(detectSource(source));
   const lineCount = $derived(lines.length);
   const parsedBatch = $derived.by((): { jobs: CreateJob[]; error: string | null } => {
     if (kind !== "batch" || !source.trim()) return { jobs: [], error: null };
@@ -110,6 +116,7 @@
     { value: "metalink", label: "Metalink document" },
     { value: "batch", label: "Batch (JSON)" },
   ];
+  const detectedKindLabel = $derived(manualKind ? `Manual: ${kindOptions.find((option) => option.value === kind)?.label ?? kind}` : detection.label);
   const duplicateOptions: DropdownOption[] = [
     { value: "allow", label: "Allow duplicates" },
     { value: "reuse_existing", label: "Reuse an identical existing download" },
@@ -183,6 +190,8 @@
 
   function reset(): void {
     kind = "http";
+    manualKind = null;
+    lastAutoProbeKey = "";
     source = "";
     destination = "";
     filename = "";
@@ -209,7 +218,22 @@
 
   function changeKind(value: string): void {
     kind = value as DialogKind;
+    manualKind = kind;
+    lastAutoProbeKey = "";
     clearProbe();
+  }
+
+  function useAutomaticDetection(): void {
+    manualKind = null;
+    kind = detection.kind;
+    lastAutoProbeKey = "";
+    clearProbe();
+  }
+
+  function trustPresentation(report: TrustReport): { label: string; detail: string } {
+    if (report.level === "high") return { label: "Secure source", detail: "No important safeguards are missing." };
+    if (report.level === "medium") return { label: "Verification recommended", detail: "Consider adding a checksum or reviewing the source." };
+    return { label: "Source requires attention", detail: "Review the source and credentials before continuing." };
   }
 
   function pickMetalinkFile(): void {
@@ -355,6 +379,27 @@
       busy = false;
     }
   }
+
+  $effect(() => {
+    if (!open || manualKind) return;
+    const nextKind = detection.kind;
+    if (kind !== nextKind) {
+      kind = nextKind;
+      lastAutoProbeKey = "";
+      clearProbe();
+    }
+  });
+
+  $effect(() => {
+    if (!open || lineCount !== 1 || (kind !== "media" && kind !== "torrent")) return;
+    const key = `${kind}:${lines[0] ?? ""}:${destination}`;
+    if (!lines[0] || key === lastAutoProbeKey) return;
+    const handle = setTimeout(() => {
+      lastAutoProbeKey = key;
+      void analyze();
+    }, 500);
+    return () => clearTimeout(handle);
+  });
 </script>
 
 <svelte:window onkeydown={(event) => {
@@ -362,17 +407,36 @@
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void submit();
 }} />
 
-<Dialog {open} title={kind === "media" ? "Add media" : kind === "torrent" ? "Add torrent" : kind === "metalink" ? "Import Metalink" : kind === "batch" ? "Batch import" : "Add download"} size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
+<Dialog {open} title="Add download" size={kind === "http" ? "medium" : "large"} preventClose={busy || probing} onClose={close}>
   <div class="form">
-    <div class="kind-field"><span>Download type</span><Dropdown options={kindOptions} bind:value={kind} label="Download type" /></div>
-    {#if kind === "batch"}
+    <section class="source-entry">
+      {#if kind === "metalink"}
+        <div class="metalink-pick">
+          <Button variant="standard" onclick={pickMetalinkFile}><Icon name="folder-open" size={16} /> Choose .metalink file…</Button>
+          {#if metalinkFileName}<span class="metalink-name">{metalinkFileName}</span>{/if}
+          <input type="file" accept=".metalink,.meta4,.xml,application/metalink4+xml,application/metalink+xml" hidden bind:this={metalinkFileInput} onchange={onMetalinkFileChosen} />
+        </div>
+      {/if}
       <TextArea
         bind:value={source}
-        label="Batch document"
-        placeholder={'[\n  { "kind": "http", "source": "https://example.com/a.zip", "destination": null, "priority": 5 },\n  { "kind": "http", "source": "https://example.com/b.zip", "expected_sha256": "…" }\n]'}
-        rows={10}
-        hint={'JSON array of job objects. Each entry needs "kind" and "source"; destination, filename, priority, speed_limit_bps, expected_sha256, duplicate_policy, and options are optional.'}
+        label="Source"
+        placeholder="Paste a link, magnet, or file path"
+        rows={kind === "batch" ? 10 : kind === "metalink" ? 8 : 4}
+        hint={kind === "batch" ? "Paste a JSON array of jobs." : kind === "metalink" ? "Paste Metalink XML or choose a .metalink/.meta4 file." : "Paste one source, or multiple direct links on separate lines."}
       />
+      <div class="detection-row">
+        <div class="detection-copy">
+          <span class="detection-chip"><Icon name={kind === "torrent" ? "torrent" : kind === "media" ? "video" : kind === "batch" ? "list" : kind === "metalink" ? "document" : "download"} size={14} /> {detectedKindLabel}</span>
+          <span>{manualKind ? "Automatic detection is overridden." : detection.description}</span>
+        </div>
+        <div class="type-control">
+          <Dropdown options={kindOptions} value={kind} onchange={changeKind} label="Change source type" />
+          {#if manualKind}<Button variant="subtle" onclick={useAutomaticDetection}>Use automatic</Button>{/if}
+        </div>
+      </div>
+    </section>
+
+    {#if kind === "batch"}
       {#if parsedBatch.error && source.trim()}
         <InlineError title="Invalid batch document" message={parsedBatch.error} />
       {:else if parsedBatch.jobs.length > 0}
@@ -381,48 +445,17 @@
       {#if batchResults}
         <div class="batch-failures">
           <strong>Rejected entries</strong>
-          <ul>
-            {#each batchResults as failure (failure.source + failure.error)}
-              <li><span class="failure-source" title={failure.source}>{failure.source}</span><span class="failure-error">{failure.error}</span></li>
-            {/each}
-          </ul>
+          <ul>{#each batchResults as failure (failure.source + failure.error)}<li><span class="failure-source" title={failure.source}>{failure.source}</span><span class="failure-error">{failure.error}</span></li>{/each}</ul>
         </div>
       {/if}
-    {:else if kind === "metalink"}
-      <div class="metalink-pick">
-        <Button variant="standard" onclick={pickMetalinkFile}><Icon name="folder-open" size={16} /> Choose .metalink file…</Button>
-        {#if metalinkFileName}<span class="metalink-name">{metalinkFileName}</span>{/if}
-        <input
-          type="file"
-          accept=".metalink,.meta4,.xml,application/metalink4+xml,application/metalink+xml"
-          hidden
-          bind:this={metalinkFileInput}
-          onchange={onMetalinkFileChosen}
-        />
-      </div>
-      <TextArea
-        bind:value={source}
-        label="Metalink document"
-        placeholder={'<?xml version="1.0" encoding="UTF-8"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">…'}
-        rows={8}
-        hint="Paste the Metalink XML or choose a .metalink/.meta4 file. File names, sizes, checksums, and mirror URLs come from the document."
-      />
-    {:else}
-      <TextArea
-        bind:value={source}
-        label={kind === "torrent" ? "Magnet link or torrent source" : kind === "media" ? "Media URL" : "URL or URLs"}
-        placeholder={kind === "torrent" ? "magnet:?xt=urn:btih:…" : kind === "media" ? "https://example.com/watch?v=…" : "https://example.com/file.zip\nhttps://example.com/another-file.zip"}
-        rows={kind === "http" ? 4 : 3}
-        hint={kind === "http" ? "One URL per line. Multiple lines create multiple downloads." : "Media and torrent downloads accept one source at a time so the content can be analyzed first."}
-      />
     {/if}
     {#if kind !== "http" && kind !== "metalink" && lineCount > 1}<InlineError title="Use one source" message="Media and torrent downloads must be added one at a time." />{/if}
     {#if kind === "http" && lineCount === 1}
       <div class="trust-row">
         <Button variant="subtle" disabled={trustBusy} onclick={() => void checkTrust()}><Icon name="shield" size={14} /> {trustBusy ? "Checking…" : "Check source"}</Button>
         {#if trustReport && trustCheckedUrl === lines[0]}
-          <span class="trust-result trust-{trustReport.level}">Trust {trustReport.score}/100 · {trustReport.level}</span>
-          <span class="trust-hint">{trustReport.factors.filter((factor) => !factor.satisfied && factor.points > 0).map((factor) => factor.label).slice(0, 2).join(" · ") || "No missing safeguards detected"}</span>
+          <span class="trust-result trust-{trustReport.level}">{trustPresentation(trustReport).label}</span>
+          <span class="trust-hint">{trustPresentation(trustReport).detail}</span>
         {/if}
       </div>
     {/if}
@@ -436,8 +469,8 @@
 
     {#if kind !== "http" && kind !== "metalink" && kind !== "batch"}
       <div class="analyze-row">
-        <div><strong>{kind === "media" ? "Inspect available formats" : "Inspect torrent contents"}</strong><small>{kind === "media" ? "Uses yt-dlp to read title, playlist, and quality information." : "Uses the managed torrent engine to read metadata and file names."}</small></div>
-        <Button disabled={probing || lineCount !== 1} onclick={() => void analyze()}><Icon name={probing ? "spinner" : "search"} size={16} /> {probing ? "Analyzing…" : mediaProbe || torrentProbe ? "Analyze again" : "Analyze"}</Button>
+        <div><strong>{probing ? "Analyzing source" : mediaProbe || torrentProbe ? "Source analyzed" : "Waiting for a valid source"}</strong><small>{kind === "media" ? "Formats and metadata are detected automatically." : "Torrent files and metadata are detected automatically."}</small></div>
+        <Button disabled={probing || lineCount !== 1} onclick={() => void analyze()}><Icon name={probing ? "spinner" : "refresh"} size={16} /> {probing ? "Analyzing…" : "Retry"}</Button>
       </div>
       {#if probeError}<InlineError title={`Couldn't analyze this ${kind}`} message={probeError} retry={() => void analyze()} />{/if}
     {/if}
@@ -504,8 +537,13 @@
 
 <style>
   .form { display: flex; flex-direction: column; gap: var(--space-4); }
+  .source-entry { display: flex; flex-direction: column; gap: var(--space-3); }
+  .detection-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); min-height: 42px; padding: var(--space-2) var(--space-3); border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); }
+  .detection-copy { min-width: 0; display: flex; align-items: center; gap: var(--space-3); color: var(--text-secondary); font-size: var(--text-caption); }
+  .detection-chip { display: inline-flex; align-items: center; gap: var(--space-2); flex: none; color: var(--text-primary); font-weight: 600; }
+  .type-control { display: flex; align-items: center; gap: var(--space-2); flex: none; }
   .kind-field, .dropdown-field { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); }
-  .kind-field > span, .dropdown-label { font-size: var(--text-body); color: var(--text-primary); }
+  .dropdown-label { font-size: var(--text-body); color: var(--text-primary); }
   .analyze-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--stroke-surface); border-radius: var(--radius-layer); background: var(--bg-subtle); }
   .analyze-row > div { display: flex; flex-direction: column; }
   .analyze-row small { color: var(--text-secondary); }
@@ -543,5 +581,5 @@
   .secret-grid :global(.dropdown), .secret-grid :global(select) { width: 100%; }
   .secret-note { margin: calc(var(--space-2) * -1) 0 0; color: var(--text-secondary); font-size: var(--text-caption); }
   .secret-note.warning { color: var(--status-warning); }
-  @media (max-width: 680px) { .option-grid, .secret-grid { grid-template-columns: 1fr; } .analyze-row { align-items: stretch; flex-direction: column; } .media-card { align-items: flex-start; } .probe-card img { width: 112px; height: 74px; } }
+  @media (max-width: 680px) { .option-grid, .secret-grid { grid-template-columns: 1fr; } .detection-row, .detection-copy { align-items: stretch; flex-direction: column; } .type-control { width: 100%; justify-content: space-between; } .analyze-row { align-items: stretch; flex-direction: column; } .media-card { align-items: flex-start; } .probe-card img { width: 112px; height: 74px; } }
 </style>

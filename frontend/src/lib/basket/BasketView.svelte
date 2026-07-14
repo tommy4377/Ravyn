@@ -164,7 +164,7 @@
       const result = await connection.client.startBasket();
       notifications.success(`${result.started} download${result.started === 1 ? "" : "s"} started`, result.failed ? `${result.failed} item(s) failed` : undefined);
       await load();
-      navigation.section = "downloads";
+      navigation.navigate("downloads");
     } catch (cause) {
       notifications.error("Couldn't start the basket", describeError(cause));
     } finally {

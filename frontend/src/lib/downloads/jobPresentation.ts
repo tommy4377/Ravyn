@@ -6,7 +6,7 @@
  */
 
 import type { IconName } from "../components/Icon.svelte";
-import type { JobKind, JobStatus } from "../api/types";
+import type { JobKind, JobStatus, TrustReport } from "../api/types";
 
 export type Severity = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -54,5 +54,34 @@ export function permittedActions(status: JobStatus, kind: JobKind): JobActionSet
     retry: status === "failed" || status === "cancelled" || status === "partial",
     cancel: !TERMINAL.includes(status),
     remove: TERMINAL.includes(status) || status === "paused" || status === "seeding",
+  };
+}
+
+export interface TrustPresentation {
+  label: string;
+  description: string;
+  severity: "success" | "warning" | "error";
+}
+
+/** Maps the advisory backend score to user-facing language without exposing a misleading numeric grade. */
+export function presentTrust(report: TrustReport): TrustPresentation {
+  if (report.score >= 80) {
+    return {
+      label: "Secure source",
+      description: "The available source and verification signals look reliable.",
+      severity: "success",
+    };
+  }
+  if (report.score >= 50) {
+    return {
+      label: "Verification recommended",
+      description: "The source can be used, but an additional checksum or signature would improve confidence.",
+      severity: "warning",
+    };
+  }
+  return {
+    label: "Source requires attention",
+    description: "Review the source and verification details before opening the downloaded file.",
+    severity: "error",
   };
 }

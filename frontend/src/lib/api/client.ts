@@ -43,6 +43,7 @@ import type {
   LibraryImportRequest,
   LibraryImportStatus,
   LibraryListParams,
+  LibraryRelocationRequest,
   MediaArchiveRecord,
   MediaItemOutputRecord,
   MediaItemRecord,
@@ -348,8 +349,12 @@ export class RavynClient {
     return this.request("POST", "/v1/library/verify");
   }
 
-  relocateLibrary(path?: string): Promise<RelocationReport> {
-    return this.request("POST", "/v1/library/relocate", { path: path || null });
+  relocateLibrary(request: LibraryRelocationRequest = {}): Promise<RelocationReport> {
+    return this.request("POST", "/v1/library/relocate", {
+      path: request.path || null,
+      max_entries: request.max_entries,
+      max_depth: request.max_depth,
+    });
   }
 
   findLibraryDuplicates(params: { sha256?: string; size_bytes?: number; filename?: string; limit?: number }, signal?: AbortSignal): Promise<DuplicateCandidate[]> {

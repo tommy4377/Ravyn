@@ -555,6 +555,12 @@ export interface VerifyLibraryReport {
   missing: number;
 }
 
+export interface LibraryRelocationRequest {
+  path?: string | null;
+  max_entries?: number;
+  max_depth?: number;
+}
+
 export interface RelocationReport {
   scanned: number;
   repaired: number;

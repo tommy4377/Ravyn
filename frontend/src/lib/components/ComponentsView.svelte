@@ -20,6 +20,8 @@
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes } from "../util/format";
 
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let overview = $state<ComponentOverview | null>(null);
   let manifestStatus = $state<ComponentManifestStatus | null>(null);
   let loading = $state(true);
@@ -178,7 +180,8 @@
   }
 </script>
 
-<div class="page">
+<div class="page" class:embedded>
+  {#if !embedded}
   <PageHeader title="Components" description="Optional tools are installed and maintained separately from the Ravyn application.">
     {#snippet actions()}
       {#if manifestStatus?.configured}
@@ -190,6 +193,7 @@
       <Button variant="subtle" onclick={() => void load()}><Icon name="refresh" size={16} /> Recheck system</Button>
     {/snippet}
   </PageHeader>
+  {/if}
 
   <div class="content">
     {#if error}
@@ -278,6 +282,10 @@
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
   .content { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--page-padding) var(--page-padding); display: flex; flex-direction: column; gap: var(--space-4); }
+  .embedded { height: auto; }
+  .embedded .content { overflow: visible; padding: 0; }
+  .embedded .component-grid { grid-template-columns: 1fr; }
+  .embedded :global(.component-card) { border-radius: var(--radius-control); box-shadow: none; }
   .muted, .section-heading p { color: var(--text-secondary); }
   .catalog-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); }
   .catalog-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: var(--radius-medium); color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--stroke-subtle); }

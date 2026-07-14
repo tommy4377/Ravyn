@@ -2,62 +2,73 @@
   import { describeError } from "../api/errors";
   import type {
     TorrentDetails,
-    TorrentDhtStats,
-    TorrentDhtTable,
-    TorrentEngineList,
     TorrentGlobalStats,
     TorrentPeerStats,
     TorrentRecord,
     TorrentSeedingState,
     TorrentSnapshot,
   } from "../api/types";
+  import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
   import Button from "../components/Button.svelte";
+  import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
+  import DetailsPane from "../components/DetailsPane.svelte";
   import Dialog from "../components/Dialog.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Icon from "../components/Icon.svelte";
-  import IconButton from "../components/IconButton.svelte";
   import InlineError from "../components/InlineError.svelte";
-  import MetricCard from "../components/MetricCard.svelte";
-  import PageHeader from "../components/PageHeader.svelte";
+  import ListDetailsLayout from "../components/ListDetailsLayout.svelte";
+  import MenuButton from "../components/MenuButton.svelte";
+  import type { MenuItem } from "../components/Menu.svelte";
+  import PageCommandBar from "../components/PageCommandBar.svelte";
+  import PageScaffold from "../components/PageScaffold.svelte";
   import SearchBox from "../components/SearchBox.svelte";
   import StatusBadge from "../components/StatusBadge.svelte";
   import Surface from "../components/Surface.svelte";
   import TextArea from "../components/TextArea.svelte";
-  import ToggleSwitch from "../components/ToggleSwitch.svelte";
+  import TextField from "../components/TextField.svelte";
   import { connection } from "../stores/connection.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes, formatSpeed } from "../util/format";
+  import TorrentEngineDialog from "./TorrentEngineDialog.svelte";
+  import TorrentFileTree from "./TorrentFileTree.svelte";
+  import {
+    buildTorrentFileTree,
+    extractTrackers,
+    formatTorrentEta,
+    torrentEtaSeconds,
+    torrentProgress,
+    torrentRatio,
+    type TorrentDetailTab,
+  } from "./torrentPresentation";
 
-  type DetailTab = "overview" | "files" | "peers";
-  type ViewTab = "managed" | "engine" | "dht";
+  type RemoveMode = "keep" | "delete";
 
   let torrents = $state<TorrentRecord[]>([]);
   let engineStats = $state<TorrentGlobalStats | null>(null);
-  let dhtStats = $state<TorrentDhtStats | null>(null);
   let search = $state("");
   let loading = $state(true);
   let error = $state<string | null>(null);
   let selectedId = $state<string | null>(null);
-  let detailTab = $state<DetailTab>("overview");
-  let details = $state<TorrentDetails | null>(null);
+  let detailTab = $state<TorrentDetailTab>("overview");
+  let torrentDetails = $state<TorrentDetails | null>(null);
   let snapshot = $state<TorrentSnapshot | null>(null);
   let peerStats = $state<TorrentPeerStats | null>(null);
   let seeding = $state<TorrentSeedingState | null>(null);
   let detailLoading = $state(false);
   let detailError = $state<string | null>(null);
+
+  let fileSearch = $state("");
   let selectedFiles = $state<number[]>([]);
   let savingFiles = $state(false);
+
   let removeTarget = $state<TorrentRecord | null>(null);
-  let deleteFiles = $state(false);
+  let removeMode = $state<RemoveMode>("keep");
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
-  let viewTab = $state<ViewTab>("managed");
-  let engineList = $state<TorrentEngineList | null>(null);
-  let engineListError = $state<string | null>(null);
-  let dhtTable = $state<TorrentDhtTable | null>(null);
-  let dhtTableError = $state<string | null>(null);
+
+  let engineDialogOpen = $state(false);
   let peersDialogOpen = $state(false);
   let peersInput = $state("");
   let peersBusy = $state(false);
@@ -72,14 +83,34 @@
   const totalDown = $derived(engineStats?.download_speed_bps ?? torrents.reduce((sum, torrent) => sum + torrent.download_speed_bps, 0));
   const totalUp = $derived(engineStats?.upload_speed_bps ?? torrents.reduce((sum, torrent) => sum + torrent.upload_speed_bps, 0));
   const peerCount = $derived(torrents.reduce((sum, torrent) => sum + torrent.peers_connected, 0));
-  const allFilesSelected = $derived(!!details?.files.length && selectedFiles.length === details.files.length);
+  const activeCount = $derived(torrents.filter((torrent) => ["downloading", "active", "queued"].some((state) => torrent.state.toLowerCase().includes(state))).length);
+  const managedHashes = $derived(new Set(torrents.map((torrent) => torrent.info_hash?.toLowerCase()).filter((hash): hash is string => !!hash)));
+  const fileTree = $derived(buildTorrentFileTree(torrentDetails?.files ?? [], fileSearch));
+  const selectedSize = $derived((torrentDetails?.files ?? []).filter((file) => selectedFiles.includes(file.index)).reduce((sum, file) => sum + (file.size_bytes ?? 0), 0));
+  const allFilesSelected = $derived(!!torrentDetails?.files.length && selectedFiles.length === torrentDetails.files.length);
+  const trackers = $derived(extractTrackers(torrentDetails?.raw));
+  const summaryItems = $derived<SummaryItem[]>([
+    { label: engineStats ? "engine ready" : "engine status unavailable", value: engineStats ? "Ready" : "Unknown", tone: engineStats ? "success" : "warning" },
+    { label: "down", value: formatSpeed(totalDown) },
+    { label: "up", value: formatSpeed(totalUp) },
+    { label: "peers", value: peerCount.toLocaleString() },
+    { label: "active", value: activeCount.toLocaleString() },
+  ]);
+
+  const detailTabs = [
+    { id: "overview", label: "Overview" },
+    { id: "files", label: "Files" },
+    { id: "peers", label: "Peers" },
+    { id: "trackers", label: "Trackers" },
+    { id: "advanced", label: "Advanced" },
+  ];
 
   function severity(state: string): "neutral" | "info" | "success" | "warning" | "error" {
     const normalized = state.toLowerCase();
     if (normalized.includes("error") || normalized.includes("fail")) return "error";
     if (normalized.includes("seed") || normalized.includes("complete")) return "success";
     if (normalized.includes("pause") || normalized.includes("stop")) return "warning";
-    if (normalized.includes("download") || normalized.includes("active")) return "info";
+    if (normalized.includes("download") || normalized.includes("active") || normalized.includes("queue")) return "info";
     return "neutral";
   }
 
@@ -88,14 +119,12 @@
     loading = true;
     error = null;
     try {
-      const [page, engine, dht] = await Promise.all([
+      const [page, engine] = await Promise.all([
         connection.client.listTorrents({ limit: 250 }),
         connection.client.getTorrentEngineStats().catch(() => null),
-        connection.client.getTorrentDhtStats().catch(() => null),
       ]);
       torrents = page.items;
       engineStats = engine;
-      dhtStats = dht;
       if (selectedId && !torrents.some((torrent) => torrent.job_id === selectedId)) selectedId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -116,7 +145,7 @@
         connection.client.getTorrentSeedingState(id).catch(() => null),
       ]);
       if (selectedId !== id) return;
-      details = nextDetails;
+      torrentDetails = nextDetails;
       snapshot = nextSnapshot;
       peerStats = nextPeers;
       seeding = nextSeeding;
@@ -128,64 +157,21 @@
     }
   }
 
-  const managedHashes = $derived(new Set(torrents.map((torrent) => torrent.info_hash?.toLowerCase()).filter(Boolean)));
-
-  async function loadEngineList(): Promise<void> {
-    if (!connection.client) return;
-    engineListError = null;
-    try {
-      engineList = await connection.client.listEngineTorrents();
-    } catch (cause) {
-      engineList = null;
-      engineListError = describeError(cause);
-    }
-  }
-
-  async function loadDhtTable(): Promise<void> {
-    if (!connection.client) return;
-    dhtTableError = null;
-    try {
-      dhtTable = await connection.client.getTorrentDhtTable();
-    } catch (cause) {
-      dhtTable = null;
-      dhtTableError = describeError(cause);
-    }
-  }
-
-  function changeViewTab(next: ViewTab): void {
-    viewTab = next;
-    if (next !== "managed") selectedId = null;
-    if (next === "engine" && engineList === null) void loadEngineList();
-    if (next === "dht" && dhtTable === null) void loadDhtTable();
-  }
-
-  async function copyDhtTable(): Promise<void> {
-    if (!dhtTable) return;
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(dhtTable, null, 2));
-      notifications.info("DHT table copied as JSON");
-    } catch {
-      notifications.warning("Couldn't copy to the clipboard");
-    }
-  }
-
   $effect(() => { void load(); });
+
   $effect(() => {
+    fileSearch = "";
+    detailTab = "overview";
     if (!selectedId) {
-      details = null;
+      torrentDetails = null;
       snapshot = null;
       peerStats = null;
       seeding = null;
       detailError = null;
       return;
     }
-    detailTab = "overview";
     void loadDetails(selectedId);
   });
-
-  function selectTorrent(id: string): void {
-    selectedId = id;
-  }
 
   function toggleFile(index: number): void {
     selectedFiles = selectedFiles.includes(index)
@@ -193,8 +179,17 @@
       : [...selectedFiles, index].sort((a, b) => a - b);
   }
 
+  function toggleFolder(indexes: number[], checked: boolean): void {
+    const next = new Set(selectedFiles);
+    for (const index of indexes) {
+      if (checked) next.add(index);
+      else next.delete(index);
+    }
+    selectedFiles = [...next].sort((a, b) => a - b);
+  }
+
   function toggleAllFiles(): void {
-    selectedFiles = allFilesSelected ? [] : (details?.files.map((file) => file.index) ?? []);
+    selectedFiles = allFilesSelected ? [] : (torrentDetails?.files.map((file) => file.index) ?? []);
   }
 
   async function saveFiles(): Promise<void> {
@@ -230,13 +225,19 @@
     }
   }
 
+  function requestRemove(target: TorrentRecord, mode: RemoveMode): void {
+    removeTarget = target;
+    removeMode = mode;
+    removeError = null;
+  }
+
   async function confirmRemove(): Promise<void> {
     if (!connection.client || !removeTarget) return;
     removeBusy = true;
     removeError = null;
     try {
-      await connection.client.removeTorrent(removeTarget.job_id, deleteFiles);
-      notifications.info(deleteFiles ? "Torrent and files removed" : "Torrent removed");
+      await connection.client.removeTorrent(removeTarget.job_id, removeMode === "delete");
+      notifications.info(removeMode === "delete" ? "Torrent and downloaded files removed" : "Torrent removed; downloaded files kept");
       removeTarget = null;
       selectedId = null;
       await load();
@@ -246,167 +247,173 @@
       removeBusy = false;
     }
   }
+
+  function moreItems(): MenuItem[] {
+    return [
+      { id: "engine", label: "Torrent engine details", icon: "diagnostics", onSelect: () => (engineDialogOpen = true) },
+      { id: "refresh", label: "Refresh", icon: "refresh", separatorBefore: true, onSelect: () => void load() },
+    ];
+  }
 </script>
 
-<div class="page">
-  <PageHeader title="Torrents" description="Engine activity, peers, seeding, and managed torrent downloads.">
-    {#snippet actions()}
-      <Button onclick={() => void load()}><Icon name="refresh" size={16} /> Refresh</Button>
-      <Button variant="accent" onclick={() => navigation.requestAdd("torrent")}><Icon name="add" size={16} /> Add torrent</Button>
-    {/snippet}
-  </PageHeader>
+<PageScaffold title="Torrents" summary="Managed torrent downloads, selected files, peers, trackers, and seeding.">
+  {#snippet actions()}
+    <Button variant="accent" onclick={() => navigation.requestAdd("torrent")}><Icon name="add" size={16} /> Add torrent</Button>
+  {/snippet}
 
-  <div class="metrics">
-    <MetricCard label="Download" value={formatSpeed(totalDown)} detail={`${engineStats?.active_torrents ?? torrents.length} active in engine`} icon="download" />
-    <MetricCard label="Upload" value={formatSpeed(totalUp)} detail={`${formatBytes(engineStats?.uploaded_bytes ?? 0)} uploaded`} icon="upload" />
-    <MetricCard label="Connected peers" value={peerCount.toLocaleString()} detail={`${dhtStats?.routing_table_size ?? 0} IPv4 · ${dhtStats?.routing_table_size_v6 ?? 0} IPv6 DHT nodes`} icon="peer" />
-    <MetricCard label="Managed torrents" value={torrents.length.toLocaleString()} detail={`${formatBytes(engineStats?.downloaded_bytes ?? 0)} downloaded by engine`} icon="speed" />
-  </div>
+  {#snippet commandBar()}
+    <PageCommandBar ariaLabel="Torrent commands">
+      {#snippet leading()}
+        <span class="managed-label"><Icon name="torrent" size={16} /> Managed torrents</span>
+      {/snippet}
+      {#snippet actions()}
+        <SearchBox bind:value={search} label="Search torrents" placeholder="Search name, info hash, or state" />
+        <MenuButton label="More" icon="more" items={moreItems()} variant="subtle" />
+      {/snippet}
+    </PageCommandBar>
+  {/snippet}
 
-  <div class="toolbar">
-    <div class="view-tabs" role="tablist" aria-label="Torrent view">
-      <button type="button" role="tab" aria-selected={viewTab === "managed"} onclick={() => changeViewTab("managed")}>Managed</button>
-      <button type="button" role="tab" aria-selected={viewTab === "engine"} onclick={() => changeViewTab("engine")}>Engine</button>
-      <button type="button" role="tab" aria-selected={viewTab === "dht"} onclick={() => changeViewTab("dht")}>DHT</button>
-    </div>
-    {#if viewTab === "managed"}<SearchBox bind:value={search} label="Search torrents" placeholder="Search name or info hash" />{/if}
-  </div>
+  {#snippet status()}
+    <div class="status-strip"><CompactSummary items={summaryItems} ariaLabel="Torrent summary" /></div>
+  {/snippet}
 
-  <div class="workspace" class:with-details={!!selected}>
-    <Surface padding="none" class="torrent-list">
-      {#if viewTab === "engine"}
-        {#if engineListError}
-          <div class="state"><InlineError title="Couldn't read the torrent engine" message={engineListError} retry={() => void loadEngineList()} /></div>
-        {:else if engineList === null}
-          <div class="state muted">Reading the torrent engine…</div>
-        {:else if engineList.torrents.length === 0}
-          <EmptyState icon="torrent" title="The engine has no torrents" message="Torrents added through Ravyn or directly in rqbit will appear here." />
-        {:else}
-          <div class="engine-header" aria-hidden="true"><span>Name</span><span>State</span><span>Progress</span><span>Origin</span></div>
-          <div class="rows">
-            {#each engineList.torrents as torrent, index (torrent.torrent_id ?? torrent.info_hash ?? index)}
-              {@const managed = !!torrent.info_hash && managedHashes.has(torrent.info_hash.toLowerCase())}
-              <div class="engine-row">
-                <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={19} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? `Engine torrent ${torrent.torrent_id ?? index}`}</strong><small>{torrent.info_hash ?? "No info hash reported"}</small></span></span>
-                <span>{torrent.state ?? "unknown"}</span>
-                <span>{torrent.progress !== null ? `${Math.round(torrent.progress * 100)}%` : formatBytes(torrent.downloaded_bytes)}</span>
-                <span><StatusBadge label={managed ? "Managed by Ravyn" : "Engine only"} severity={managed ? "success" : "warning"} /></span>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      {:else if viewTab === "dht"}
-        {#if dhtTableError}
-          <div class="state"><InlineError title="Couldn't read the DHT routing table" message={dhtTableError} retry={() => void loadDhtTable()} /></div>
-        {:else if dhtTable === null}
-          <div class="state muted">Reading the DHT routing table…</div>
-        {:else}
-          <div class="dht-command">
-            <span class="muted">{dhtStats ? `${dhtStats.routing_table_size} IPv4 · ${dhtStats.routing_table_size_v6} IPv6 nodes · ${dhtStats.outstanding_requests} outstanding requests` : "DHT routing table"}</span>
-            <div class="dht-actions"><Button variant="subtle" onclick={() => void copyDhtTable()}><Icon name="copy" size={14} /> Copy JSON</Button><Button variant="subtle" onclick={() => void loadDhtTable()}><Icon name="refresh" size={14} /> Refresh</Button></div>
-          </div>
-          <div class="dht-tables">
-            <section><h3>IPv4</h3><pre class="json">{JSON.stringify(dhtTable.v4, null, 2)}</pre></section>
-            <section><h3>IPv6</h3><pre class="json">{JSON.stringify(dhtTable.v6, null, 2)}</pre></section>
-          </div>
-        {/if}
-      {:else if error}
-        <div class="state"><InlineError title="Couldn't load torrents" message={error} retry={() => void load()} /></div>
-      {:else if loading}
-        <div class="state muted">Loading torrent engine…</div>
-      {:else if visible.length === 0}
-        <EmptyState icon="torrent" title="No torrents" message={search ? "No torrents match the current search." : "Torrent downloads will appear here after they are added."}>
-          {#if !search}<Button variant="accent" onclick={() => (navigation.section = "downloads")}>Go to Downloads</Button>{/if}
-        </EmptyState>
-      {:else}
-        <div class="header-row" aria-hidden="true"><span>Name</span><span>Progress</span><span>Down</span><span>Up</span><span>Peers</span><span>Status</span></div>
-        <div class="rows">
-          {#each visible as torrent (torrent.job_id)}
-            {@const progress = torrent.total_bytes && torrent.total_bytes > 0 ? Math.min(100, torrent.downloaded_bytes / torrent.total_bytes * 100) : 0}
-            <button type="button" class="torrent-row" class:selected={selectedId === torrent.job_id} onclick={() => selectTorrent(torrent.job_id)}>
-              <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={19} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? "Unnamed torrent"}</strong><small>{torrent.info_hash ?? torrent.torrent_id}</small></span></span>
-              <span class="progress-cell"><span class="progress-track"><span style={`width:${progress}%`}></span></span><small>{progress.toFixed(0)}% · {formatBytes(torrent.downloaded_bytes)} / {formatBytes(torrent.total_bytes)}</small></span>
-              <span>{formatSpeed(torrent.download_speed_bps)}</span>
-              <span>{formatSpeed(torrent.upload_speed_bps)}</span>
-              <span>{torrent.peers_connected}</span>
-              <span><StatusBadge label={torrent.state} severity={severity(torrent.state)} /></span>
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </Surface>
-
-    {#if selected}
-      <aside class="details">
-        <header><div><span class="detail-icon"><Icon name="torrent" size={22} /></span><h2>{selected.name ?? "Torrent details"}</h2></div><IconButton icon="close" label="Close details" variant="subtle" onclick={() => (selectedId = null)} /></header>
-        <nav class="detail-tabs" aria-label="Torrent details">
-          {#each ["overview", "files", "peers"] as tab}
-            <button type="button" class:active={detailTab === tab} onclick={() => (detailTab = tab as DetailTab)}>{tab[0]?.toUpperCase()}{tab.slice(1)}</button>
-          {/each}
-        </nav>
-        <div class="details-body">
-          {#if detailError}
-            <InlineError title="Couldn't load torrent details" message={detailError} retry={() => selectedId && void loadDetails(selectedId)} />
-          {:else if detailLoading}
-            <p class="muted">Loading details…</p>
-          {:else if detailTab === "overview"}
-            <dl>
-              <dt>Status</dt><dd>{snapshot?.state ?? selected.state}</dd>
-              <dt>Downloaded</dt><dd>{formatBytes(snapshot?.downloaded_bytes ?? selected.downloaded_bytes)}</dd>
-              <dt>Uploaded</dt><dd>{formatBytes(snapshot?.uploaded_bytes ?? selected.uploaded_bytes)}</dd>
-              <dt>Total size</dt><dd>{formatBytes(snapshot?.total_bytes ?? selected.total_bytes)}</dd>
-              <dt>Download speed</dt><dd>{formatSpeed(snapshot?.download_speed_bps ?? selected.download_speed_bps)}</dd>
-              <dt>Upload speed</dt><dd>{formatSpeed(snapshot?.upload_speed_bps ?? selected.upload_speed_bps)}</dd>
-              <dt>Peers</dt><dd>{snapshot?.peers_connected ?? selected.peers_connected}</dd>
-              <dt>Seeders / leechers</dt><dd>{snapshot?.seeders ?? selected.seeders} / {snapshot?.leechers ?? selected.leechers}</dd>
-              {#if seeding}<dt>Seeding ratio</dt><dd>{seeding.last_ratio?.toFixed(2) ?? "—"}</dd><dt>Seeding since</dt><dd>{formatAbsoluteTime(seeding.started_at)}</dd>{/if}
-              {#if selected.info_hash}<dt>Info hash</dt><dd class="mono">{selected.info_hash}</dd>{/if}
-            </dl>
-            <div class="detail-actions"><Button onclick={() => { removeTarget = selected; deleteFiles = false; }}><Icon name="trash" size={16} /> Remove torrent</Button></div>
-          {:else if detailTab === "files"}
-            {#if !details?.files.length}
-              <EmptyState icon="file" title="No file information" message="The engine did not return a file list for this torrent." />
-            {:else}
-              <div class="file-command"><label><input type="checkbox" checked={allFilesSelected} onchange={toggleAllFiles} /> Select all</label><Button variant="accent" disabled={savingFiles || selectedFiles.length === 0} onclick={() => void saveFiles()}>{savingFiles ? "Saving…" : "Save selection"}</Button></div>
-              <div class="file-list">
-                {#each details.files as file (file.index)}
-                  <label class="file-row"><input type="checkbox" checked={selectedFiles.includes(file.index)} onchange={() => toggleFile(file.index)} /><span><strong>{file.path.split(/[\\/]/).at(-1)}</strong><small>{file.path}</small></span><span>{formatBytes(file.size_bytes)}</span></label>
-                {/each}
-              </div>
-            {/if}
+  <div class="workspace">
+    <ListDetailsLayout detailsOpen={!!selected} detailsLabel="Torrent details" detailsWidth="460px">
+      {#snippet list()}
+        <Surface padding="none" class="torrent-list">
+          {#if error}
+            <div class="state"><InlineError title="Couldn't load torrents" message={error} retry={() => void load()} /></div>
+          {:else if loading}
+            <div class="state muted">Loading torrent engine…</div>
+          {:else if visible.length === 0}
+            <EmptyState icon="torrent" title="No torrents" message={search ? "No torrents match the current search." : "Torrent downloads will appear here after they are added."}>
+              {#if !search}<Button variant="accent" onclick={() => navigation.requestAdd("torrent")}>Add torrent</Button>{/if}
+            </EmptyState>
           {:else}
-            <div class="peer-command"><span>{peerStats?.peers.length ?? 0} peer{peerStats?.peers.length === 1 ? "" : "s"} reported</span><Button onclick={() => { peersDialogOpen = true; peersError = null; }}><Icon name="add" size={16} /> Add peers</Button></div>
-            {#if !peerStats?.peers.length}
-              <EmptyState icon="peer" title="No connected peers" message="Peers will appear here while the torrent is active." />
+            <div class="header-row" aria-hidden="true"><span>Name</span><span>Progress</span><span>Down</span><span>Up</span><span>ETA / Ratio</span><span>State</span></div>
+            <div class="rows" role="listbox" aria-label="Managed torrents">
+              {#each visible as torrent (torrent.job_id)}
+                {@const progress = torrentProgress(torrent)}
+                {@const ratio = torrentRatio(torrent.uploaded_bytes, torrent.downloaded_bytes)}
+                <button type="button" class="torrent-row" class:selected={selectedId === torrent.job_id} role="option" aria-selected={selectedId === torrent.job_id} onclick={() => (selectedId = torrent.job_id)}>
+                  <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={18} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? "Unnamed torrent"}</strong><small>{torrent.info_hash ?? torrent.torrent_id}</small></span></span>
+                  <span class="progress-cell"><span class="progress-track"><span style={`width:${progress}%`}></span></span><small>{progress.toFixed(0)}% · {formatBytes(torrent.downloaded_bytes)} / {formatBytes(torrent.total_bytes)}</small></span>
+                  <span>{formatSpeed(torrent.download_speed_bps)}</span>
+                  <span>{formatSpeed(torrent.upload_speed_bps)}</span>
+                  <span class="eta-cell"><strong>{formatTorrentEta(torrentEtaSeconds(torrent))}</strong><small>Ratio {ratio === null ? "∞" : ratio.toFixed(2)}</small></span>
+                  <span><StatusBadge label={torrent.state} severity={severity(torrent.state)} /></span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </Surface>
+      {/snippet}
+
+      {#snippet details()}
+        {#if selected}
+          <DetailsPane
+            title={selected.name ?? "Torrent details"}
+            subtitle={selected.info_hash ?? selected.torrent_id}
+            icon="torrent"
+            tabs={detailTabs}
+            bind:selectedTab={detailTab}
+            onClose={() => (selectedId = null)}
+          >
+            {#if detailError}
+              <InlineError title="Couldn't load torrent details" message={detailError} retry={() => selectedId && void loadDetails(selectedId)} />
+            {:else if detailLoading}
+              <p class="muted">Loading torrent details…</p>
+            {:else if detailTab === "overview"}
+              <div class="detail-stack">
+                <div class="overview-progress">
+                  <span class="progress-track large"><span style={`width:${torrentProgress(selected)}%`}></span></span>
+                  <strong>{torrentProgress(selected).toFixed(0)}%</strong>
+                  <small>{formatBytes(snapshot?.downloaded_bytes ?? selected.downloaded_bytes)} of {formatBytes(snapshot?.total_bytes ?? selected.total_bytes)}</small>
+                </div>
+                <dl>
+                  <dt>State</dt><dd>{snapshot?.state ?? selected.state}</dd>
+                  <dt>Download speed</dt><dd>{formatSpeed(snapshot?.download_speed_bps ?? selected.download_speed_bps)}</dd>
+                  <dt>Upload speed</dt><dd>{formatSpeed(snapshot?.upload_speed_bps ?? selected.upload_speed_bps)}</dd>
+                  <dt>ETA</dt><dd>{formatTorrentEta(torrentEtaSeconds(selected))}</dd>
+                  <dt>Uploaded</dt><dd>{formatBytes(snapshot?.uploaded_bytes ?? selected.uploaded_bytes)}</dd>
+                  <dt>Ratio</dt><dd>{torrentRatio(snapshot?.uploaded_bytes ?? selected.uploaded_bytes, snapshot?.downloaded_bytes ?? selected.downloaded_bytes)?.toFixed(2) ?? "∞"}</dd>
+                  <dt>Peers</dt><dd>{snapshot?.peers_connected ?? selected.peers_connected}</dd>
+                  <dt>Seeders / leechers</dt><dd>{snapshot?.seeders ?? selected.seeders} / {snapshot?.leechers ?? selected.leechers}</dd>
+                </dl>
+                <div class="remove-actions">
+                  <Button onclick={() => requestRemove(selected, "keep")}><Icon name="trash" size={16} /> Remove and keep files</Button>
+                  <Button variant="subtle" onclick={() => requestRemove(selected, "delete")}><Icon name="trash" size={16} /> Remove and delete files</Button>
+                </div>
+              </div>
+            {:else if detailTab === "files"}
+              {#if !torrentDetails?.files.length}
+                <EmptyState icon="file" title="No file information" message="The engine did not return a file list for this torrent." />
+              {:else}
+                <div class="file-command">
+                  <div class="file-search"><TextField bind:value={fileSearch} label="Search files" placeholder="Filter file paths" /></div>
+                  <div class="file-selection-summary">
+                    <label><input type="checkbox" checked={allFilesSelected} onchange={toggleAllFiles} /> Select all</label>
+                    <span>{selectedFiles.length} of {torrentDetails.files.length} · {formatBytes(selectedSize)}</span>
+                    <Button variant="accent" disabled={savingFiles || selectedFiles.length === 0} onclick={() => void saveFiles()}>{savingFiles ? "Saving…" : "Save selection"}</Button>
+                  </div>
+                </div>
+                {#if fileTree.descendantFileIndexes.length === 0}
+                  <EmptyState icon="search" title="No matching files" message="No torrent file paths match the current search." />
+                {:else}
+                  <TorrentFileTree root={fileTree} {selectedFiles} onToggleFile={toggleFile} onToggleFolder={toggleFolder} />
+                {/if}
+              {/if}
+            {:else if detailTab === "peers"}
+              <div class="peer-command"><span>{peerStats?.peers.length ?? 0} connected peer{peerStats?.peers.length === 1 ? "" : "s"}</span><Button onclick={() => { peersDialogOpen = true; peersError = null; }}><Icon name="add" size={16} /> Add peers</Button></div>
+              {#if !peerStats?.peers.length}
+                <EmptyState icon="peer" title="No connected peers" message="Peers will appear here while the torrent is active." />
+              {:else}
+                <div class="peer-list">
+                  {#each peerStats.peers as peer, index (`${peer.address}-${index}`)}
+                    <div class="peer-row"><span><strong>{peer.address ?? "Unknown address"}</strong><small>{peer.client ?? peer.state ?? "Unknown client"}</small></span><span>↓ {formatSpeed(peer.download_speed_bps)}</span><span>↑ {formatSpeed(peer.upload_speed_bps)}</span></div>
+                  {/each}
+                </div>
+              {/if}
+            {:else if detailTab === "trackers"}
+              {#if trackers.length === 0}
+                <EmptyState icon="cloud" title="No tracker information" message="The torrent engine did not expose tracker URLs for this torrent." />
+              {:else}
+                <div class="tracker-list">
+                  {#each trackers as tracker (tracker)}
+                    <div class="tracker-row"><Icon name="cloud" size={16} /><span>{tracker}</span></div>
+                  {/each}
+                </div>
+              {/if}
             {:else}
-              <div class="peer-list">
-                {#each peerStats.peers as peer, index (`${peer.address}-${index}`)}
-                  <div class="peer-row"><span><strong>{peer.address ?? "Unknown address"}</strong><small>{peer.client ?? peer.state ?? "Unknown client"}</small></span><span>↓ {formatSpeed(peer.download_speed_bps)}</span><span>↑ {formatSpeed(peer.upload_speed_bps)}</span></div>
-                {/each}
+              <div class="detail-stack">
+                <dl>
+                  <dt>Torrent ID</dt><dd class="mono">{torrentDetails?.torrent_id ?? selected.torrent_id}</dd>
+                  {#if selected.info_hash}<dt>Info hash</dt><dd class="mono">{selected.info_hash}</dd>{/if}
+                  {#if seeding}<dt>Seeding since</dt><dd>{formatAbsoluteTime(seeding.started_at)}</dd><dt>Last ratio</dt><dd>{seeding.last_ratio?.toFixed(2) ?? "—"}</dd><dt>Stop reason</dt><dd>{seeding.stop_reason ?? "Still seeding"}</dd>{/if}
+                </dl>
+                <AdvancedDisclosure title="Raw engine response" description="Technical data for troubleshooting and bug reports.">
+                  <pre class="raw-json">{JSON.stringify(torrentDetails?.raw ?? selected.raw, null, 2)}</pre>
+                </AdvancedDisclosure>
               </div>
             {/if}
-          {/if}
-        </div>
-      </aside>
-    {/if}
+          </DetailsPane>
+        {/if}
+      {/snippet}
+    </ListDetailsLayout>
   </div>
-</div>
+</PageScaffold>
 
 <ConfirmDialog
   open={!!removeTarget}
-  title="Remove torrent?"
-  message={deleteFiles ? "The torrent and downloaded files will be deleted." : "The torrent will be removed from the engine. Downloaded files will be kept."}
-  confirmLabel="Remove"
+  title={removeMode === "delete" ? "Remove torrent and delete files?" : "Remove torrent and keep files?"}
+  message={removeMode === "delete" ? "The torrent is removed from the engine and all downloaded files are deleted. This cannot be undone." : "The torrent is removed from the engine. Downloaded files remain on disk."}
+  confirmLabel={removeMode === "delete" ? "Remove and delete files" : "Remove and keep files"}
   destructive
   busy={removeBusy}
   error={removeError}
   onConfirm={() => void confirmRemove()}
   onClose={() => !removeBusy && (removeTarget = null)}
->
-  {#snippet details()}
-    <ToggleSwitch bind:checked={deleteFiles} label="Delete downloaded files" description="This cannot be undone." />
-  {/snippet}
-</ConfirmDialog>
+/>
 
 <Dialog open={peersDialogOpen} title="Add torrent peers" size="small" preventClose={peersBusy} onClose={() => !peersBusy && (peersDialogOpen = false)}>
   <TextArea bind:value={peersInput} label="Peer addresses" placeholder={"192.0.2.10:6881\n[2001:db8::1]:6881"} rows={6} hint="Enter one peer per line or separate addresses with commas." />
@@ -414,68 +421,62 @@
   {#snippet footer()}<Button disabled={peersBusy} onclick={() => (peersDialogOpen = false)}>Cancel</Button><Button variant="accent" disabled={peersBusy || !peersInput.trim()} onclick={() => void addPeers()}>{peersBusy ? "Adding…" : "Add peers"}</Button>{/snippet}
 </Dialog>
 
+<TorrentEngineDialog open={engineDialogOpen} {managedHashes} onClose={() => (engineDialogOpen = false)} />
+
 <style>
-  .page { height: 100%; display: flex; flex-direction: column; min-width: 0; }
-  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); padding: 0 var(--page-padding) var(--space-4); }
-  .toolbar { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--page-padding) var(--space-4); }
-  .view-tabs { display: inline-flex; padding: 3px; border: 1px solid var(--stroke-control); border-radius: var(--radius-medium); background: var(--bg-control); }
-  .view-tabs button { min-height: 30px; padding: 0 var(--space-3); border: 0; border-radius: calc(var(--radius-medium) - 2px); color: var(--text-secondary); background: transparent; }
-  .view-tabs button[aria-selected="true"] { color: var(--text-primary); background: var(--surface-card); box-shadow: var(--shadow-control); font-weight: 600; }
-  .engine-header, .engine-row { display: grid; grid-template-columns: minmax(240px, 1.8fr) 130px 110px 150px; gap: var(--space-3); align-items: center; }
-  .engine-header { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
-  .engine-row { min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
-  .engine-row:hover { background: var(--bg-subtle-hover); }
-  .dht-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .dht-actions { display: flex; gap: var(--space-1); }
-  .dht-tables { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); padding: var(--space-4); }
-  .dht-tables h3 { margin: 0 0 var(--space-2); font-size: var(--text-caption); text-transform: uppercase; letter-spacing: .04em; color: var(--text-tertiary); }
-  .dht-tables .json { margin: 0; padding: var(--space-3); overflow: auto; max-height: 100%; font-size: var(--text-caption); background: var(--bg-subtle); border-radius: var(--radius-control); }
-  @media (max-width: 900px) { .dht-tables { grid-template-columns: 1fr; } }
-  .toolbar :global(.search-box) { width: min(520px, 100%); }
-  .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; gap: var(--space-3); padding: 0 var(--page-padding) var(--page-padding); }
-  .workspace.with-details { grid-template-columns: minmax(0, 1fr) minmax(340px, 390px); }
-  :global(.torrent-list) { display: flex; flex-direction: column; min-height: 0; }
+  .workspace { height: 100%; min-height: 0; padding: 0 var(--page-padding) var(--page-padding); }
+  .status-strip { min-height: 38px; display: flex; align-items: center; padding: 0 var(--page-padding); border-bottom: 1px solid var(--stroke-divider); }
+  .managed-label { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-weight: 600; }
+  :global(.torrent-list) { height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: 0; border-color: var(--stroke-divider); background: var(--surface-content); }
   .state { padding: var(--space-6); }
   .muted { color: var(--text-secondary); }
-  .header-row, .torrent-row { display: grid; grid-template-columns: minmax(240px, 1.8fr) minmax(180px, 1fr) 90px 90px 60px 110px; gap: var(--space-3); align-items: center; }
+  .header-row, .torrent-row { display: grid; grid-template-columns: minmax(250px, 1.8fr) minmax(180px, 1fr) 90px 90px 110px 120px; gap: var(--space-3); align-items: center; }
   .header-row { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
-  .rows { min-height: 0; overflow: auto; }
+  .rows { flex: 1; min-height: 0; overflow: auto; }
   .torrent-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); background: transparent; color: var(--text-primary); text-align: left; cursor: default; }
   .torrent-row:hover { background: var(--bg-subtle-hover); }
-  .torrent-row.selected { background: color-mix(in srgb, var(--accent-subtle) 54%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
+  .torrent-row.selected { background: color-mix(in srgb, var(--accent-subtle) 52%, transparent); box-shadow: inset 2px 0 var(--accent-default); }
   .torrent-name { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .torrent-icon, .detail-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: var(--radius-medium); color: var(--accent-text); background: var(--accent-subtle); }
-  .torrent-name > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+  .torrent-icon { width: 30px; height: 30px; flex: none; display: grid; place-items: center; color: var(--text-secondary); }
+  .torrent-name > span:last-child, .eta-cell { display: flex; flex-direction: column; min-width: 0; }
   .torrent-name strong, .torrent-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .torrent-name strong { font-weight: 500; }
-  .torrent-name small, .progress-cell small { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .torrent-name small, .progress-cell small, .eta-cell small { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .eta-cell strong { font-weight: 500; }
   .progress-cell { display: flex; flex-direction: column; gap: 4px; }
   .progress-track { height: 4px; border-radius: var(--radius-pill); background: var(--bg-subtle); overflow: hidden; }
+  .progress-track.large { height: 6px; }
   .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent-default); }
-  .details { min-width: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--stroke-surface); border-radius: var(--radius-layer); background: var(--surface-card); }
-  .details > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .details > header > div { display: flex; align-items: center; min-width: 0; gap: var(--space-3); }
-  .details h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-body-strong); }
-  .detail-tabs { display: flex; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
-  .detail-tabs button { min-height: 32px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-medium); color: var(--text-secondary); background: transparent; }
-  .detail-tabs button:hover { background: var(--bg-subtle-hover); }
-  .detail-tabs button.active { color: var(--text-primary); background: var(--accent-subtle); font-weight: 600; }
-  .details-body { flex: 1; min-height: 0; padding: var(--space-4); overflow: auto; }
-  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-5); }
-  dt { color: var(--text-secondary); } dd { margin: 0; } .mono { font: 12px/18px Consolas, monospace; word-break: break-all; }
-  .detail-actions, .file-command, .peer-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-  .file-command { position: sticky; top: calc(-1 * var(--space-4)); z-index: 1; margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); background: var(--surface-card); }
-  .file-command label { display: flex; align-items: center; gap: var(--space-2); }
-  .file-list, .peer-list { display: flex; flex-direction: column; }
-  .file-row, .peer-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: var(--space-2) 0; border-bottom: 1px solid var(--stroke-divider); }
-  .file-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .file-row > span, .peer-row > span:first-child { display: flex; min-width: 0; flex-direction: column; }
-  .file-row strong, .file-row small, .peer-row strong, .peer-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .file-row small, .peer-row small { color: var(--text-tertiary); font-size: var(--text-caption); }
-  .peer-command { margin-bottom: var(--space-3); color: var(--text-secondary); }
-  .peer-row { grid-template-columns: minmax(0, 1fr) auto auto; font-size: var(--text-caption); }
+  .detail-stack { display: flex; flex-direction: column; gap: var(--space-4); }
+  .overview-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: center; }
+  .overview-progress small { grid-column: 1 / -1; color: var(--text-tertiary); }
+  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0; }
+  dt { color: var(--text-secondary); }
+  dd { min-width: 0; margin: 0; }
+  .mono { font: 12px/18px Consolas, ui-monospace, monospace; word-break: break-all; }
+  .remove-actions { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--stroke-divider); }
+  .file-command { position: sticky; top: calc(-1 * var(--space-4)); z-index: 2; margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--stroke-divider); background: var(--surface-content); }
+  .file-search { margin-bottom: var(--space-3); }
+  .file-selection-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); color: var(--text-secondary); font-size: var(--text-caption); }
+  .file-selection-summary label { display: flex; align-items: center; gap: var(--space-2); }
+  .peer-command { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); color: var(--text-secondary); }
+  .peer-list, .tracker-list { display: flex; flex-direction: column; }
+  .peer-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 50px; border-bottom: 1px solid var(--stroke-divider); font-size: var(--text-caption); }
+  .peer-row > span:first-child { min-width: 0; display: flex; flex-direction: column; }
+  .peer-row strong, .peer-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .peer-row small { color: var(--text-tertiary); }
+  .tracker-row { min-height: 48px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-3); border-bottom: 1px solid var(--stroke-divider); }
+  .tracker-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/18px Consolas, ui-monospace, monospace; }
+  .raw-json { max-height: 360px; margin: 0; padding: var(--space-3); overflow: auto; border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); font-size: var(--text-caption); }
   .dialog-error { margin-top: var(--space-4); }
-  @media (max-width: 1200px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .header-row, .torrent-row { grid-template-columns: minmax(230px, 1.6fr) minmax(170px, 1fr) 90px 70px 100px; } .header-row span:nth-child(4), .torrent-row > span:nth-child(4) { display: none; } }
-  @media (max-width: 900px) { .workspace.with-details { grid-template-columns: minmax(0, 1fr); } .details { position: absolute; inset: 0 var(--page-padding) var(--page-padding); z-index: 20; background: var(--surface-overlay); backdrop-filter: blur(30px); } .header-row, .torrent-row { grid-template-columns: minmax(0, 1fr) 100px; } .header-row span:nth-child(n+2):not(:last-child), .torrent-row > span:nth-child(n+2):not(:last-child) { display: none; } }
-  @media (max-width: 620px) { .metrics { grid-template-columns: 1fr; } }
+  @media (max-width: 1240px) {
+    .header-row, .torrent-row { grid-template-columns: minmax(230px, 1.7fr) minmax(170px, 1fr) 90px 110px 110px; }
+    .header-row span:nth-child(4), .torrent-row > span:nth-child(4) { display: none; }
+  }
+  @media (max-width: 820px) {
+    .header-row { display: none; }
+    .torrent-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .torrent-row > span:nth-child(2), .torrent-row > span:nth-child(3), .torrent-row > span:nth-child(4), .torrent-row > span:nth-child(5) { display: none; }
+    .file-selection-summary { align-items: flex-start; flex-direction: column; }
+  }
 </style>
