@@ -6,5 +6,6 @@
 - `lib/setup/` — setup flow (`SetupApp.svelte`, `controller.svelte.ts`, `stages/*Stage.svelte`, `installationPolicy.ts`, `componentStates.ts`).
 - `lib/shell/` — main app chrome: `AppShell.svelte`, `NavigationView.svelte`, `CommandBar.svelte`, `StatusBar.svelte`, notification host/drawer, `ConnectionBoot.svelte`.
 - Feature areas, each with a `*View.svelte` root and presentation-logic `.ts` files kept separate from markup for testability: `downloads/` (`mem:frontend/downloads`), `library/`, `media/`, `torrents/`, `automation/`, `basket/`, `settings/` (category-based, `SettingsCategoryHeader.svelte` + per-category `*Settings.svelte`), `diagnostics/`, `appearance/`.
-- `lib/components/` — hand-built shared UI primitives (Fluent Design 2 styling), no external component-library dependency (see `Menu`/`ContextMenu`/`MenuButton` note in `mem:frontend/downloads`).
+- `lib/components/` — hand-built shared UI primitives (Fluent Design 2 structure, "Signal" visual theme as of 2026-07-15 — see `mem:frontend/design_system`), no external component-library dependency (see `Menu`/`ContextMenu`/`MenuButton` note in `mem:frontend/downloads`).
+- Design tokens, the always-on system-accent override, and the canonical logo asset: `mem:frontend/design_system`.
 - Pattern for every feature: presentation logic (pure, unit-testable `.ts`) is separated from the `.svelte` view that wires it to stores/API — follow this split when adding features rather than putting logic inline in components.

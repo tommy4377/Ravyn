@@ -1,5 +1,7 @@
 # Synthetic backdrop (micablur) calibration
 
+- The 2026-07-15 "Signal" palette re-theme (`mem:frontend/design_system`) changed `--backdrop-base`/`--backdrop-fallback`/`--backdrop-tint`/`--backdrop-glow-*` hex values to a graphite/amber scheme but did NOT touch the opacity/multiplier formula below — the tuning notes still apply verbatim.
+
 - The synthetic Mica pipeline (appearance.rs → `desktop_appearance` → `systemAppearance.svelte.ts` → `AppBackdrop.svelte`) works end to end; visibility is governed entirely by multiplied CSS layers in `frontend/src/styles/tokens.css`.
 - Effective wallpaper visibility = wallpaper opacity (`--material-intensity` × 0.88 ≈ 0.67) × `--backdrop-brightness` × (1 − tint alpha) × (1 − surface alpha). All four multiply: individually plausible values compound to near-zero. Tuned 2026-07-15 so the product lands ≈ 0.2–0.3 behind content; verified by live screenshots against a colorful wallpaper.
 - The "redesign pass" override block at the BOTTOM of tokens.css re-declares `--surface-content`/`--surface-card`/`--surface-navigation` and silently overrides the theme blocks above — edit surfaces there, not (only) in the top palette blocks.

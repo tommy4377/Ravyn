@@ -61,24 +61,30 @@
   >
     <div class="name-cell" title={name}>
       <div class="file-icon"><Icon name={job.kind === "torrent" ? "torrent" : job.kind === "media" ? "video" : "download"} size={18} /></div>
-      <div class="name-copy"><strong>{name}</strong><span title={sourceLabel}>{sourceLabel}</span></div>
+      <div class="name-copy">
+        <strong>{name}</strong>
+        <span class="name-meta">
+          <span class="engine-badge kind-{job.kind}">{job.kind === "torrent" ? "BT" : job.kind === "media" ? "yt-dlp" : "HTTP"}</span>
+          <span title={sourceLabel}>{sourceLabel}</span>
+        </span>
+      </div>
     </div>
 
     <div class="status-cell">
       <div class="status-line">
         <StatusBadge label={status.label} severity={status.severity} />
-        <span>{formatPercent(downloaded, total)}</span>
+        <span class="mono">{formatPercent(downloaded, total)}</span>
       </div>
       <div class="bar" role="progressbar" aria-label={`${name} progress`} aria-valuenow={total ? Math.round(progress) : undefined} aria-valuemin={0} aria-valuemax={100}>
-        <div class="fill" style:width={`${progress}%`}></div>
+        <div class="fill severity-{status.severity}" style:width={`${progress}%`}></div>
       </div>
     </div>
 
     <div class="transfer-cell">
-      <strong>{job.status === "downloading" ? formatSpeed(speed) : "—"}</strong>
-      <span>{job.status === "downloading" ? formatEta(downloaded, total, speed) : status.label}</span>
+      <strong class="mono">{job.status === "downloading" ? formatSpeed(speed) : "—"}</strong>
+      <span class="mono">{job.status === "downloading" ? formatEta(downloaded, total, speed) : status.label}</span>
     </div>
-    <div class="size-cell">{formatBytes(total)}</div>
+    <div class="size-cell mono">{formatBytes(total)}</div>
     <div class="added-cell">{formatRelativeTime(job.created_at)}</div>
     <div class="row-menu">
       <MenuButton label={`More actions for ${name}`} icon="more" items={menuItems} variant="subtle" iconOnly />
@@ -94,14 +100,26 @@
   .name-cell { min-width: 0; display: flex; align-items: center; gap: var(--space-3); }
   .file-icon { display: grid; place-items: center; width: 28px; height: 28px; flex: none; color: var(--text-secondary); }
   .name-copy, .transfer-cell { min-width: 0; display: flex; flex-direction: column; }
-  .name-copy strong, .name-copy span, .transfer-cell strong, .transfer-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name-copy strong, .transfer-cell strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .transfer-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .name-copy strong, .transfer-cell strong { font-size: var(--text-body); font-weight: 600; }
   .name-copy span, .transfer-cell span { color: var(--text-tertiary); font-size: var(--text-caption); }
+  .name-meta { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+  .name-meta > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .engine-badge { flex: none; display: inline-flex; align-items: center; font-family: var(--font-family-mono); font-size: 9.5px; font-weight: 600; letter-spacing: .03em; padding: 1px 5px; border-radius: var(--radius-small); border-left: 2px solid var(--text-tertiary); background: var(--bg-subtle); color: var(--text-secondary); }
+  .engine-badge.kind-http { border-left-color: var(--accent-default); }
+  .engine-badge.kind-torrent { border-left-color: var(--status-success); }
+  .engine-badge.kind-media { border-left-color: var(--status-warning); }
+  .mono { font-family: var(--font-family-mono); font-variant-numeric: tabular-nums; }
   .status-cell { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .status-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
   .status-line > span { flex: none; color: var(--text-secondary); font-size: var(--text-caption); }
   .bar { height: 3px; overflow: hidden; border-radius: var(--radius-pill); background: var(--bg-subtle); }
   .fill { height: 100%; min-width: 0; border-radius: inherit; background: var(--accent-default); transition: width 160ms linear; }
+  .fill.severity-success { background: var(--status-success); }
+  .fill.severity-warning { background: var(--status-warning); }
+  .fill.severity-error { background: var(--status-error); }
+  .fill.severity-neutral { background: var(--status-paused); }
   .size-cell, .added-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--text-caption); }
   .row-menu { opacity: 0; transition: opacity var(--motion-fast) var(--motion-easing); }
   .row:hover .row-menu, .row.focused .row-menu, .row-menu:focus-within { opacity: 1; }

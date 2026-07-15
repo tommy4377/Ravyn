@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ravynMark from "../../assets/ravyn-mark.svg";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
   import Surface from "../components/Surface.svelte";
@@ -26,7 +27,7 @@
 <SettingsCategoryHeader title="About" description="Version, installation, update channel, paths, and support information." />
 <Surface padding="none">
   <div class="hero">
-    <span class="logo"><Icon name="download" size={30} /></span>
+    <img class="logo" src={ravynMark} alt="" />
     <div><h3>Ravyn</h3><p>A focused download manager for Windows.</p></div>
     <Button onclick={() => void copySystemInformation()}><Icon name="copy" size={15} /> Copy system information</Button>
   </div>
@@ -43,7 +44,7 @@
 
 <style>
   .hero { min-height: 100px; display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; gap: var(--space-4); padding: var(--space-5); border-bottom: 1px solid var(--stroke-divider); }
-  .logo { width: 52px; height: 52px; display: grid; place-items: center; border-radius: var(--radius-layer); color: var(--accent-on-color); background: var(--accent-default); }
+  .logo { width: 52px; height: 52px; border-radius: var(--radius-layer); object-fit: contain; }
   h3, p { margin: 0; } h3 { font-size: var(--text-subtitle); } p { margin-top: 3px; color: var(--text-secondary); }
   dl { display: grid; grid-template-columns: minmax(130px, 190px) minmax(0, 1fr); gap: 0; margin: 0; }
   dt, dd { min-height: 48px; display: flex; align-items: center; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
