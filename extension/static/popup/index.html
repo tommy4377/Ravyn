@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -12,62 +12,249 @@
       <header>
         <div class="brand">
           <img src="../icons/ravyn-32.png" alt="" />
-          <div>
+          <div class="brand-copy">
             <strong>Ravyn</strong>
-            <div id="connection" class="muted">Connecting…</div>
+            <div class="connection-row muted">
+              <span id="connection-dot" class="status-dot"></span>
+              <span id="connection">Connecting...</span>
+            </div>
           </div>
         </div>
-        <button id="settings" class="icon" aria-label="Open extension settings">
-          ⚙
+        <button
+          id="settings"
+          class="quiet"
+          aria-label="Open extension settings"
+        >
+          Settings
         </button>
       </header>
-      <form id="quick" class="stack">
-        <label
-          ><span class="sr-only">Download URL</span
-          ><input
-            id="url"
-            type="url"
-            placeholder="Paste a download URL"
-            autocomplete="off"
-        /></label>
-        <div class="row">
-          <button class="primary grow" type="submit">Download</button
-          ><button id="paused" type="button">Add paused</button>
+
+      <nav class="view-tabs" role="tablist" aria-label="Popup view">
+        <button
+          id="tab-overview"
+          type="button"
+          role="tab"
+          aria-controls="overview-view"
+          aria-selected="true"
+        >
+          Overview
+        </button>
+        <button
+          id="tab-resources"
+          type="button"
+          role="tab"
+          aria-controls="resources-view"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          Page resources
+        </button>
+      </nav>
+
+      <section
+        id="overview-view"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-overview"
+      >
+        <form id="quick" class="quick-download">
+          <label>
+            <span class="sr-only">Download URL</span>
+            <input
+              id="url"
+              type="url"
+              placeholder="Paste a download URL"
+              autocomplete="off"
+            />
+          </label>
+          <div class="row">
+            <button class="primary grow" type="submit">Download</button>
+            <button id="paused" type="button">Add paused</button>
+          </div>
+        </form>
+
+        <section class="card compact-card">
+          <div class="section-title">
+            <strong>Current page</strong>
+            <span id="page-host" class="muted truncate"></span>
+          </div>
+          <div class="action-grid">
+            <button id="analyze" type="button">Analyze media</button>
+            <button id="scan" type="button">Scan resources</button>
+            <button id="images" type="button">Find images</button>
+            <button id="monitor" type="button">Monitor page</button>
+          </div>
+        </section>
+
+        <section class="card compact-card jobs-card">
+          <div class="section-title">
+            <strong>Recent jobs</strong>
+            <span id="summary" class="muted"></span>
+          </div>
+          <div id="jobs" class="jobs">
+            <div class="empty compact-empty">No recent jobs</div>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="resources-view"
+        class="view resources-view hidden"
+        role="tabpanel"
+        aria-labelledby="tab-resources"
+      >
+        <div class="resource-heading">
+          <div class="truncate">
+            <strong>Detected on this page</strong>
+            <div id="resource-page" class="muted truncate">No active page</div>
+          </div>
+          <button id="resource-refresh" type="button">Rescan</button>
         </div>
-      </form>
-      <section class="card stack">
-        <div class="section-title">
-          <strong>Current page</strong
-          ><span id="page-host" class="muted"></span>
+
+        <div class="search-row">
+          <input
+            id="resource-search"
+            type="text"
+            placeholder="Search resources"
+          />
+          <select id="resource-type" aria-label="Resource type">
+            <option value="all">All types</option>
+            <option value="image">Images</option>
+            <option value="video">Video</option>
+            <option value="audio">Audio</option>
+            <option value="manifest">Streams</option>
+            <option value="document">Documents</option>
+            <option value="archive">Archives</option>
+            <option value="other">Other</option>
+          </select>
         </div>
-        <div class="grid">
-          <button id="analyze">Analyze media</button
-          ><button id="scan">Scan resources</button
-          ><button id="images">All images</button
-          ><button id="monitor">Monitor page</button>
+
+        <div class="resource-commandbar">
+          <label class="inline-check"
+            ><input id="select-all" type="checkbox" /> Select all</label
+          >
+          <span id="count" class="muted">0 resources</span>
+          <button id="resources-monitor" type="button">Monitor</button>
+        </div>
+
+        <div id="resources" class="resource-list">
+          <div class="empty">Scan the page to find downloadable resources.</div>
+        </div>
+
+        <details class="advanced card">
+          <summary>Filters and download options</summary>
+          <div class="advanced-body">
+            <div class="filter-grid">
+              <label class="inline-check"
+                ><input id="same-domain" type="checkbox" /> Same domain
+                only</label
+              >
+              <label class="inline-check"
+                ><input id="new-only" type="checkbox" /> New only</label
+              >
+              <label
+                >Minimum MB<input
+                  id="minimum-size"
+                  type="number"
+                  min="0"
+                  step="1"
+              /></label>
+              <label
+                >Maximum MB<input
+                  id="maximum-size"
+                  type="number"
+                  min="0"
+                  step="1"
+              /></label>
+            </div>
+            <div class="option-grid">
+              <label
+                >Preset ID<input
+                  id="preset"
+                  type="text"
+                  placeholder="Optional UUID"
+              /></label>
+              <label
+                >Tags<input
+                  id="tags"
+                  type="text"
+                  placeholder="browser, research"
+              /></label>
+              <label
+                >Media format<input
+                  id="media-format"
+                  type="text"
+                  placeholder="bestvideo+bestaudio/best"
+              /></label>
+              <label
+                >Maximum height
+                <select id="max-height">
+                  <option value="">Original</option>
+                  <option value="2160">2160p</option>
+                  <option value="1440">1440p</option>
+                  <option value="1080">1080p</option>
+                  <option value="720">720p</option>
+                  <option value="480">480p</option>
+                </select>
+              </label>
+            </div>
+            <label
+              >After download
+              <select id="post-processing">
+                <option value="">No conversion</option>
+                <option value="image-webp">Convert image to WebP</option>
+                <option value="image-avif">Convert image to AVIF</option>
+                <option value="audio-mp3">Convert audio to MP3</option>
+                <option value="audio-opus">Convert audio to Opus</option>
+                <option value="video-h264">Convert video to H.264 MP4</option>
+                <option value="video-h265">Convert video to H.265 MKV</option>
+              </select>
+            </label>
+            <div class="check-grid">
+              <label class="inline-check"
+                ><input id="include-cookies" type="checkbox" /> Use site session
+                cookies</label
+              >
+              <label class="inline-check"
+                ><input id="audio-only" type="checkbox" /> Audio only</label
+              >
+              <label class="inline-check"
+                ><input id="subtitles" type="checkbox" /> Include
+                subtitles</label
+              >
+            </div>
+          </div>
+        </details>
+
+        <div class="resource-actions">
+          <button
+            id="download-selected"
+            class="primary grow"
+            type="button"
+            disabled
+          >
+            Download selected
+          </button>
+          <button id="add-selected-paused" type="button" disabled>
+            Add paused
+          </button>
         </div>
       </section>
-      <section class="card">
-        <div class="section-title">
-          <strong>Recent jobs</strong><span id="summary" class="muted"></span>
-        </div>
-        <div id="jobs" class="jobs">
-          <div class="empty">No recent jobs</div>
-        </div>
-      </section>
+
       <footer>
-        <button id="sidebar">Open resource sidebar</button>
         <div class="row">
-          <button id="pause-all" class="icon" aria-label="Pause all downloads">
-            Ⅱ</button
-          ><button
+          <button id="pause-all" type="button" aria-label="Pause all downloads">
+            Pause all
+          </button>
+          <button
             id="resume-all"
-            class="icon"
+            type="button"
             aria-label="Resume all downloads"
           >
-            ▶</button
-          ><button id="open-ravyn">Open Ravyn</button>
+            Resume all
+          </button>
         </div>
+        <button id="open-ravyn" class="quiet" type="button">Open Ravyn</button>
       </footer>
       <div id="message" role="status" aria-live="polite"></div>
     </main>

@@ -43,3 +43,4 @@ extension/.vite/
 /node_modules/
 **/__pycache__/
 .pytest_cache/
+.playwright-mcp/console-2026-07-16T14-25-57-957Z.log

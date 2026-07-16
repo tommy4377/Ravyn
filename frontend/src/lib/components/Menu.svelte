@@ -17,12 +17,14 @@
     open,
     x,
     y,
+    align = "start",
     onClose,
   }: {
     items: MenuItem[];
     open: boolean;
     x: number;
     y: number;
+    align?: "start" | "end";
     onClose: () => void;
   } = $props();
 
@@ -30,6 +32,7 @@
   let itemEls = $state<(HTMLButtonElement | null)[]>([]);
   let resolvedX = $state(0);
   let resolvedY = $state(0);
+  let positioned = $state(false);
 
   const enabledIndexes = $derived(
     items.reduce<number[]>((acc, item, index) => {
@@ -42,14 +45,24 @@
     if (!menuEl) return;
     const margin = 8;
     const rect = menuEl.getBoundingClientRect();
-    resolvedX = Math.max(margin, Math.min(x, window.innerWidth - rect.width - margin));
+    const preferredX = align === "end" ? x - rect.width : x;
+    resolvedX = Math.max(margin, Math.min(preferredX, window.innerWidth - rect.width - margin));
     resolvedY = Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin));
+    positioned = true;
   }
 
   $effect(() => {
-    if (!open) return;
+    if (!open || !menuEl) return;
+    positioned = false;
     resolvedX = x;
     resolvedY = y;
+    if (typeof menuEl.showPopover === "function") {
+      try {
+        menuEl.showPopover();
+      } catch {
+        // A reactive position update can run while the popover is already open.
+      }
+    }
     void tick().then(() => {
       clampPosition();
       const first = enabledIndexes[0];
@@ -63,9 +76,11 @@
     }
     window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("resize", clampPosition);
+    window.addEventListener("scroll", onClose, true);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("resize", clampPosition);
+      window.removeEventListener("scroll", onClose, true);
     };
   });
 
@@ -109,6 +124,12 @@
     }
   }
 
+  function syncPopoverState(event: ToggleEvent): void {
+    if (event.newState === "closed") {
+      onClose();
+    }
+  }
+
   function select(item: MenuItem): void {
     if (item.disabled) return;
     onClose();
@@ -121,7 +142,9 @@
     bind:this={menuEl}
     class="menu"
     role="menu"
-    style="left:{resolvedX}px; top:{resolvedY}px;"
+    popover="auto"
+    ontoggle={syncPopoverState}
+    style="left:{resolvedX}px; top:{resolvedY}px; visibility:{positioned ? 'visible' : 'hidden'};"
   >
     {#each items as item, index (item.id)}
       {#if item.separatorBefore}
@@ -148,6 +171,8 @@
 <style>
   .menu {
     position: fixed;
+    inset: auto;
+    margin: 0;
     z-index: 200;
     min-width: 200px;
     max-width: 320px;

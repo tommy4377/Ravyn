@@ -81,6 +81,7 @@ impl RqbitProcessManager {
             drop(listener);
             let api_url = format!("http://{address}");
             let mut command = Command::new(executable);
+            crate::services::process::hide_console_window(&mut command);
             command
                 .arg("server")
                 .arg("start")

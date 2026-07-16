@@ -13,6 +13,9 @@ fn main() {
             "open_native_path",
             "reveal_native_path",
             "prompt_torrent_default_app",
+            "notify_native",
+            "open_compact_window",
+            "focus_main_window",
         ]),
     ))
     .expect("failed to build the Ravyn Tauri application manifest");

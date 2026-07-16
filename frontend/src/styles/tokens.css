@@ -225,6 +225,7 @@ button { color: inherit; }
     --surface-content: Canvas;
     --surface-card: Canvas;
     --surface-flyout: Canvas;
+    --surface-overlay: Canvas;
     --stroke-surface: CanvasText;
   }
 }
@@ -242,12 +243,16 @@ button { color: inherit; }
   --surface-content: rgba(255, 255, 255, 0.6);
   --surface-card: rgba(255, 255, 255, 0.48);
   --surface-navigation: rgba(250, 248, 243, 0.4);
+  --surface-flyout: rgba(255, 255, 255, 0.74);
+  --surface-overlay: rgba(255, 255, 255, 0.68);
   --backdrop-glow-opacity: 0.14;
 }
 :root[data-theme="dark"] {
   --surface-content: rgba(16, 16, 18, 0.42);
   --surface-card: rgba(22, 22, 25, 0.38);
   --surface-navigation: rgba(12, 12, 14, 0.28);
+  --surface-flyout: rgba(24, 24, 28, 0.76);
+  --surface-overlay: rgba(18, 18, 21, 0.7);
   --backdrop-glow-opacity: 0.1;
 }
 :root[data-material="solid"] { --backdrop-glow-opacity: 0; }

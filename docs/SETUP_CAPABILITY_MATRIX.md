@@ -25,7 +25,7 @@ suite exercises the path.
 | Setup completion and handoff | `POST /v1/setup/complete`, `finish_setup_handoff` | Completion stage | tested |
 | System capabilities/dependencies | system diagnostics routes | Diagnostics and Troubleshooting | connected |
 | Uninstall | `Ravyn.exe --uninstall` | Installed Apps registration | tested in release smoke flow |
-| Firefox download handoff | Native Messaging host + `/v1/jobs` | Popup, sidebar, interception, and media actions | tested |
+| Firefox download handoff | Native Messaging host + `/v1/jobs` | Compact popup/resource picker, interception, and media actions | tested |
 | Torrent default-app prompt | Windows association registration + Default Apps | Browser integration settings | tested |
 
 ## Component model
@@ -47,6 +47,17 @@ Managed engine paths are applied when the backend starts. Setup therefore
 hands off to a fresh Ravyn process after provisioning; the Components screen
 waits for install/update completion and clearly prompts for a restart before
 using a newly changed engine.
+
+Setup recovery is state-based and idempotent. If a restart occurs after
+integration consent has been recorded, the next process resumes the install
+stage and reconciles provisioning automatically instead of returning to the
+preference form. Development mode also clears shortcut and startup choices
+that cannot be applied while running in place.
+
+Runtime activation follows current verified component state rather than the
+historical setup profile: an active managed rqbit is supervised even when it
+was installed later, and yt-dlp receives the active managed FFmpeg path
+directly for merge and post-processing operations.
 
 Component states are `not_installed`, `queued`, `downloading`, `verifying`,
 `installing`, `installed`, `update_available`, `failed`, `unsupported`,
@@ -75,7 +86,8 @@ The repository gates the setup surface with:
 
 The Firefox extension is a supported companion surface. It uses the installed
 desktop executable as its Native Messaging host, which relays authenticated
-requests to the in-process backend. Its compact toolbar popup shows recent
-jobs, while the resource sidebar remains available for page analysis. New
-installations intercept compatible Firefox downloads automatically and safely
-resume the browser transfer if the native handoff is unavailable.
+requests to the in-process backend. Its compact toolbar popup combines recent
+jobs with full page-resource analysis and batch submission; no persistent
+browser sidebar is required. New installations intercept compatible Firefox
+downloads automatically and safely resume the browser transfer if the native
+handoff is unavailable.

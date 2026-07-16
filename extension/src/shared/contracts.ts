@@ -189,7 +189,6 @@ export type BackgroundRequest =
       tabId?: number;
       resources: DetectedResource[];
     }
-  | { type: "open-sidebar" }
   | { type: "open-ravyn"; section?: string }
   | { type: "get-summary" }
   | { type: "pause-all" }

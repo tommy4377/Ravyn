@@ -6,7 +6,8 @@ Windows 11 while still following the user's desktop.
 
 ## Native bridge
 
-The main-window-only `desktop_appearance` command:
+The read-only `desktop_appearance` command is capability-scoped to Ravyn's
+trusted main and setup windows. It:
 
 - reads the current wallpaper and wallpaper layout from the current-user
   Windows desktop preferences;
@@ -25,6 +26,12 @@ updates CSS custom properties for the desktop plane. Window movement updates
 only the CSS offset immediately; a debounced native refresh then detects monitor
 or DPI transitions. Focus, theme, resize, scale, and a slow polling interval
 refresh wallpaper and accent metadata.
+
+The application root owns one shared backdrop in both setup and main windows.
+Content, setup stages, detail panes, drawers, dialogs, menus, and filter
+flyouts use translucent material tokens and backdrop filters. Menus, dialogs,
+and filter flyouts enter the browser top layer so transformed ancestors cannot
+clip or offset the material surface.
 
 Supported Windows wallpaper modes:
 

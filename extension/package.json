@@ -1,6 +1,6 @@
 {
   "name": "ravyn-firefox-extension",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "Firefox integration for the Ravyn download manager",

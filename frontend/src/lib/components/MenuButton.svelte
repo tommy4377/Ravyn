@@ -26,7 +26,7 @@
       return;
     }
     const rect = triggerEl?.getBoundingClientRect();
-    if (rect) position = { x: rect.left, y: rect.bottom + 4 };
+    if (rect) position = { x: iconOnly ? rect.right : rect.left, y: rect.bottom + 4 };
     open = true;
   }
 
@@ -48,6 +48,7 @@
   type="button"
   class="menu-trigger {variant}"
   class:icon-only={iconOnly}
+  aria-label={iconOnly ? label : undefined}
   aria-haspopup="menu"
   aria-expanded={open}
   onclick={toggle}
@@ -58,7 +59,14 @@
   {#if !iconOnly}<Icon name="chevron-down" size={12} />{/if}
 </button>
 
-<Menu {items} {open} x={position.x} y={position.y} onClose={close} />
+<Menu
+  {items}
+  {open}
+  x={position.x}
+  y={position.y}
+  align={iconOnly ? "end" : "start"}
+  onClose={close}
+/>
 
 <style>
   .menu-trigger {

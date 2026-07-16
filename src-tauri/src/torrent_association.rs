@@ -4,8 +4,13 @@
 //! a truthful, per-user capability and opens the system Default Apps page for
 //! an explicit user choice; it never overwrites another application's choice.
 
+const DEFAULT_APPS_URI: &str = "ms-settings:defaultapps?registeredAppUser=Ravyn";
+
 #[cfg(windows)]
 pub fn register_and_prompt() -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{
+        SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST, SHChangeNotify,
+    };
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
@@ -21,12 +26,11 @@ pub fn register_and_prompt() -> Result<(), String> {
     classes
         .set_value("", &"Ravyn torrent")
         .map_err(|error| error.to_string())?;
-    // This marks the ProgID as a URL handler. The capability map below lets
-    // Windows present it for `magnet:` without changing another app's active
-    // handler before the user explicitly selects Ravyn.
-    classes
-        .set_value("URL Protocol", &"")
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = classes.delete_value("URL Protocol")
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error.to_string());
+    }
     let (icon, _) = classes
         .create_subkey("DefaultIcon")
         .map_err(|error| error.to_string())?;
@@ -36,6 +40,30 @@ pub fn register_and_prompt() -> Result<(), String> {
         .create_subkey(r"shell\open\command")
         .map_err(|error| error.to_string())?;
     open.set_value("", &command)
+        .map_err(|error| error.to_string())?;
+
+    // Protocol handlers use a distinct ProgID so the torrent file ProgID is
+    // never marked as a URL protocol by the Windows association resolver.
+    let (magnet, _) = hkcu
+        .create_subkey(r"Software\Classes\Ravyn.Magnet")
+        .map_err(|error| error.to_string())?;
+    magnet
+        .set_value("", &"Ravyn magnet link")
+        .map_err(|error| error.to_string())?;
+    magnet
+        .set_value("URL Protocol", &"")
+        .map_err(|error| error.to_string())?;
+    let (magnet_icon, _) = magnet
+        .create_subkey("DefaultIcon")
+        .map_err(|error| error.to_string())?;
+    magnet_icon
+        .set_value("", &format!("{},0", executable.display()))
+        .map_err(|error| error.to_string())?;
+    let (magnet_open, _) = magnet
+        .create_subkey(r"shell\open\command")
+        .map_err(|error| error.to_string())?;
+    magnet_open
+        .set_value("", &command)
         .map_err(|error| error.to_string())?;
 
     let (capabilities, _) = hkcu
@@ -56,7 +84,7 @@ pub fn register_and_prompt() -> Result<(), String> {
     let (urls, _) = capabilities
         .create_subkey("URLAssociations")
         .map_err(|error| error.to_string())?;
-    urls.set_value("magnet", &"Ravyn.Torrent")
+    urls.set_value("magnet", &"Ravyn.Magnet")
         .map_err(|error| error.to_string())?;
     let (registered, _) = hkcu
         .create_subkey(r"Software\RegisteredApplications")
@@ -65,8 +93,20 @@ pub fn register_and_prompt() -> Result<(), String> {
         .set_value("Ravyn", &r"Software\Ravyn\Capabilities")
         .map_err(|error| error.to_string())?;
 
+    // The Shell caches registered handlers. Flush the association change
+    // before opening Settings so Ravyn appears immediately in the choices.
+    // SAFETY: this event requires null item pointers and performs no memory access.
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED as i32,
+            SHCNF_IDLIST | SHCNF_FLUSH,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+    }
+
     std::process::Command::new("explorer.exe")
-        .arg("ms-settings:defaultapps")
+        .arg(DEFAULT_APPS_URI)
         .spawn()
         .map_err(|error| format!("registered Ravyn but could not open Default Apps: {error}"))?;
     Ok(())
@@ -75,4 +115,17 @@ pub fn register_and_prompt() -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn register_and_prompt() -> Result<(), String> {
     Err("torrent file association is only supported on Windows".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_apps_uri_targets_the_per_user_ravyn_registration() {
+        assert_eq!(
+            DEFAULT_APPS_URI,
+            "ms-settings:defaultapps?registeredAppUser=Ravyn"
+        );
+    }
 }

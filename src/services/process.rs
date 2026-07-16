@@ -8,6 +8,29 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{RavynError, Result};
 
+/// Windows `CREATE_NO_WINDOW` process creation flag. Ravyn is a GUI
+/// application, so every spawned console child (yt-dlp, rqbit, FFmpeg, 7-Zip,
+/// PowerShell) must run without flashing a terminal window.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Configures a tokio command to run without opening a console window.
+pub fn hide_console_window(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// Configures a std command to run without opening a console window.
+pub fn hide_console_window_std(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 pub fn redact_sensitive_output(input: &str) -> String {
     input
         .lines()
@@ -152,6 +175,7 @@ pub async fn run(
 }
 
 pub fn configure(command: &mut Command, limits: &ProcessLimits) {
+    hide_console_window(command);
     configure_process_group(command, limits);
 }
 

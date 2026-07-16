@@ -3,11 +3,6 @@
     "scripts": ["background/index.js"],
     "type": "module"
   },
-  "sidebar_action": {
-    "default_title": "Ravyn Resources",
-    "default_panel": "sidebar/index.html",
-    "default_icon": "icons/ravyn-32.png"
-  },
   "browser_specific_settings": {
     "gecko": {
       "id": "firefox-extension@ravyn.app",

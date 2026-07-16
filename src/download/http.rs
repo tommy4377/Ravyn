@@ -335,7 +335,7 @@ impl HttpAdapter {
                 RavynError::Protocol("download probe exceeded the redirect limit".into())
             })?
         };
-        let job = self.apply_post_probe_rules(job, &metadata).await?;
+        let mut job = self.apply_post_probe_rules(job, &metadata).await?;
         if let Some(metalink) = job.options_json.metalink.as_ref() {
             if metadata.length != Some(metalink.size) {
                 return Err(RavynError::Protocol(format!(
@@ -349,7 +349,37 @@ impl HttpAdapter {
         let headers = self.request_headers(&job)?;
         let host_limit = self.host_limit(&metadata.final_url).await?;
 
-        let output = self.destination(&job, &metadata);
+        let mut output = self.destination(&job, &metadata);
+        if fs::try_exists(&output).await? && !job.options_json.overwrite {
+            let mut occupied_partial = output.as_os_str().to_os_string();
+            occupied_partial.push(".ravyn.part");
+            let owns_resume_state =
+                job.downloaded_bytes > 0 || fs::try_exists(Path::new(&occupied_partial)).await?;
+            if owns_resume_state {
+                // The path belongs to this job's own resume state; renaming
+                // now would orphan the partial data.
+                return Err(RavynError::Conflict(format!(
+                    "{} already exists",
+                    output.display()
+                )));
+            }
+            let directory = PathBuf::from(&job.destination);
+            let current_name = output
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| crate::services::filename::from_url(&metadata.final_url));
+            let unique_name = crate::services::filename::next_available(&current_name, |candidate| {
+                let candidate_path = directory.join(candidate);
+                let mut candidate_partial = candidate_path.as_os_str().to_os_string();
+                candidate_partial.push(".ravyn.part");
+                candidate_path.exists() || Path::new(&candidate_partial).exists()
+            });
+            self.repository
+                .update_job_fields(job.id, None, None, None, Some(&unique_name), None)
+                .await?;
+            job.filename = Some(unique_name);
+            output = self.destination(&job, &metadata);
+        }
         let mut partial_name = output.as_os_str().to_os_string();
         partial_name.push(".ravyn.part");
         let partial = PathBuf::from(partial_name);
@@ -370,12 +400,6 @@ impl HttpAdapter {
             .await?;
         if resume_reset && fs::try_exists(&partial).await? {
             remove_file_with_retry(&partial).await?;
-        }
-        if fs::try_exists(&output).await? && !job.options_json.overwrite {
-            return Err(RavynError::Conflict(format!(
-                "{} already exists",
-                output.display()
-            )));
         }
 
         let priority = u32::try_from(job.priority.max(0)).unwrap_or(u32::MAX);

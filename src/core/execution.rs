@@ -356,8 +356,12 @@ impl JobManager {
                     outcome.artifacts
                 };
                 let mut registered = Vec::with_capacity(produced.len());
+                let mut produced_bytes: u64 = 0;
                 for produced_artifact in produced {
                     let path = produced_artifact.path;
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        produced_bytes = produced_bytes.saturating_add(metadata.len());
+                    }
                     let is_primary = primary_path.as_deref() == Some(path.as_path());
                     let artifact = self
                         .repository
@@ -401,6 +405,30 @@ impl JobManager {
                     if produced_artifact.postprocess {
                         registered.push((artifact.id, path));
                     }
+                }
+                if job.kind == JobKind::Media && produced_bytes > 0 {
+                    // yt-dlp progress is per file, so the last downloaded file
+                    // (often a tiny subtitle) would otherwise define the job
+                    // size. Report the real on-disk output total instead.
+                    self.repository
+                        .update_progress(job.id, produced_bytes, Some(produced_bytes))
+                        .await?;
+                    self.events
+                        .publish(Event::Progress(crate::core::models::ProgressSnapshot {
+                            job_id: job.id,
+                            downloaded_bytes: produced_bytes,
+                            total_bytes: Some(produced_bytes),
+                            bytes_per_second: 0,
+                        }));
+                }
+                if let Some(filename) = inferred_completed_filename(
+                    job.kind,
+                    job.filename.as_deref(),
+                    primary_path.as_deref(),
+                ) {
+                    self.repository
+                        .update_job_fields(job.id, None, None, None, Some(&filename), None)
+                        .await?;
                 }
                 if !registered.is_empty() && !job.options_json.post_actions.is_empty() {
                     let _ = self
@@ -746,6 +774,19 @@ fn path_with_numeric_suffix(path: &Path, suffix: u32) -> crate::error::Result<Pa
     Ok(path.with_file_name(filename))
 }
 
+fn inferred_completed_filename(
+    kind: JobKind,
+    existing: Option<&str>,
+    primary_path: Option<&Path>,
+) -> Option<String> {
+    if kind != JobKind::Media || existing.is_some() {
+        return None;
+    }
+    primary_path?
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 async fn move_regular_file_without_replacement(
     source: &Path,
     destination: &Path,
@@ -812,4 +853,34 @@ async fn move_regular_file_without_replacement(
         return Err(error.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_media_uses_the_real_output_name_when_no_name_was_requested() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                None,
+                Some(Path::new("C:/Videos/Me at the zoo [jNQXAC9IVRw].mkv")),
+            )
+            .as_deref(),
+            Some("Me at the zoo [jNQXAC9IVRw].mkv")
+        );
+    }
+
+    #[test]
+    fn completed_media_preserves_an_explicit_requested_name() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                Some("custom.mkv"),
+                Some(Path::new("C:/Videos/generated.mkv")),
+            ),
+            None
+        );
+    }
 }
