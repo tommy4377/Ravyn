@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dynamic resource fixture</title>
+  </head>
+  <body>
+    <h1>Dynamic resources</h1>
+    <button id="add">Add resources</button>
+    <script>
+      document.querySelector("#add").addEventListener("click", () => {
+        const image = document.createElement("img");
+        image.src = `/files/image.svg?created=${Date.now()}`;
+        image.alt = "Dynamically inserted fixture";
+        document.body.append(image);
+        fetch(`/files/playlist.m3u8?created=${Date.now()}`).catch(
+          () => undefined,
+        );
+      });
+    </script>
+  </body>
+</html>

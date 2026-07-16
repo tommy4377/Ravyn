@@ -141,6 +141,39 @@ export function installAppUpdateNow(): Promise<void> {
   return invoke("install_app_update_now");
 }
 
+
+export interface BrowserIntegrationStatus {
+  supported: boolean;
+  registered: boolean;
+  host_name: string;
+  extension_id: string;
+  manifest_path: string | null;
+  executable_path: string | null;
+  installed_mode: boolean;
+  error: string | null;
+}
+
+export interface BrowserAction {
+  section: string | null;
+  source_url: string | null;
+}
+
+export function browserIntegrationStatus(): Promise<BrowserIntegrationStatus> {
+  return invoke<BrowserIntegrationStatus>("browser_integration_status");
+}
+
+export function repairBrowserIntegration(): Promise<BrowserIntegrationStatus> {
+  return invoke<BrowserIntegrationStatus>("repair_browser_integration");
+}
+
+export function removeBrowserIntegration(): Promise<BrowserIntegrationStatus> {
+  return invoke<BrowserIntegrationStatus>("remove_browser_integration");
+}
+
+export function takeBrowserAction(): Promise<BrowserAction | null> {
+  return invoke<BrowserAction | null>("take_browser_action");
+}
+
 /** Native folder picker; returns the chosen absolute path or null. */
 export async function pickFolder(defaultPath?: string): Promise<string | null> {
   const result = await open({

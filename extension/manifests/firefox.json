@@ -1,0 +1,20 @@
+{
+  "background": {
+    "scripts": ["background/index.js"],
+    "type": "module"
+  },
+  "sidebar_action": {
+    "default_title": "Ravyn Resources",
+    "default_panel": "sidebar/index.html",
+    "default_icon": "icons/ravyn-32.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "firefox-extension@ravyn.app",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": ["websiteActivity", "websiteContent"]
+      }
+    }
+  }
+}

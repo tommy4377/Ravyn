@@ -152,7 +152,7 @@
     const requestedKind = navigation.pendingAddKind;
     if (!requestedKind) return;
     addDialogKind = navigation.consumeAddRequest() ?? "http";
-    addDialogSource = "";
+    addDialogSource = navigation.consumeAddSource();
     addDialogOpen = true;
   });
 

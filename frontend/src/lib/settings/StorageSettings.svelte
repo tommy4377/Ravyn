@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from "../components/Button.svelte";
+  import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
   import Icon from "../components/Icon.svelte";
   import PathPicker from "../components/PathPicker.svelte";
   import Surface from "../components/Surface.svelte";
@@ -7,6 +8,7 @@
   import { formatBytes } from "../util/format";
   import SettingsCategoryHeader from "./SettingsCategoryHeader.svelte";
   import LibraryMoveDialog from "./LibraryMoveDialog.svelte";
+  import CategoryOverridesEditor from "./CategoryOverridesEditor.svelte";
   import type { SettingsController } from "./settingsController.svelte";
 
   let { controller }: { controller: SettingsController } = $props();
@@ -31,6 +33,9 @@
       </div>
       <Button onclick={() => (moveOpen = true)}><Icon name="folder-open" size={15} /> Move Library</Button>
     </div>
+    <AdvancedDisclosure title="Category routing" description="Override automatic classification for selected file extensions.">
+      <CategoryOverridesEditor {controller} />
+    </AdvancedDisclosure>
   </Surface>
 
   {#if controller.cleanupPolicies}

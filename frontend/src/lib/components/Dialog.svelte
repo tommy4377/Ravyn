@@ -1,3 +1,12 @@
+<script module lang="ts">
+  let dialogSequence = 0;
+
+  function nextDialogTitleId(): string {
+    dialogSequence += 1;
+    return `ravyn-dialog-title-${dialogSequence}`;
+  }
+</script>
+
 <script lang="ts">
   import { tick, type Snippet } from "svelte";
   import IconButton from "./IconButton.svelte";
@@ -22,6 +31,7 @@
 
   let dialogEl = $state<HTMLDivElement | null>(null);
   let returnFocusEl: HTMLElement | null = null;
+  const titleId = nextDialogTitleId();
 
   function focusableElements(): HTMLElement[] {
     if (!dialogEl) return [];
@@ -81,12 +91,12 @@
       class="dialog {size}"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="dialog-title"
+      aria-labelledby={titleId}
       tabindex="-1"
       onpointerdown={(event) => event.stopPropagation()}
     >
       <header class="dialog-header">
-        <h2 id="dialog-title">{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <IconButton icon="close" label="Close" variant="subtle" onclick={() => onClose()} />
       </header>
       <div class="dialog-body">

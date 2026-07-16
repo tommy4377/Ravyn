@@ -24,6 +24,7 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
 
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let _ = crate::browser_integration::unregister();
     let _ = hkcu.delete_subkey_all(crate::installation::UNINSTALL_KEY);
     if let Ok(run) = hkcu.open_subkey_with_flags(
         r"Software\Microsoft\Windows\CurrentVersion\Run",

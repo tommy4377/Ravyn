@@ -27,7 +27,9 @@
   } = $props();
 
   let menuEl = $state<HTMLDivElement | null>(null);
-  let itemEls: (HTMLButtonElement | null)[] = [];
+  let itemEls = $state<(HTMLButtonElement | null)[]>([]);
+  let resolvedX = $state(0);
+  let resolvedY = $state(0);
 
   const enabledIndexes = $derived(
     items.reduce<number[]>((acc, item, index) => {
@@ -36,9 +38,20 @@
     }, []),
   );
 
+  function clampPosition(): void {
+    if (!menuEl) return;
+    const margin = 8;
+    const rect = menuEl.getBoundingClientRect();
+    resolvedX = Math.max(margin, Math.min(x, window.innerWidth - rect.width - margin));
+    resolvedY = Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin));
+  }
+
   $effect(() => {
     if (!open) return;
+    resolvedX = x;
+    resolvedY = y;
     void tick().then(() => {
+      clampPosition();
       const first = enabledIndexes[0];
       if (first !== undefined) itemEls[first]?.focus();
     });
@@ -49,7 +62,11 @@
       }
     }
     window.addEventListener("pointerdown", onPointerDown, true);
-    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("resize", clampPosition);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("resize", clampPosition);
+    };
   });
 
   function focusOffset(currentIndex: number, delta: number): void {
@@ -104,7 +121,7 @@
     bind:this={menuEl}
     class="menu"
     role="menu"
-    style="left:{x}px; top:{y}px;"
+    style="left:{resolvedX}px; top:{resolvedY}px;"
   >
     {#each items as item, index (item.id)}
       {#if item.separatorBefore}

@@ -2,6 +2,8 @@
   import StageShell from "../StageShell.svelte";
   import Checkbox from "../../components/Checkbox.svelte";
   import RadioGroup from "../../components/RadioGroup.svelte";
+  import TextField from "../../components/TextField.svelte";
+  import ToggleSwitch from "../../components/ToggleSwitch.svelte";
   import type { InstallationMode } from "../../api/types";
   import type { SetupController } from "../controller.svelte";
 
@@ -33,7 +35,8 @@
         ],
   );
 
-  function next() {
+  async function next() {
+    if (!(await controller.savePreferences())) return;
     controller.step = "install";
     void controller.runInstallation();
   }
@@ -76,6 +79,27 @@
         bind:checked={controller.launchAfterSetup}
       />
     </div>
+
+    <div class="download-preferences" aria-label="Download preferences">
+      <div class="section-heading">
+        <strong>Download defaults</strong>
+        <span>These can be changed later in Settings.</span>
+      </div>
+      <ToggleSwitch
+        bind:checked={controller.autoOrganize}
+        label="Organize completed downloads automatically"
+        description="Route files into Videos, Music, Documents, Images, Archives, and other Library folders."
+      />
+      <ToggleSwitch
+        bind:checked={controller.autoProvision}
+        label="Maintain selected tools automatically"
+        description="Download and update checksum-verified managed tools required by enabled features."
+      />
+      <div class="download-grid">
+        <TextField bind:value={controller.maxActive} label="Active downloads" inputmode="numeric" />
+        <TextField bind:value={controller.speedLimitMbps} label="Global speed limit (Mbit/s)" inputmode="decimal" placeholder="0 for unlimited" />
+      </div>
+    </div>
   </div>
 </StageShell>
 
@@ -92,4 +116,9 @@
     padding-top: var(--space-4);
     border-top: 1px solid var(--stroke-divider);
   }
+  .download-preferences { display: flex; flex-direction: column; gap: var(--space-2); padding-top: var(--space-4); border-top: 1px solid var(--stroke-divider); }
+  .section-heading { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-2); }
+  .section-heading span { color: var(--text-secondary); font-size: var(--text-caption); }
+  .download-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--space-3); }
+  @media (max-width: 620px) { .download-grid { grid-template-columns: 1fr; } }
 </style>

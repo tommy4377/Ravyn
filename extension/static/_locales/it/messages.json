@@ -1,0 +1,17 @@
+{
+  "extensionName": { "message": "Ravyn Download Manager" },
+  "extensionDescription": {
+    "message": "Rileva le risorse delle pagine e invia i download in modo sicuro a Ravyn."
+  },
+  "connected": { "message": "Connesso" },
+  "disconnected": { "message": "Ravyn non è in esecuzione" },
+  "nativeHostMissing": {
+    "message": "L'integrazione browser di Ravyn non è installata"
+  },
+  "download": { "message": "Scarica" },
+  "addPaused": { "message": "Aggiungi in pausa" },
+  "scanResources": { "message": "Analizza risorse" },
+  "openRavyn": { "message": "Apri Ravyn" },
+  "settings": { "message": "Impostazioni" },
+  "clearData": { "message": "Cancella dati estensione" }
+}

@@ -4,11 +4,12 @@ Ravyn is a download manager with a Rust backend and a native Windows desktop app
 
 ## Desktop application and setup
 
-The repository contains three parts:
+The repository contains four product surfaces:
 
 - the root `ravyn` crate — the backend (HTTP API, engines, storage);
 - `src-tauri/` — the `ravyn-desktop` Tauri 2 shell that embeds the backend in-process on an ephemeral loopback port and hosts the setup and main windows;
-- `frontend/` — the Svelte 5 + Vite frontend (Fluent Design 2 tokens, custom setup flow).
+- `frontend/` — the Svelte 5 + Vite frontend (Fluent Design 2 tokens, custom setup flow);
+- `extension/` — the Firefox Manifest V3 extension, resource picker, safe download interceptor, and deterministic AMO packaging.
 
 Frontend development:
 
@@ -28,6 +29,19 @@ target/debug/ravyn-desktop.exe
 ```
 
 The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`). On first run it opens the custom Ravyn setup; after setup completes it opens the main window. Setup documentation lives in `docs/SETUP_CAPABILITY_MATRIX.md`.
+
+## Firefox extension
+
+The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. It supports rule-based or confirmed download interception, link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, media overlays, and a batch resource sidebar.
+
+```text
+cd extension
+npm ci
+npm run check
+npm run package:verify
+```
+
+The generated unsigned XPI and human-readable source archive are written to `extension/artifacts/`. Normal Firefox installation requires Mozilla signing; tagged CI releases support unlisted AMO signing with repository credentials. See `docs/FIREFOX_EXTENSION.md`, `extension/PRIVACY.md`, and `extension/THREAT_MODEL.md`.
 
 ## Current capabilities
 

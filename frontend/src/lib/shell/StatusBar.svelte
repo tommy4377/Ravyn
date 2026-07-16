@@ -4,9 +4,13 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
+  import { formatSpeed } from "../util/format";
 
   const activeCount = $derived(jobsStore.jobsFor("active").length);
   const total = $derived(jobsStore.list.length);
+  const totalSpeed = $derived(
+    [...jobsStore.liveProgress.values()].reduce((sum, progress) => sum + Math.max(0, progress.bytesPerSecond), 0),
+  );
 </script>
 
 <div class="status-bar">
@@ -17,6 +21,7 @@
   <span class="divider" aria-hidden="true"></span>
   <span class="item" role="status">
     {activeCount} active · {total} loaded
+    {#if totalSpeed > 0}<span class="speed">· {formatSpeed(totalSpeed)}</span>{/if}
   </span>
   <button type="button" class="notifications" aria-label={notifications.unreadCount ? `Open notifications, ${notifications.unreadCount} unread` : "Open notifications"} onclick={() => navigation.openNotifications()}>
     <Icon name="bell" size={14} />
@@ -31,6 +36,7 @@
 <style>
   .status-bar { display: flex; align-items: center; gap: var(--space-3); height: 26px; padding: 0 var(--space-3); border-top: 1px solid var(--stroke-divider); background: color-mix(in srgb, var(--surface-navigation) 88%, transparent); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); color: var(--text-secondary); font-size: var(--text-caption); flex: none; }
   .item { display: inline-flex; align-items: center; gap: var(--space-1); }
+  .speed { color: var(--accent-text); font-family: var(--font-family-mono); font-variant-numeric: tabular-nums; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--status-warning); }
   .dot.connected { background: var(--status-success); }
   .divider { width: 1px; height: 12px; background: var(--stroke-divider); }

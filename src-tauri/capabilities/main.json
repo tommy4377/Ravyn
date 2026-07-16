@@ -17,6 +17,10 @@
     "allow-cancel-app-update",
     "allow-desktop-appearance",
     "allow-open-native-path",
-    "allow-reveal-native-path"
+    "allow-reveal-native-path",
+    "allow-browser-integration-status",
+    "allow-repair-browser-integration",
+    "allow-remove-browser-integration",
+    "allow-take-browser-action"
   ]
 }

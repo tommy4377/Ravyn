@@ -19,6 +19,7 @@
     { id: "network", label: "Network", icon: "cloud" },
     { id: "updates", label: "Updates", icon: "refresh" },
     { id: "privacy", label: "Privacy and Secrets", icon: "shield" },
+    { id: "browser", label: "Firefox Integration", icon: "external-link" },
     { id: "troubleshooting", label: "Troubleshooting", icon: "diagnostics" },
     { id: "about", label: "About", icon: "info" },
   ];

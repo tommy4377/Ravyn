@@ -1,32 +1,51 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { systemAppearance } from "../appearance/systemAppearance.svelte";
-  import AutomationView from "../automation/AutomationView.svelte";
   import BasketView from "../basket/BasketView.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Icon from "../components/Icon.svelte";
   import DownloadsView from "../downloads/DownloadsView.svelte";
   import JobDetailsPane from "../downloads/JobDetailsPane.svelte";
-  import LibraryView from "../library/LibraryView.svelte";
-  import MediaView from "../media/MediaView.svelte";
-  import SettingsView from "../settings/SettingsView.svelte";
   import { JobsService } from "../services/jobs";
+  import { takeBrowserAction, type BrowserAction } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
-  import TorrentsView from "../torrents/TorrentsView.svelte";
   import AppBackdrop from "./AppBackdrop.svelte";
   import ConnectionBoot from "./ConnectionBoot.svelte";
   import NavigationView from "./NavigationView.svelte";
   import NotificationHistoryDrawer from "./NotificationHistoryDrawer.svelte";
   import NotificationHost from "./NotificationHost.svelte";
+  import LazySectionState from "./LazySectionState.svelte";
   import StatusBar from "./StatusBar.svelte";
 
   navigation.init();
   notifications.init();
+
+  function applyBrowserAction(action: BrowserAction | null): void {
+    if (!action) return;
+    if (action.source_url) {
+      navigation.requestAdd(action.section === "media" ? "media" : "http", action.source_url);
+      return;
+    }
+    const section = action.section;
+    if (section === "library" || section === "media" || section === "torrents" || section === "automation" || section === "settings") {
+      navigation.navigate(section);
+    } else if (section === "components") {
+      navigation.navigate("settings");
+    } else {
+      navigation.navigate("downloads");
+    }
+  }
+
   onMount(() => {
     const disposeAppearance = systemAppearance.init();
+    const readBrowserAction = (): void => {
+      void takeBrowserAction().then(applyBrowserAction).catch(() => undefined);
+    };
+    readBrowserAction();
+    const browserActionTimer = window.setInterval(readBrowserAction, 750);
     const onKeydown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       const editing = target?.matches("input, textarea, select, [contenteditable='true']") ?? false;
@@ -64,11 +83,13 @@
     window.addEventListener("keydown", onKeydown);
     return () => {
       window.removeEventListener("keydown", onKeydown);
+      window.clearInterval(browserActionTimer);
       disposeAppearance?.();
     };
   });
 
   let detailsWidth = $state(loadDetailsWidth());
+  let sectionLoadRevision = $state(0);
   let resizing = $state(false);
 
   $effect(() => {
@@ -84,6 +105,15 @@
       jobsStore.dispose();
     };
   });
+
+  function loadLazySection<T>(loader: () => Promise<T>, revision: number): Promise<T> {
+    void revision;
+    return loader();
+  }
+
+  function retryLazySection(): void {
+    sectionLoadRevision += 1;
+  }
 
   function loadDetailsWidth(): number {
     const value = Number(localStorage.getItem("ravyn.detailsWidth") ?? 380);
@@ -122,15 +152,45 @@
         {#if navigation.section === "downloads"}
           <DownloadsView />
         {:else if navigation.section === "library"}
-          <LibraryView />
+          {#await loadLazySection(() => import("../library/LibraryView.svelte"), sectionLoadRevision)}
+            <LazySectionState />
+          {:then { default: LibraryView }}
+            <LibraryView />
+          {:catch error}
+            <LazySectionState {error} onRetry={retryLazySection} />
+          {/await}
         {:else if navigation.section === "media"}
-          <MediaView />
+          {#await loadLazySection(() => import("../media/MediaView.svelte"), sectionLoadRevision)}
+            <LazySectionState />
+          {:then { default: MediaView }}
+            <MediaView />
+          {:catch error}
+            <LazySectionState {error} onRetry={retryLazySection} />
+          {/await}
         {:else if navigation.section === "torrents"}
-          <TorrentsView />
+          {#await loadLazySection(() => import("../torrents/TorrentsView.svelte"), sectionLoadRevision)}
+            <LazySectionState />
+          {:then { default: TorrentsView }}
+            <TorrentsView />
+          {:catch error}
+            <LazySectionState {error} onRetry={retryLazySection} />
+          {/await}
         {:else if navigation.section === "automation"}
-          <AutomationView />
+          {#await loadLazySection(() => import("../automation/AutomationView.svelte"), sectionLoadRevision)}
+            <LazySectionState />
+          {:then { default: AutomationView }}
+            <AutomationView />
+          {:catch error}
+            <LazySectionState {error} onRetry={retryLazySection} />
+          {/await}
         {:else if navigation.section === "settings"}
-          <SettingsView />
+          {#await loadLazySection(() => import("../settings/SettingsView.svelte"), sectionLoadRevision)}
+            <LazySectionState />
+          {:then { default: SettingsView }}
+            <SettingsView />
+          {:catch error}
+            <LazySectionState {error} onRetry={retryLazySection} />
+          {/await}
         {:else}
           <DownloadsView />
         {/if}

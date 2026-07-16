@@ -142,13 +142,16 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
         data_dir: data_dir_str,
         setup_completed,
     };
+    let descriptor_guard = crate::native_messaging::BackendDescriptorGuard::publish(&info)?;
     let _ = sender.send(Some(info.clone()));
     write_desktop_ready_marker(&info);
     crate::integration::confirm_installed_copy_ready();
 
-    ravyn::api::serve_with_listener(app, listener)
+    let result = ravyn::api::serve_with_listener(app, listener)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    drop(descriptor_guard);
+    result
 }
 
 

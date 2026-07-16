@@ -118,9 +118,12 @@ both to the immutable GitHub Release.
 
 ## CI validation
 
-Windows CI now regenerates the exact detached PowerShell helper from the Rust
-source, parses it with the real PowerShell parser, and checks for the required
-journal, readiness, registry, rollback, and result guards.
+Windows CI regenerates the exact detached PowerShell helper from the Rust
+source and parses it with the real PowerShell parser. It then builds disposable
+mock old/new application binaries and a mock silent installer and executes three
+complete transactions: an N-to-N+1 success, a forced readiness failure with
+binary rollback, and a same-version repair. Each scenario verifies the installed
+binary, transaction cleanup, and persisted result metadata.
 
 The installed-app smoke test also waits for an opt-in desktop readiness marker
 and calls the real unauthenticated loopback `/health/ready` endpoint. Merely
@@ -139,6 +142,5 @@ is removed by the workflow after validation.
 - The NSIS installer must use `currentUser` mode so silent installation does
   not require elevation.
 - The update private/public key pair must match.
-- Windows CI must exercise a real N-to-N+1 update, readiness acknowledgement,
-  forced readiness failure, binary/integration rollback, repair, and result
-  persistence before the updater is considered release-qualified.
+- Windows CI must pass the N-to-N+1, forced-readiness rollback, and same-version
+  repair lifecycle harness, plus the installed application readiness smoke test.

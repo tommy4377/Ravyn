@@ -42,7 +42,7 @@
     ytdlp: "Extracts media information and downloads from supported sites.",
     ffmpeg: "Merges, converts, probes, and post-processes audio and video.",
     rqbit: "Provides the managed BitTorrent engine and seeding controls.",
-    seven_zip: "Uses an existing 7z or 7za executable for verified archive extraction.",
+    seven_zip: "Installs or uses 7-Zip for verified archive listing, testing, and extraction.",
   };
   const icons: Record<ComponentId, IconName> = { ytdlp: "video", ffmpeg: "components", rqbit: "torrent", seven_zip: "archive" };
   const featureNames: Record<FeatureId, string> = {
@@ -68,9 +68,6 @@
   }
 
   function componentDescription(component: ComponentStatus): string {
-    if (component.component === "seven_zip" && component.state === "unsupported") {
-      return "Managed installation is intentionally unavailable in Ravyn 0.2. Select an existing 7z.exe or 7za.exe in Settings.";
-    }
     return descriptions[component.component];
   }
 
