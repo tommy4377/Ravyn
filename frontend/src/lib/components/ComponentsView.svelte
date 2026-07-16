@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { describeError } from "../api/errors";
   import type {
     ComponentId,
@@ -111,7 +112,15 @@
     }
   }
 
-  $effect(() => { void load(); });
+  // load() reads `overview` synchronously (to decide whether to show the
+  // blocking spinner) and later writes it; without untrack that read makes
+  // this mount effect depend on `overview`, so every successful load
+  // re-triggered the effect and re-fetched in an unbroken loop — visible as
+  // continuous flicker and, once enough concurrent requests piled up, an
+  // aborted fetch surfaced as a spurious "couldn't load components" error.
+  $effect(() => {
+    if (connection.client) untrack(() => void load());
+  });
 
   async function refreshCatalog(): Promise<void> {
     if (!connection.client || !manifestStatus?.configured) return;

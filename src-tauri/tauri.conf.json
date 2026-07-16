@@ -11,11 +11,12 @@
   },
   "app": {
     "windows": [],
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "security": {
       "capabilities": [
         "setup-capability",
-        "main-capability"
+        "main-capability",
+        "compact-capability"
       ],
       "csp": {
         "default-src": "'self' customprotocol: asset:",

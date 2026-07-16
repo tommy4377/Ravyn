@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { isTauri } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import BasketView from "../basket/BasketView.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Icon from "../components/Icon.svelte";
   import DownloadsView from "../downloads/DownloadsView.svelte";
   import JobDetailsPane from "../downloads/JobDetailsPane.svelte";
   import { JobsService } from "../services/jobs";
-  import { onTrayAction, takeBrowserAction, type BrowserAction, type TrayAction } from "../native/tauri";
+  import { onTrayAction, openCompactWindow, takeBrowserAction, type BrowserAction, type TrayAction } from "../native/tauri";
+  import type { JobStatusEvent, RavynEvent } from "../api/types";
   import { notifyDownloadEvent } from "./downloadNotifications";
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
@@ -43,6 +46,19 @@
     } else {
       navigation.navigate("downloads");
     }
+  }
+
+  /**
+   * Surfaces the compact progress window when a transfer starts while the
+   * main window is minimized or in the background, so the user still sees
+   * it without having to switch back to Ravyn.
+   */
+  async function maybeOpenCompactWindow(event: RavynEvent): Promise<void> {
+    if (!isTauri() || event.type !== "job_status") return;
+    if ((event as JobStatusEvent).status !== "downloading") return;
+    const current = getCurrentWindow();
+    const [minimized, focused] = await Promise.all([current.isMinimized(), current.isFocused()]);
+    if (minimized || !focused) void openCompactWindow().catch(() => undefined);
   }
 
   onMount(() => {
@@ -107,6 +123,7 @@
     const unsubscribe = connection.events.subscribe((event) => {
       notifyDownloadEvent(event);
       jobsStore.applyEvent(event);
+      void maybeOpenCompactWindow(event);
     });
     let unlistenTray: (() => void) | undefined;
     void onTrayAction((action: TrayAction) => {

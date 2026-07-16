@@ -794,7 +794,11 @@ fn configure_detached_process(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // DETACHED_PROCESS alone still lets a console flash briefly before the
+    // spawned PowerShell script applies its own -WindowStyle Hidden; every
+    // other PowerShell spawn in this codebase also sets CREATE_NO_WINDOW.
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]

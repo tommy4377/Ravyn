@@ -591,11 +591,22 @@ impl JobManager {
                 None,
             )
             .await?;
-        let kind = self.repository.get_job(id).await?.kind;
-        if kind == JobKind::Torrent {
+        let job = self.repository.get_job(id).await?;
+        // Stale byte counters from the failed attempt would otherwise leave a
+        // frozen progress bar until the restarted transfer reports fresh
+        // snapshots (resumed transfers jump back to their real offset).
+        self.repository.update_progress(id, 0, None).await?;
+        self.events
+            .publish(Event::Progress(crate::core::models::ProgressSnapshot {
+                job_id: id,
+                downloaded_bytes: 0,
+                total_bytes: job.total_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+                bytes_per_second: 0,
+            }));
+        if job.kind == JobKind::Torrent {
             self.torrent.resume_job(id).await?;
         }
-        self.metrics.job_retried(kind);
+        self.metrics.job_retried(job.kind);
         self.events.publish(Event::QueueChanged);
         Ok(())
     }

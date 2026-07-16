@@ -1,0 +1,77 @@
+{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "C:\\Users\\tommy\\Documents\\Ravyn"
+      ],
+      "env": {}
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "env": {}
+    },
+    "svelte-docs": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-svelte-docs"
+      ],
+      "env": {}
+    },
+    "shadcn-svelte": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@jpisnice/shadcn-ui-mcp-server",
+        "--framework",
+        "svelte"
+      ],
+      "env": {}
+    },
+    "tauri-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "tauri-plugin-mcp-server"
+      ],
+      "env": {}
+    },
+    "sqlite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-sqlite",
+        "--db-path",
+        "C:\\Users\\tommy\\Documents\\Ravyn\\ravyn-data\\ravyn.sqlite3"
+      ],
+      "env": {}
+    },
+    "git": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "C:\\Users\\tommy\\Documents\\Ravyn"
+      ],
+      "env": {}
+    }
+  }
+}

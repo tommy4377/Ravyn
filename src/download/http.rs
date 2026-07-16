@@ -368,12 +368,13 @@ impl HttpAdapter {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| crate::services::filename::from_url(&metadata.final_url));
-            let unique_name = crate::services::filename::next_available(&current_name, |candidate| {
-                let candidate_path = directory.join(candidate);
-                let mut candidate_partial = candidate_path.as_os_str().to_os_string();
-                candidate_partial.push(".ravyn.part");
-                candidate_path.exists() || Path::new(&candidate_partial).exists()
-            });
+            let unique_name =
+                crate::services::filename::next_available(&current_name, |candidate| {
+                    let candidate_path = directory.join(candidate);
+                    let mut candidate_partial = candidate_path.as_os_str().to_os_string();
+                    candidate_partial.push(".ravyn.part");
+                    candidate_path.exists() || Path::new(&candidate_partial).exists()
+                });
             self.repository
                 .update_job_fields(job.id, None, None, None, Some(&unique_name), None)
                 .await?;

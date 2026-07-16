@@ -119,4 +119,12 @@
     display: flex;
     align-items: stretch;
   }
+  /* `align-items: stretch` only stretches the cross axis (height); the
+     single child (ContextMenu's wrapper div, then the grid-based JobRow)
+     otherwise shrinks to its content width instead of filling the row,
+     which left columns misaligned with the fixed header at wide viewports. */
+  .row > :global(*) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 </style>

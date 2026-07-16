@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "dialog:default",
+    "mcp-bridge:default",
     "allow-backend-info",
     "allow-main-window-ready",
     "allow-app-update-status",
