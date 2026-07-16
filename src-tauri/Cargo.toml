@@ -10,6 +10,10 @@ description = "Ravyn desktop shell: setup and main application windows"
 name = "ravyn_desktop"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+mcp-automation = ["dep:tauri-plugin-mcp-bridge"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -26,7 +30,7 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 # Debug-only automation bridge used by the tauri-mcp test tooling.
-tauri-plugin-mcp-bridge = "0.12"
+tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"

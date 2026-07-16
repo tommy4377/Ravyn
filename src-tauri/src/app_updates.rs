@@ -1259,6 +1259,18 @@ fn build_installer_helper_script(
     transaction: &PendingUpdateTransaction,
     parent_pid: u32,
 ) -> String {
+    build_installer_helper_script_with_timeout(
+        transaction,
+        parent_pid,
+        READINESS_TIMEOUT_SECS,
+    )
+}
+
+fn build_installer_helper_script_with_timeout(
+    transaction: &PendingUpdateTransaction,
+    parent_pid: u32,
+    readiness_timeout_secs: u64,
+) -> String {
     use std::fmt::Write as _;
 
     let shortcuts = transaction
@@ -1305,7 +1317,7 @@ fn build_installer_helper_script(
         powershell_string(&transaction.to_version)
     )
     .unwrap();
-    writeln!(&mut script, "$timeoutSeconds={READINESS_TIMEOUT_SECS};").unwrap();
+    writeln!(&mut script, "$timeoutSeconds={readiness_timeout_secs};").unwrap();
     writeln!(
         &mut script,
         "$regUninstallKey={};",
@@ -1696,7 +1708,36 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_helper_script_for_parser_validation() {
-        let script = build_installer_helper_script(&sample_transaction(), 42);
-        std::fs::write(std::env::temp_dir().join("ravyn-helper-script.ps1"), script).unwrap();
+        let output = std::env::temp_dir().join("ravyn-helper-script.ps1");
+        let script = if let Some(root) = std::env::var_os("RAVYN_HELPER_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let install_dir = root.join("install");
+            let transaction = PendingUpdateTransaction {
+                schema: UPDATE_TRANSACTION_SCHEMA,
+                token: "lifecycle-test".into(),
+                from_version: std::env::var("RAVYN_HELPER_FROM_VERSION")
+                    .unwrap_or_else(|_| "0.2.0".into()),
+                to_version: std::env::var("RAVYN_HELPER_TO_VERSION")
+                    .unwrap_or_else(|_| "0.3.0".into()),
+                install_dir: install_dir.clone(),
+                installed_exe: install_dir.join("Ravyn.exe"),
+                backup_dir: root.join("backup"),
+                shortcuts_backup_dir: root.join("shortcuts"),
+                registry_uninstall_backup: root.join("uninstall.reg"),
+                registry_run_backup: root.join("run.reg"),
+                shortcuts: Vec::new(),
+                journal_path: root.join("journal.txt"),
+                installer_path: root.join("update.exe"),
+                readiness_marker: root.join("ready.marker"),
+                pending_state_path: root.join("pending.json"),
+                transaction_path: root.join("transaction.json"),
+                result_path: root.join("result.json"),
+                created_at_unix_ms: 1,
+            };
+            build_installer_helper_script_with_timeout(&transaction, i32::MAX as u32, 3)
+        } else {
+            build_installer_helper_script(&sample_transaction(), 42)
+        };
+        std::fs::write(output, script).unwrap();
     }
 }

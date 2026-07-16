@@ -56,16 +56,23 @@ pub struct EngineArtifact {
     pub target: String,
     pub url: String,
     /// SHA-256 of the downloaded artifact exactly as served by `url` (the
-    /// archive itself when [`Self::archive_member`] is set).
+    /// archive or installer itself when an installation strategy is set).
     pub sha256: String,
-    /// Size of the downloaded artifact exactly as served by `url`.
+    /// Exact artifact size. A value of zero is allowed only when
+    /// `max_size_bytes` supplies a signed upper bound for a publisher that
+    /// does not expose an exact byte count.
     pub size_bytes: u64,
+    /// Signed upper bound used only when `size_bytes` is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size_bytes: Option<u64>,
+    /// Safe relative path of the executable inside the managed version
+    /// directory. Direct and ZIP-member artifacts normally use a basename.
     pub filename: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// When set, the downloaded artifact is a ZIP archive and this is the
-    /// forward-slash-separated path of the executable to extract from it as
-    /// `filename`. When unset, the downloaded artifact *is* the executable.
+    /// forward-slash-separated path of the executable to extract as
+    /// `filename`.
     #[serde(default)]
     pub archive_member: Option<String>,
     /// SHA-256 of the extracted [`Self::archive_member`] content. Required
@@ -74,11 +81,33 @@ pub struct EngineArtifact {
     /// executable.
     #[serde(default)]
     pub member_sha256: Option<String>,
+    /// Optional package installation strategy. Package artifacts are verified
+    /// before the fixed, non-shelling strategy is executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer: Option<EngineInstaller>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineInstaller {
+    pub kind: EngineInstallerKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineInstallerKind {
+    /// Extract a Windows Installer package with `msiexec /a` into the managed
+    /// version directory without registering a machine-wide installation.
+    MsiAdministrative,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ActiveEngine {
     version: String,
+    /// Physical installation directory. Older metadata omitted this field and
+    /// used `version` as the directory name, which remains the compatibility
+    /// fallback during upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory: Option<String>,
     filename: String,
     sha256: String,
 }
@@ -103,13 +132,20 @@ pub enum EngineInstallStage {
 impl ActiveEngine {
     fn validate(&self) -> Result<()> {
         validate_token(&self.version, "version")?;
-        validate_filename(&self.filename)?;
+        if let Some(directory) = &self.directory {
+            validate_token(directory, "installation directory")?;
+        }
+        validate_relative_path(&self.filename, "activation path")?;
         if self.sha256.len() != 64 || !self.sha256.bytes().all(|value| value.is_ascii_hexdigit()) {
             return Err(RavynError::Invalid(
                 "managed engine activation checksum is invalid".into(),
             ));
         }
         Ok(())
+    }
+
+    fn directory_name(&self) -> &str {
+        self.directory.as_deref().unwrap_or(&self.version)
     }
 }
 
@@ -256,11 +292,25 @@ impl EngineArtifact {
         validate_token(&self.engine, "engine")?;
         validate_token(&self.version, "version")?;
         validate_token(&self.target, "target")?;
-        validate_filename(&self.filename)?;
-        if self.size_bytes == 0 || self.size_bytes > MAX_ENGINE_BYTES {
+        validate_relative_path(&self.filename, "filename")?;
+        if self.size_bytes > MAX_ENGINE_BYTES {
             return Err(RavynError::Invalid(format!(
-                "managed engine size must be between 1 and {MAX_ENGINE_BYTES} bytes"
+                "managed engine size may not exceed {MAX_ENGINE_BYTES} bytes"
             )));
+        }
+        match (self.size_bytes, self.max_size_bytes) {
+            (0, Some(limit)) if (1..=MAX_ENGINE_BYTES).contains(&limit) => {}
+            (0, _) => {
+                return Err(RavynError::Invalid(
+                    "managed engine artifacts without an exact size require a bounded max_size_bytes".into(),
+                ));
+            }
+            (_, None) => {}
+            (_, Some(_)) => {
+                return Err(RavynError::Invalid(
+                    "managed engine max_size_bytes is only valid when size_bytes is zero".into(),
+                ));
+            }
         }
         if self.sha256.len() != 64 || !self.sha256.bytes().all(|value| value.is_ascii_hexdigit()) {
             return Err(RavynError::Invalid(
@@ -321,12 +371,37 @@ impl EngineArtifact {
                 "managed engine member_sha256 requires archive_member to be set".into(),
             ));
         }
+        if self.installer.is_some() && self.archive_member.is_some() {
+            return Err(RavynError::Invalid(
+                "managed engine installer and archive_member strategies are mutually exclusive".into(),
+            ));
+        }
+        if matches!(
+            self.installer.as_ref().map(|installer| installer.kind),
+            Some(EngineInstallerKind::MsiAdministrative)
+        ) && (!url.path().to_ascii_lowercase().ends_with(".msi")
+            || !self.target.to_ascii_lowercase().contains("windows"))
+        {
+            return Err(RavynError::Invalid(
+                "MSI administrative extraction requires a Windows target and an .msi artifact URL".into(),
+            ));
+        }
         Ok(())
     }
 
-    /// The checksum that verifies the *installed executable*: `member_sha256`
-    /// for an extracted archive member, or `sha256` when the downloaded
-    /// artifact is the executable itself.
+    fn exact_size(&self) -> Option<u64> {
+        (self.size_bytes != 0).then_some(self.size_bytes)
+    }
+
+    fn download_limit(&self) -> u64 {
+        self.exact_size()
+            .or(self.max_size_bytes)
+            .unwrap_or(MAX_ENGINE_BYTES)
+    }
+
+    /// The checksum that verifies the installed executable for direct and ZIP
+    /// artifacts. Installer strategies compute the activation checksum from
+    /// the executable produced inside the private candidate directory.
     fn activation_sha256(&self) -> &str {
         self.member_sha256.as_deref().unwrap_or(&self.sha256)
     }
@@ -350,14 +425,22 @@ impl EngineManager {
         bytes: &[u8],
     ) -> Result<PathBuf> {
         artifact.validate()?;
-        if bytes.len() as u64 != artifact.size_bytes {
+        if let Some(expected) = artifact.exact_size() {
+            if bytes.len() as u64 != expected {
+                return Err(RavynError::provisioning(
+                    ProvisioningErrorCode::DownloadInterrupted,
+                    format!(
+                        "managed engine size mismatch: expected {expected}, received {}",
+                        bytes.len()
+                    ),
+                )
+                .with_component(&artifact.engine)
+                .with_expected_version(&artifact.version));
+            }
+        } else if bytes.len() as u64 > artifact.download_limit() {
             return Err(RavynError::provisioning(
                 ProvisioningErrorCode::DownloadInterrupted,
-                format!(
-                    "managed engine size mismatch: expected {}, received {}",
-                    artifact.size_bytes,
-                    bytes.len()
-                ),
+                "managed engine artifact exceeded its signed size limit",
             )
             .with_component(&artifact.engine)
             .with_expected_version(&artifact.version));
@@ -372,46 +455,46 @@ impl EngineManager {
             .with_expected_version(&artifact.version));
         }
 
-        let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
-        tokio::fs::create_dir_all(&version_dir).await?;
-        let destination = version_dir.join(&artifact.filename);
-        let temporary = version_dir.join(format!(".{}.download", artifact.filename));
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)
-            .await?;
-        file.write_all(bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        if let Some(member) = &artifact.archive_member {
-            let member_bytes =
-                extract_archive_member(&temporary, member, artifact.activation_sha256()).await?;
-            let extracted = version_dir.join(format!(".{}.extract", artifact.filename));
-            let mut extracted_file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
+        let (directory_name, version_dir, temporary, destination) =
+            self.prepare_candidate(artifact).await?;
+        let cancellation = CancellationToken::new();
+        let install_result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create_new(true)
                 .write(true)
-                .open(&extracted)
+                .open(&temporary)
                 .await?;
-            extracted_file.write_all(&member_bytes).await?;
-            extracted_file.sync_all().await?;
-            drop(extracted_file);
-            set_executable(&extracted).await?;
-            atomic_replace(&extracted, &destination).await?;
-            tokio::fs::remove_file(&temporary).await?;
-        } else {
-            set_executable(&temporary).await?;
-            atomic_replace(&temporary, &destination).await?;
+            file.write_all(bytes).await?;
+            file.sync_all().await?;
+            drop(file);
+            materialize_verified_artifact(
+                artifact,
+                &temporary,
+                &destination,
+                &version_dir,
+                &cancellation,
+            )
+            .await
         }
+        .await;
+        let activation_sha256 = match install_result {
+            Ok(checksum) => checksum,
+            Err(error) => {
+                cleanup_candidate(&temporary, &version_dir).await;
+                return Err(error);
+            }
+        };
 
         let active = ActiveEngine {
             version: artifact.version.clone(),
+            directory: Some(directory_name),
             filename: artifact.filename.clone(),
-            sha256: artifact.activation_sha256().to_ascii_lowercase(),
+            sha256: activation_sha256,
         };
-        self.write_active(&artifact.engine, &active).await?;
+        if let Err(error) = self.write_active(&artifact.engine, &active).await {
+            cleanup_candidate(&temporary, &version_dir).await;
+            return Err(error);
+        }
         Ok(destination)
     }
 
@@ -427,23 +510,18 @@ impl EngineManager {
         if let Some(report) = stage {
             report(EngineInstallStage::Downloading);
         }
-        let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
-        tokio::fs::create_dir_all(&version_dir).await?;
-        let temporary = version_dir.join(format!(".{}.download", artifact.filename));
-        let destination = version_dir.join(&artifact.filename);
-        match tokio::fs::remove_file(&temporary).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        let (directory_name, version_dir, temporary, destination) =
+            self.prepare_candidate(artifact).await?;
         let mut current = url::Url::parse(&artifact.url)?;
         let mut visited = std::collections::BTreeSet::new();
         let mut redirects = 0_u8;
         let response = loop {
             if !visited.insert(current.as_str().to_owned()) {
+                cleanup_candidate(&temporary, &version_dir).await;
                 return Err(RavynError::Protocol("engine download redirect loop".into()));
             }
             if current.scheme() != "https" {
+                cleanup_candidate(&temporary, &version_dir).await;
                 return Err(RavynError::Invalid(
                     "managed engine redirects must remain on HTTPS".into(),
                 ));
@@ -461,7 +539,10 @@ impl EngineManager {
             }
             let client = builder.build()?;
             let response = tokio::select! {
-                _ = cancellation.cancelled() => return Err(RavynError::Cancelled),
+                _ = cancellation.cancelled() => {
+                    cleanup_candidate(&temporary, &version_dir).await;
+                    return Err(RavynError::Cancelled);
+                },
                 response = client.get(current.clone()).send() => response?,
             };
             if !response.status().is_redirection() {
@@ -477,30 +558,41 @@ impl EngineManager {
             current = current.join(location)?;
             redirects = redirects.saturating_add(1);
             if redirects > 5 {
+                cleanup_candidate(&temporary, &version_dir).await;
                 return Err(RavynError::Protocol(
                     "engine download exceeded the redirect limit".into(),
                 ));
             }
         };
         if response.status() != StatusCode::OK {
+            cleanup_candidate(&temporary, &version_dir).await;
             return Err(RavynError::Protocol(format!(
                 "engine download returned {}",
                 response.status()
             )));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length != artifact.size_bytes)
-        {
+        let content_length = response.content_length();
+        if let Some(expected) = artifact.exact_size() {
+            if content_length.is_some_and(|length| length != expected) {
+                cleanup_candidate(&temporary, &version_dir).await;
+                return Err(RavynError::Protocol(
+                    "engine download Content-Length does not match its manifest".into(),
+                ));
+            }
+        } else if content_length.is_some_and(|length| length > artifact.download_limit()) {
+            cleanup_candidate(&temporary, &version_dir).await;
             return Err(RavynError::Protocol(
-                "engine download Content-Length does not match its manifest".into(),
+                "engine download Content-Length exceeds its signed size limit".into(),
             ));
         }
+        let progress_total = artifact
+            .exact_size()
+            .or(content_length)
+            .unwrap_or_else(|| artifact.download_limit());
 
-        let download_result: Result<()> = async {
+        let install_result: Result<String> = async {
             let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .write(true)
                 .open(&temporary)
                 .await?;
@@ -513,15 +605,15 @@ impl EngineManager {
             } {
                 let chunk = chunk?;
                 received = received.saturating_add(chunk.len() as u64);
-                if received > artifact.size_bytes || received > MAX_ENGINE_BYTES {
+                if received > artifact.download_limit() || received > MAX_ENGINE_BYTES {
                     return Err(RavynError::Protocol(
-                        "engine download exceeded its declared size".into(),
+                        "engine download exceeded its signed size limit".into(),
                     ));
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk).await?;
                 if let Some(report) = progress {
-                    report(received, artifact.size_bytes);
+                    report(received, progress_total);
                 }
             }
             file.sync_all().await?;
@@ -529,18 +621,19 @@ impl EngineManager {
             if let Some(report) = stage {
                 report(EngineInstallStage::Verifying);
             }
-            let actual = hex::encode(hasher.finalize());
-            if received != artifact.size_bytes {
-                return Err(RavynError::provisioning(
-                    ProvisioningErrorCode::DownloadInterrupted,
-                    format!(
-                        "engine download ended after {received} of {} expected bytes",
-                        artifact.size_bytes
-                    ),
-                )
-                .with_component(&artifact.engine)
-                .with_expected_version(&artifact.version));
+            if let Some(expected) = artifact.exact_size() {
+                if received != expected {
+                    return Err(RavynError::provisioning(
+                        ProvisioningErrorCode::DownloadInterrupted,
+                        format!(
+                            "engine download ended after {received} of {expected} expected bytes"
+                        ),
+                    )
+                    .with_component(&artifact.engine)
+                    .with_expected_version(&artifact.version));
+                }
             }
+            let actual = hex::encode(hasher.finalize());
             if !actual.eq_ignore_ascii_case(&artifact.sha256) {
                 return Err(RavynError::provisioning(
                     ProvisioningErrorCode::ChecksumMismatch,
@@ -555,64 +648,56 @@ impl EngineManager {
             if cancellation.is_cancelled() {
                 return Err(RavynError::Cancelled);
             }
-            if let Some(member) = &artifact.archive_member {
-                let member_bytes =
-                    extract_archive_member(&temporary, member, artifact.activation_sha256())
-                        .await?;
-                let extracted = version_dir.join(format!(".{}.extract", artifact.filename));
-                let mut extracted_file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&extracted)
-                    .await?;
-                extracted_file.write_all(&member_bytes).await?;
-                extracted_file.sync_all().await?;
-                drop(extracted_file);
-                set_executable(&extracted).await?;
-                if cancellation.is_cancelled() {
-                    let _ = tokio::fs::remove_file(&extracted).await;
-                    return Err(RavynError::Cancelled);
-                }
-                atomic_replace(&extracted, &destination).await?;
-                tokio::fs::remove_file(&temporary).await?;
-            } else {
-                set_executable(&temporary).await?;
-                if cancellation.is_cancelled() {
-                    return Err(RavynError::Cancelled);
-                }
-                atomic_replace(&temporary, &destination).await?;
-            }
-            Ok(())
+            materialize_verified_artifact(
+                artifact,
+                &temporary,
+                &destination,
+                &version_dir,
+                cancellation,
+            )
+            .await
         }
         .await;
-        if let Err(error) = download_result {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(error);
-        }
-        if cancellation.is_cancelled() {
-            // Keep an already-active version intact when a forced reinstall
-            // races with cancellation; otherwise this newly activated-but-not-
-            // published file is safe to discard.
-            if self
-                .active_path(&artifact.engine)
-                .await?
-                .is_none_or(|active| active != destination)
-            {
-                let _ = tokio::fs::remove_file(&destination).await;
+        let activation_sha256 = match install_result {
+            Ok(checksum) => checksum,
+            Err(error) => {
+                cleanup_candidate(&temporary, &version_dir).await;
+                return Err(error);
             }
+        };
+        if cancellation.is_cancelled() {
+            cleanup_candidate(&temporary, &version_dir).await;
             return Err(RavynError::Cancelled);
         }
-        self.write_active(
-            &artifact.engine,
-            &ActiveEngine {
-                version: artifact.version.clone(),
-                filename: artifact.filename.clone(),
-                sha256: artifact.activation_sha256().to_ascii_lowercase(),
-            },
-        )
-        .await?;
+        let active = ActiveEngine {
+            version: artifact.version.clone(),
+            directory: Some(directory_name),
+            filename: artifact.filename.clone(),
+            sha256: activation_sha256,
+        };
+        if let Err(error) = self.write_active(&artifact.engine, &active).await {
+            cleanup_candidate(&temporary, &version_dir).await;
+            return Err(error);
+        }
         Ok(destination)
+    }
+
+    async fn prepare_candidate(
+        &self,
+        artifact: &EngineArtifact,
+    ) -> Result<(String, PathBuf, PathBuf, PathBuf)> {
+        let engine_dir = self.root.join(&artifact.engine);
+        tokio::fs::create_dir_all(&engine_dir).await?;
+        let directory_name = format!(
+            "{}-{}",
+            artifact.version,
+            uuid::Uuid::new_v4().simple()
+        );
+        validate_token(&directory_name, "installation directory")?;
+        let version_dir = engine_dir.join(&directory_name);
+        let destination = version_dir.join(&artifact.filename);
+        let temporary = engine_dir.join(format!(".{directory_name}.download"));
+        Ok((directory_name, version_dir, temporary, destination))
     }
 
     /// Return checksum-verified metadata for the active engine version.
@@ -628,7 +713,7 @@ impl EngineManager {
         let executable = self
             .root
             .join(engine)
-            .join(&active.version)
+            .join(active.directory_name())
             .join(&active.filename);
         if !tokio::fs::try_exists(&executable).await? {
             return Err(RavynError::Unavailable(format!(
@@ -686,7 +771,7 @@ impl EngineManager {
         let executable = self
             .root
             .join(engine)
-            .join(&previous.version)
+            .join(previous.directory_name())
             .join(&previous.filename);
         let actual = hash_file(&executable).await?;
         if !actual.eq_ignore_ascii_case(&previous.sha256) {
@@ -730,8 +815,8 @@ impl EngineManager {
         write_metadata_atomic(&temporary, &destination, active).await
     }
 
-    /// Removes every versioned directory for `engine` except the active
-    /// version and the single previous version kept for rollback/diagnostics,
+    /// Removes every installation directory for `engine` except the active
+    /// candidate and the single previous candidate kept for rollback/diagnostics,
     /// and deletes any stale `.download` partial-download temp files left
     /// behind by an interrupted or failed install (including inside the
     /// versions that are kept).
@@ -749,7 +834,7 @@ impl EngineManager {
             if let Ok(bytes) = read_engine_metadata(&path).await {
                 if let Ok(entry) = serde_json::from_slice::<ActiveEngine>(&bytes) {
                     if entry.validate().is_ok() {
-                        kept.insert(entry.version);
+                        kept.insert(entry.directory_name().to_owned());
                     }
                 }
             }
@@ -758,12 +843,25 @@ impl EngineManager {
         let mut entries = tokio::fs::read_dir(&engine_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if !entry.file_type().await?.is_dir() {
-                continue;
-            }
+            let file_type = entry.file_type().await?;
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+            if file_type.is_file() {
+                if name.starts_with('.')
+                    && (name.ends_with(".download") || name.ends_with(".extract"))
+                {
+                    if let Ok(metadata) = entry.metadata().await {
+                        report.bytes_freed = report.bytes_freed.saturating_add(metadata.len());
+                    }
+                    tokio::fs::remove_file(&path).await?;
+                    report.removed_temp_files.push(name.to_owned());
+                }
+                continue;
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
             if kept.contains(name) {
                 let freed =
                     remove_download_temp_files(&path, &mut report.removed_temp_files).await?;
@@ -777,6 +875,157 @@ impl EngineManager {
             report.removed_versions.push(name.to_owned());
         }
         Ok(report)
+    }
+}
+
+async fn materialize_verified_artifact(
+    artifact: &EngineArtifact,
+    temporary: &Path,
+    destination: &Path,
+    version_dir: &Path,
+    cancellation: &CancellationToken,
+) -> Result<String> {
+    tokio::fs::create_dir(version_dir).await?;
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if let Some(installer) = &artifact.installer {
+        match installer.kind {
+            EngineInstallerKind::MsiAdministrative => {
+                install_msi_administrative(temporary, version_dir, cancellation).await?;
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Err(RavynError::Cancelled);
+        }
+        let metadata = tokio::fs::metadata(destination).await.map_err(|error| {
+            RavynError::provisioning(
+                ProvisioningErrorCode::AppInstallFailed,
+                format!(
+                    "managed engine installer did not produce {}: {error}",
+                    artifact.filename
+                ),
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version)
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_ENGINE_BYTES {
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::AppInstallFailed,
+                "managed engine installer produced an invalid executable",
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version));
+        }
+        set_executable(destination).await?;
+        tokio::fs::remove_file(temporary).await?;
+        return hash_file(destination).await;
+    }
+
+    if let Some(member) = &artifact.archive_member {
+        let member_bytes =
+            extract_archive_member(temporary, member, artifact.activation_sha256()).await?;
+        let extracted = temporary.with_extension("extract");
+        if let Some(parent) = extracted.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut extracted_file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&extracted)
+            .await?;
+        extracted_file.write_all(&member_bytes).await?;
+        extracted_file.sync_all().await?;
+        drop(extracted_file);
+        set_executable(&extracted).await?;
+        if cancellation.is_cancelled() {
+            let _ = tokio::fs::remove_file(&extracted).await;
+            return Err(RavynError::Cancelled);
+        }
+        atomic_replace(&extracted, destination).await?;
+        tokio::fs::remove_file(temporary).await?;
+        return Ok(artifact.activation_sha256().to_ascii_lowercase());
+    }
+
+    set_executable(temporary).await?;
+    if cancellation.is_cancelled() {
+        return Err(RavynError::Cancelled);
+    }
+    atomic_replace(temporary, destination).await?;
+    Ok(artifact.activation_sha256().to_ascii_lowercase())
+}
+
+#[cfg(windows)]
+async fn install_msi_administrative(
+    installer: &Path,
+    target: &Path,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    let target_argument = format!("TARGETDIR={}", target.display());
+    let mut child = Command::new("msiexec.exe")
+        .arg("/a")
+        .arg(installer)
+        .arg("/qn")
+        .arg("/norestart")
+        .arg(target_argument)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            RavynError::provisioning(
+                ProvisioningErrorCode::AppInstallFailed,
+                format!("failed to start Windows Installer: {error}"),
+            )
+        })?;
+    let status = tokio::select! {
+        _ = cancellation.cancelled() => {
+            let _ = child.kill().await;
+            return Err(RavynError::Cancelled);
+        }
+        status = child.wait() => status?,
+    };
+    if !status.success() {
+        return Err(RavynError::provisioning(
+            ProvisioningErrorCode::AppInstallFailed,
+            format!("Windows Installer administrative extraction exited with {status}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn install_msi_administrative(
+    _installer: &Path,
+    _target: &Path,
+    _cancellation: &CancellationToken,
+) -> Result<()> {
+    Err(RavynError::provisioning(
+        ProvisioningErrorCode::PlatformUnsupported,
+        "MSI administrative extraction is available only on Windows",
+    ))
+}
+
+async fn cleanup_candidate(temporary: &Path, version_dir: &Path) {
+    for path in [temporary.to_path_buf(), temporary.with_extension("extract")] {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                %error,
+                path = %path.display(),
+                "failed to clean managed-engine temporary file"
+            ),
+        }
+    }
+    match tokio::fs::remove_dir_all(version_dir).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            %error,
+            path = %version_dir.display(),
+            "failed to clean managed-engine candidate directory"
+        ),
     }
 }
 
@@ -984,15 +1233,21 @@ fn validate_token(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_filename(value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 128
-        || Path::new(value).file_name().and_then(|name| name.to_str()) != Some(value)
-        || value.contains(['/', '\\'])
+fn validate_relative_path(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 512 || value.contains('\\') {
+        return Err(RavynError::Invalid(format!(
+            "managed engine {label} must be a safe relative forward-slash path"
+        )));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || value.split('/').any(|segment| {
+            segment.is_empty() || segment == "." || segment == ".." || segment.contains(':')
+        })
     {
-        return Err(RavynError::Invalid(
-            "managed engine filename must be a single safe path component".into(),
-        ));
+        return Err(RavynError::Invalid(format!(
+            "managed engine {label} must be a safe relative forward-slash path"
+        )));
     }
     Ok(())
 }
@@ -1024,10 +1279,12 @@ mod tests {
             url: "https://downloads.example.test/ffmpeg.exe".into(),
             sha256: hex::encode(Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
+            max_size_bytes: None,
             filename: "ffmpeg.exe".into(),
             capabilities: vec!["transcode".into()],
             archive_member: None,
             member_sha256: None,
+            installer: None,
         }
     }
 
@@ -1163,6 +1420,25 @@ mod tests {
         valid_member.archive_member = Some("bin/ffmpeg.exe".into());
         valid_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
         assert!(valid_member.validate().is_ok());
+
+        let mut bounded_installer = artifact(bytes);
+        bounded_installer.engine = "7zip".into();
+        bounded_installer.url = "https://downloads.example.test/7zip.msi".into();
+        bounded_installer.size_bytes = 0;
+        bounded_installer.max_size_bytes = Some(4 * 1024 * 1024);
+        bounded_installer.filename = "Files/7-Zip/7z.exe".into();
+        bounded_installer.installer = Some(EngineInstaller {
+            kind: EngineInstallerKind::MsiAdministrative,
+        });
+        assert!(bounded_installer.validate().is_ok());
+
+        let mut unbounded_installer = bounded_installer.clone();
+        unbounded_installer.max_size_bytes = None;
+        assert!(unbounded_installer.validate().is_err());
+
+        let mut non_windows_installer = bounded_installer.clone();
+        non_windows_installer.target = "x86_64-unknown-linux-gnu".into();
+        assert!(non_windows_installer.validate().is_err());
     }
 
     #[tokio::test]
@@ -1187,52 +1463,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_version_repair_preserves_a_distinct_rollback_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(temp.path());
+        let first = manager
+            .install_verified(&artifact(b"first"), b"first")
+            .await
+            .unwrap();
+        let repaired = manager
+            .install_verified(&artifact(b"second"), b"second")
+            .await
+            .unwrap();
+
+        assert_ne!(first.parent(), repaired.parent());
+        assert_eq!(manager.rollback("ffmpeg").await.unwrap(), first);
+        assert_eq!(tokio::fs::read(first).await.unwrap(), b"first");
+    }
+
+    #[tokio::test]
     async fn cleanup_keeps_only_the_active_and_previous_versions() {
         let temp = tempfile::tempdir().unwrap();
         let manager = EngineManager::new(temp.path());
-        manager
+        let v1_path = manager
             .install_verified(&artifact(b"v1"), b"v1")
             .await
             .unwrap();
         let mut v2 = artifact(b"v2");
         v2.version = "7.2.0".into();
-        manager.install_verified(&v2, b"v2").await.unwrap();
+        let v2_path = manager.install_verified(&v2, b"v2").await.unwrap();
         let mut v3 = artifact(b"v3");
         v3.version = "7.3.0".into();
-        manager.install_verified(&v3, b"v3").await.unwrap();
+        let v3_path = manager.install_verified(&v3, b"v3").await.unwrap();
 
         // A stray partial-download temp file left in the still-active
-        // version's directory, as if a prior download attempt crashed.
+        // installation directory, as if a prior operation crashed.
         let stale_temp = temp
             .path()
             .join("engines")
             .join("ffmpeg")
-            .join("7.3.0")
-            .join(".ffmpeg.exe.download");
+            .join(".interrupted.download");
         tokio::fs::write(&stale_temp, b"partial").await.unwrap();
 
+        let removed_name = v1_path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let report = manager.cleanup_versions("ffmpeg").await.unwrap();
-        assert_eq!(report.removed_versions, vec!["7.1.0".to_owned()]);
+        assert_eq!(report.removed_versions, vec![removed_name]);
         assert_eq!(
             report.removed_temp_files,
-            vec![".ffmpeg.exe.download".to_owned()]
+            vec![".interrupted.download".to_owned()]
         );
         assert!(!tokio::fs::try_exists(&stale_temp).await.unwrap());
-        assert!(
-            !tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.1.0"))
-                .await
-                .unwrap()
-        );
-        assert!(
-            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.2.0"))
-                .await
-                .unwrap()
-        );
-        assert!(
-            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.3.0"))
-                .await
-                .unwrap()
-        );
+        assert!(!tokio::fs::try_exists(v1_path.parent().unwrap()).await.unwrap());
+        assert!(tokio::fs::try_exists(v2_path.parent().unwrap()).await.unwrap());
+        assert!(tokio::fs::try_exists(v3_path.parent().unwrap()).await.unwrap());
     }
 
     #[tokio::test]

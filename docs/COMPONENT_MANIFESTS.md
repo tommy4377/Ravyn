@@ -1,87 +1,79 @@
 # Signed component manifest delivery
 
-Ravyn can provision yt-dlp, FFmpeg, rqbit, and any future managed engines from
-a signed release catalogue. The application never trusts an artifact URL,
-version, checksum, or archive member until the complete manifest has passed
+Ravyn provisions yt-dlp, FFmpeg, rqbit, and 7-Zip from a signed release
+catalogue. Artifact URLs, versions, checksums, extraction members, installer
+strategies, and size bounds are trusted only after the complete manifest passes
 Ed25519 verification.
 
 ## Runtime configuration
 
 Release builds configure:
 
-- `RAVYN_COMPONENT_MANIFEST_ENDPOINT`: HTTPS URL of the signed JSON document.
-- `RAVYN_ENGINE_MANIFEST_PUBLIC_KEY`: 32-byte Ed25519 public key encoded as 64
-  hexadecimal characters and embedded at compile time.
-- `RAVYN_COMPONENT_MANIFEST_CHANNEL`: currently `stable`.
-- `RAVYN_COMPONENT_MANIFEST_REFRESH_SECS`: refresh cadence, 300–604800 seconds.
-- `RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS`: bounded last-known-good grace,
-  at most 30 days; the default is seven days.
+- `RAVYN_COMPONENT_MANIFEST_ENDPOINT` — signed manifest HTTPS URL;
+- `RAVYN_ENGINE_MANIFEST_PUBLIC_KEY` — 32-byte Ed25519 public key as hex;
+- `RAVYN_COMPONENT_MANIFEST_CHANNEL` — normally `stable`;
+- `RAVYN_COMPONENT_MANIFEST_REFRESH_SECS` — 300 to 604800 seconds;
+- `RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS` — bounded to 30 days.
 
-An operator may place a separately signed override at
-`RAVYN_DATA_DIR/engines/manifest.json`. An invalid override is treated as a
-configuration error. Remote cache corruption, expiry beyond the grace period,
-or network failure instead falls back to the catalogue compiled into Ravyn.
+A separately signed operator override may be stored at
+`RAVYN_DATA_DIR/engines/manifest.json`. Invalid overrides fail closed. Remote
+network/cache failures may use the still-valid last-known-good cache or the
+catalogue embedded in the application.
 
-## Remote manifest contract
+## Artifact contract
 
-Remote manifests use schema version 1 and include all of the following fields:
+A direct executable declares an exact `size_bytes`, artifact `sha256`, and safe
+relative `filename`. A ZIP artifact additionally declares `archive_member` and
+`member_sha256`; only that member is extracted and activated.
+
+A publisher that does not expose a stable exact byte count may set
+`size_bytes` to zero only when a signed `max_size_bytes` upper bound is present.
+The stream is always rejected when it exceeds that bound and its final SHA-256
+must still match exactly.
+
+Package strategies are explicit and mutually exclusive with ZIP extraction.
+The currently supported strategy is:
 
 ```json
 {
-  "schema_version": 1,
-  "channel": "stable",
-  "manifest_version": 1783987200,
-  "generated_at": "2026-07-14T00:00:00Z",
-  "expires_at": "2026-08-13T00:00:00Z",
-  "artifacts": []
+  "filename": "Files/7-Zip/7z.exe",
+  "installer": { "kind": "msi_administrative" }
 }
 ```
 
-`manifest_version` is monotonic. `generated_at` may not be unreasonably far in
-the future, `expires_at` must follow it, and the validity window may not exceed
-90 days. Ravyn rejects:
+On Windows, Ravyn invokes `msiexec.exe` directly with `/a`, `/qn`, and
+`/norestart`, targeting a unique private candidate directory. No shell command
+is constructed and no machine-wide package is registered. The produced
+executable is required to exist, remain within the candidate directory, pass
+the component health check, and receive a locally computed activation hash.
 
-- invalid signatures;
-- channel mismatches;
-- lower manifest versions;
-- older generation timestamps;
-- reuse of a manifest version with different signed content;
-- HTTPS redirects to a non-HTTPS URL;
-- metadata bodies larger than 1 MiB;
-- caches older than the configured last-known-good grace period.
+Every install uses a unique physical directory even when repairing the same
+semantic version. Activation metadata is atomic and retains the previous
+candidate, so a failed health check can roll back without the new files having
+overwritten the old version.
 
-## Cache behavior
+## Remote manifest contract
 
-The verified cache is stored below:
+Remote schema-1 manifests add a monotonic `manifest_version`, `generated_at`,
+and `expires_at`. Ravyn rejects invalid signatures, wrong channels, replayed or
+downgraded revisions, conflicting reuse of a revision, excessive validity
+windows, unsafe paths, oversized metadata, and redirects that leave HTTPS.
+
+Verified cache state is stored below:
 
 `RAVYN_DATA_DIR/engines/manifests/<channel>/`
 
-It contains the signed manifest and bounded metadata with ETag, Last-Modified,
-payload digest, release sequence, validity timestamps, and check/update times.
-Conditional GET requests use ETag and Last-Modified. Cache activation updates
-the manifest and metadata as one rollback-capable transaction, so a failed
-write does not destroy the previous known-good catalogue.
+Conditional requests use ETag and Last-Modified. Cache activation is an atomic,
+rollback-capable metadata transaction.
 
-The backend exposes:
+## Release validation
 
-- `GET /v1/components/manifest` — current source, freshness, revision, and
-  refresh error.
-- `POST /v1/components/manifest` — force a new verified refresh.
+`tools/validate_component_manifest.py` validates catalogue metadata on every
+backend CI run. Nightly and tagged Windows workflows additionally download all
+selected artifacts, enforce signed size/hash data, inspect ZIP members, execute
+fixed installer provisioning strategies, and verify that the expected Windows
+executable is produced.
 
-The Components screen consumes both routes and never reports a refresh as
-successful until signature, freshness, replay, and atomic-cache checks pass.
-
-## Release workflow
-
-Tagged Windows releases require these GitHub secrets/variables:
-
-- secret `RAVYN_ENGINE_MANIFEST_PRIVATE_KEY`;
-- variable `RAVYN_ENGINE_MANIFEST_PUBLIC_KEY`.
-
-The release workflow adds a monotonic release sequence and 30-day validity
-window to `assets/engines/stable.json`, signs it with `manifest-tool`, verifies
-the result with the public key, publishes `ravyn-component-manifest.json`, and
-embeds the matching endpoint and public key into the desktop build.
-
-The private key must never be committed, printed, bundled, or copied into a
-runtime environment.
+Tagged releases add freshness metadata, sign the catalogue, verify the
+signature with the matching public key, and publish the immutable signed file.
+The private signing key is never committed or bundled.

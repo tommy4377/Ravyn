@@ -1,5 +1,14 @@
+<script module lang="ts">
+  let tooltipSequence = 0;
+
+  function nextTooltipId(): string {
+    tooltipSequence += 1;
+    return `ravyn-tooltip-${tooltipSequence}`;
+  }
+</script>
+
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { onDestroy, type Snippet } from "svelte";
 
   let {
     text,
@@ -15,6 +24,8 @@
 
   let visible = $state(false);
   let showTimer: ReturnType<typeof setTimeout> | null = null;
+  let describedElement: HTMLElement | null = null;
+  const tooltipId = nextTooltipId();
 
   function show(): void {
     if (disabled) return;
@@ -28,6 +39,39 @@
     showTimer = null;
     visible = false;
   }
+
+  function addDescription(element: HTMLElement): void {
+    const ids = new Set((element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean));
+    ids.add(tooltipId);
+    element.setAttribute("aria-describedby", [...ids].join(" "));
+    describedElement = element;
+  }
+
+  function removeDescription(): void {
+    if (!describedElement) return;
+    const ids = (describedElement.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter((id) => id && id !== tooltipId);
+    if (ids.length > 0) describedElement.setAttribute("aria-describedby", ids.join(" "));
+    else describedElement.removeAttribute("aria-describedby");
+    describedElement = null;
+  }
+
+  function onFocusIn(event: FocusEvent): void {
+    if (disabled || !(event.target instanceof HTMLElement)) return;
+    addDescription(event.target);
+    visible = true;
+  }
+
+  function onFocusOut(): void {
+    removeDescription();
+    hide();
+  }
+
+  onDestroy(() => {
+    if (showTimer) clearTimeout(showTimer);
+    removeDescription();
+  });
 </script>
 
 <span
@@ -35,12 +79,12 @@
   role="presentation"
   onmouseenter={show}
   onmouseleave={hide}
-  onfocusin={() => { if (!disabled) visible = true; }}
-  onfocusout={hide}
+  onfocusin={onFocusIn}
+  onfocusout={onFocusOut}
 >
   {@render children()}
   {#if visible && text && !disabled}
-    <span class="tooltip {placement}" role="tooltip">{text}</span>
+    <span id={tooltipId} class="tooltip {placement}" role="tooltip">{text}</span>
   {/if}
 </span>
 

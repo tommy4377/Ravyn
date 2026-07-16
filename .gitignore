@@ -29,3 +29,8 @@ desktop.ini
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Local validation caches
+/node_modules/
+**/__pycache__/
+.pytest_cache/

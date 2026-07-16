@@ -43,6 +43,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Audit source contracts
         run: python tools/static_source_audit.py
+      - name: Validate component catalogue
+        run: |
+          python -m unittest tools/test_validate_component_manifest.py
+          python tools/validate_component_manifest.py
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
       - name: Validate frontend

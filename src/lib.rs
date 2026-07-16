@@ -632,10 +632,12 @@ mod managed_engine_tests {
             url: "https://example.test/yt-dlp".into(),
             sha256: hex::encode(Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
+            max_size_bytes: None,
             filename: "yt-dlp.exe".into(),
             capabilities: Vec::new(),
             archive_member: None,
             member_sha256: None,
+            installer: None,
         };
         let installed = services::engines::EngineManager::new(temporary.path())
             .install_verified(&artifact, bytes)

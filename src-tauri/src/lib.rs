@@ -432,8 +432,8 @@ pub fn run() {
     let (handle, _receiver) = backend::start();
 
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
-    // MCP automation bridge for development-time testing only, loopback-bound.
-    #[cfg(debug_assertions)]
+    // MCP automation bridge for explicitly enabled development-time testing only.
+    #[cfg(all(debug_assertions, feature = "mcp-automation"))]
     {
         builder = builder.plugin(
             tauri_plugin_mcp_bridge::Builder::new()

@@ -1,8 +1,10 @@
 import { describeError } from "../api/errors";
 import type {
+  BandwidthSchedule,
   CleanupPolicies,
   CleanupReport,
   DownloadPreset,
+  LibraryCategory,
   PersistentSettings,
   PersistentSettingsPatch,
   SecretReference,
@@ -26,6 +28,12 @@ import { connection } from "../stores/connection.svelte";
 import { navigation } from "../stores/navigation.svelte";
 import { notifications } from "../stores/notifications.svelte";
 import { appUpdateDescription, appUpdateHeading } from "./appUpdatePresentation";
+import {
+  createBandwidthWindowDraft,
+  draftsToSchedule,
+  scheduleToDrafts,
+  type BandwidthWindowDraft,
+} from "./bandwidthSchedule";
 
 export type SettingsCategory =
   | "general"
@@ -43,6 +51,11 @@ export interface ManagementDeleteTarget {
   kind: "preset" | "profile";
   id: string;
   name: string;
+}
+
+export interface CategoryOverrideDraft {
+  extension: string;
+  category: LibraryCategory;
 }
 
 export class SettingsController {
@@ -119,11 +132,29 @@ export class SettingsController {
   autoOrganize = $state(true);
   maxActive = $state("3");
   maxSegments = $state("8");
+  segmentThresholdMib = $state("16");
   maxConnections = $state("8");
   speedLimitMbps = $state("0");
+  bandwidthTimezone = $state("UTC");
+  bandwidthWindows = $state<BandwidthWindowDraft[]>([]);
   maxRetries = $state("4");
+  hostCircuitThreshold = $state("4");
+  hostCircuitCooldownSecs = $state("60");
   connectTimeout = $state("15");
   readTimeout = $state("60");
+  maxTorrentMib = $state("16");
+  maxHtmlMib = $state("8");
+  maxSniffResources = $state("5000");
+  maxBatchUrls = $state("10000");
+  mediaProbeTimeoutSecs = $state("120");
+  mediaProbeMaxMib = $state("32");
+  rqbitTimeoutSecs = $state("120");
+  rqbitStatsTimeoutSecs = $state("10");
+  torrentRefreshConcurrency = $state("8");
+  apiRequestTimeoutSecs = $state("120");
+  apiMaxConcurrentRequests = $state("128");
+  apiRateLimitPerMinute = $state("1200");
+  apiRateLimitBurst = $state("200");
   autoProvision = $state(true);
   ytdlpPath = $state("yt-dlp");
   ffmpegPath = $state("ffmpeg");
@@ -131,6 +162,14 @@ export class SettingsController {
   rqbitApi = $state("http://127.0.0.1:3030");
   rqbitCredentialsSecretId = $state("");
   sevenZipPath = $state("7z");
+  imageConverterPath = $state("magick");
+  avifQuality = $state("65");
+  cookieDir = $state("");
+  maxExtractMib = $state("10240");
+  maxExtractFiles = $state("100000");
+  maxExtractDepth = $state("64");
+  maxExtractRatio = $state("1000");
+  categoryOverrides = $state<CategoryOverrideDraft[]>([]);
 
   get isDirty(): boolean {
     return !!this.values && JSON.stringify(this.buildPatch()) !== this.baselinePatch;
@@ -159,11 +198,29 @@ export class SettingsController {
     this.autoOrganize = settings.library_auto_organize;
     this.maxActive = String(settings.max_active);
     this.maxSegments = String(settings.max_segments);
+    this.segmentThresholdMib = String(settings.segment_threshold_mib);
     this.maxConnections = String(settings.max_connections_per_host);
     this.speedLimitMbps = String(Math.round(settings.global_speed_limit_bps / 125000 * 10) / 10);
+    this.bandwidthTimezone = settings.bandwidth_schedule.timezone;
+    this.bandwidthWindows = scheduleToDrafts(settings.bandwidth_schedule);
     this.maxRetries = String(settings.max_retries);
+    this.hostCircuitThreshold = String(settings.host_circuit_threshold);
+    this.hostCircuitCooldownSecs = String(settings.host_circuit_cooldown_secs);
     this.connectTimeout = String(settings.connect_timeout_secs);
     this.readTimeout = String(settings.read_timeout_secs);
+    this.maxTorrentMib = String(settings.max_torrent_mib);
+    this.maxHtmlMib = String(settings.max_html_mib);
+    this.maxSniffResources = String(settings.max_sniff_resources);
+    this.maxBatchUrls = String(settings.max_batch_urls);
+    this.mediaProbeTimeoutSecs = String(settings.media_probe_timeout_secs);
+    this.mediaProbeMaxMib = String(settings.media_probe_max_mib);
+    this.rqbitTimeoutSecs = String(settings.rqbit_timeout_secs);
+    this.rqbitStatsTimeoutSecs = String(settings.rqbit_stats_timeout_secs);
+    this.torrentRefreshConcurrency = String(settings.torrent_refresh_concurrency);
+    this.apiRequestTimeoutSecs = String(settings.api_request_timeout_secs);
+    this.apiMaxConcurrentRequests = String(settings.api_max_concurrent_requests);
+    this.apiRateLimitPerMinute = String(settings.api_rate_limit_per_minute);
+    this.apiRateLimitBurst = String(settings.api_rate_limit_burst);
     this.autoProvision = settings.auto_provision;
     this.ytdlpPath = settings.ytdlp;
     this.ffmpegPath = settings.ffmpeg;
@@ -171,6 +228,16 @@ export class SettingsController {
     this.rqbitApi = settings.rqbit_api;
     this.rqbitCredentialsSecretId = settings.rqbit_credentials_secret_id ?? "";
     this.sevenZipPath = settings.seven_zip;
+    this.imageConverterPath = settings.image_converter;
+    this.avifQuality = String(settings.avif_quality);
+    this.cookieDir = settings.cookie_dir ?? "";
+    this.maxExtractMib = String(settings.max_extract_mib);
+    this.maxExtractFiles = String(settings.max_extract_files);
+    this.maxExtractDepth = String(settings.max_extract_depth);
+    this.maxExtractRatio = String(settings.max_extract_ratio);
+    this.categoryOverrides = Object.entries(settings.library_category_overrides)
+      .map(([extension, category]) => ({ extension, category }))
+      .sort((a, b) => a.extension.localeCompare(b.extension));
     this.baselinePatch = JSON.stringify(this.buildPatch());
   }
 
@@ -231,6 +298,47 @@ export class SettingsController {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
   }
 
+  currentBandwidthSchedule(): BandwidthSchedule {
+    return draftsToSchedule(
+      this.bandwidthTimezone,
+      this.bandwidthWindows,
+      this.values?.bandwidth_schedule ?? { timezone: "UTC", windows: [] },
+    );
+  }
+
+  addBandwidthWindow(): void {
+    if (this.bandwidthWindows.length >= 32) return;
+    this.bandwidthWindows = [...this.bandwidthWindows, createBandwidthWindowDraft()];
+  }
+
+  removeBandwidthWindow(index: number): void {
+    this.bandwidthWindows = this.bandwidthWindows.filter((_, current) => current !== index);
+  }
+
+  toggleBandwidthWeekday(index: number, weekday: number): void {
+    const window = this.bandwidthWindows[index];
+    if (!window) return;
+    const weekdays = window.weekdays.includes(weekday)
+      ? window.weekdays.filter((value) => value !== weekday)
+      : [...window.weekdays, weekday].sort((a, b) => a - b);
+    this.bandwidthWindows[index] = { ...window, weekdays };
+  }
+
+  addCategoryOverride(): void {
+    this.categoryOverrides = [...this.categoryOverrides, { extension: "", category: "downloads" }];
+  }
+
+  removeCategoryOverride(index: number): void {
+    this.categoryOverrides = this.categoryOverrides.filter((_, current) => current !== index);
+  }
+
+  categoryOverrideMap(): Record<string, LibraryCategory> {
+    const entries = this.categoryOverrides
+      .map((override) => [override.extension.trim().replace(/^\.+/, "").toLowerCase(), override.category] as const)
+      .filter(([extension]) => extension.length > 0);
+    return Object.fromEntries(entries);
+  }
+
   buildPatch(): PersistentSettingsPatch {
     return {
       download_dir: this.downloadDir.trim() || null,
@@ -238,17 +346,42 @@ export class SettingsController {
       library_auto_organize: this.autoOrganize,
       max_active: Math.max(1, Math.round(this.positive(this.maxActive, this.values?.max_active ?? 3))),
       max_segments: Math.max(1, Math.round(this.positive(this.maxSegments, this.values?.max_segments ?? 8))),
+      segment_threshold_mib: Math.max(1, Math.round(this.positive(this.segmentThresholdMib, this.values?.segment_threshold_mib ?? 16))),
       max_connections_per_host: Math.max(1, Math.round(this.positive(this.maxConnections, this.values?.max_connections_per_host ?? 8))),
       global_speed_limit_bps: Math.round(this.positive(this.speedLimitMbps, 0) * 125000),
+      bandwidth_schedule: this.currentBandwidthSchedule(),
       max_retries: Math.round(this.positive(this.maxRetries, this.values?.max_retries ?? 4)),
+      host_circuit_threshold: Math.max(1, Math.round(this.positive(this.hostCircuitThreshold, this.values?.host_circuit_threshold ?? 4))),
+      host_circuit_cooldown_secs: Math.max(1, Math.round(this.positive(this.hostCircuitCooldownSecs, this.values?.host_circuit_cooldown_secs ?? 60))),
       connect_timeout_secs: Math.max(1, Math.round(this.positive(this.connectTimeout, this.values?.connect_timeout_secs ?? 15))),
       read_timeout_secs: Math.max(1, Math.round(this.positive(this.readTimeout, this.values?.read_timeout_secs ?? 60))),
+      max_torrent_mib: Math.max(1, Math.round(this.positive(this.maxTorrentMib, this.values?.max_torrent_mib ?? 16))),
+      max_html_mib: Math.max(1, Math.round(this.positive(this.maxHtmlMib, this.values?.max_html_mib ?? 8))),
+      max_sniff_resources: Math.max(1, Math.round(this.positive(this.maxSniffResources, this.values?.max_sniff_resources ?? 5000))),
+      max_batch_urls: Math.max(1, Math.round(this.positive(this.maxBatchUrls, this.values?.max_batch_urls ?? 10000))),
+      media_probe_timeout_secs: Math.max(1, Math.round(this.positive(this.mediaProbeTimeoutSecs, this.values?.media_probe_timeout_secs ?? 120))),
+      media_probe_max_mib: Math.max(1, Math.round(this.positive(this.mediaProbeMaxMib, this.values?.media_probe_max_mib ?? 32))),
+      rqbit_timeout_secs: Math.max(1, Math.round(this.positive(this.rqbitTimeoutSecs, this.values?.rqbit_timeout_secs ?? 120))),
+      rqbit_stats_timeout_secs: Math.max(1, Math.round(this.positive(this.rqbitStatsTimeoutSecs, this.values?.rqbit_stats_timeout_secs ?? 10))),
+      torrent_refresh_concurrency: Math.max(1, Math.round(this.positive(this.torrentRefreshConcurrency, this.values?.torrent_refresh_concurrency ?? 8))),
+      api_request_timeout_secs: Math.max(1, Math.round(this.positive(this.apiRequestTimeoutSecs, this.values?.api_request_timeout_secs ?? 120))),
+      api_max_concurrent_requests: Math.max(1, Math.round(this.positive(this.apiMaxConcurrentRequests, this.values?.api_max_concurrent_requests ?? 128))),
+      api_rate_limit_per_minute: Math.max(1, Math.round(this.positive(this.apiRateLimitPerMinute, this.values?.api_rate_limit_per_minute ?? 1200))),
+      api_rate_limit_burst: Math.max(1, Math.round(this.positive(this.apiRateLimitBurst, this.values?.api_rate_limit_burst ?? 200))),
       ytdlp: this.ytdlpPath.trim() || "yt-dlp",
       ffmpeg: this.ffmpegPath.trim() || "ffmpeg",
       rqbit: this.rqbitPath.trim() || "rqbit",
       rqbit_api: this.rqbitApi.trim() || "http://127.0.0.1:3030",
       rqbit_credentials_secret_id: this.rqbitCredentialsSecretId || null,
       seven_zip: this.sevenZipPath.trim() || "7z",
+      image_converter: this.imageConverterPath.trim() || "magick",
+      avif_quality: Math.min(100, Math.max(1, Math.round(this.positive(this.avifQuality, this.values?.avif_quality ?? 65)))),
+      cookie_dir: this.cookieDir.trim() || null,
+      max_extract_mib: Math.max(1, Math.round(this.positive(this.maxExtractMib, this.values?.max_extract_mib ?? 10240))),
+      max_extract_files: Math.max(1, Math.round(this.positive(this.maxExtractFiles, this.values?.max_extract_files ?? 100000))),
+      max_extract_depth: Math.max(1, Math.round(this.positive(this.maxExtractDepth, this.values?.max_extract_depth ?? 64))),
+      max_extract_ratio: Math.max(1, Math.round(this.positive(this.maxExtractRatio, this.values?.max_extract_ratio ?? 1000))),
+      library_category_overrides: this.categoryOverrideMap(),
       auto_provision: this.autoProvision,
     };
   }

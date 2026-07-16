@@ -21,6 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate component catalogue and artifacts
+        shell: pwsh
+        run: |
+          python -m unittest tools/test_validate_component_manifest.py
+          python tools/validate_component_manifest.py --provision --target x86_64-pc-windows-msvc
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

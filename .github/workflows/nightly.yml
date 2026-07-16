@@ -38,3 +38,15 @@ jobs:
       - run: cargo build --locked --release
       - if: matrix.os == 'ubuntu-latest'
         run: cargo bench --locked --bench transfer_policy -- --noplot
+  component-artifacts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Revalidate managed component artifacts
+        shell: pwsh
+        run: |
+          python -m unittest tools/test_validate_component_manifest.py
+          python tools/validate_component_manifest.py --provision --target x86_64-pc-windows-msvc

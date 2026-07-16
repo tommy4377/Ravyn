@@ -1048,6 +1048,18 @@ export interface ScheduleRecord {
   updated_at: string;
 }
 
+export interface BandwidthWindow {
+  weekdays: number[];
+  start_minute: number;
+  end_minute: number;
+  limit_bps: number;
+}
+
+export interface BandwidthSchedule {
+  timezone: string;
+  windows: BandwidthWindow[];
+}
+
 export interface PersistentSettings {
   download_dir: string | null;
   library_root: string | null;
@@ -1058,7 +1070,7 @@ export interface PersistentSettings {
   segment_threshold_mib: number;
   max_connections_per_host: number;
   global_speed_limit_bps: number;
-  bandwidth_schedule: unknown;
+  bandwidth_schedule: BandwidthSchedule;
   ytdlp: string;
   ffmpeg: string;
   rqbit: string;

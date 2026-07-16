@@ -42,6 +42,24 @@
       ],
       "archive_member": "ffmpeg-n7.1.5-2-g998de74adf-win64-gpl-7.1/bin/ffmpeg.exe",
       "member_sha256": "1ee823c2158a01a19f090f921d2ae6c23735efebf26f88732db5c170481ccc7b"
+    },
+    {
+      "engine": "7zip",
+      "version": "26.02",
+      "target": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi",
+      "sha256": "db407a4f6d4999e5c7bc00ce8a882be94717b56e7fa68140fe3f12605d91643e",
+      "size_bytes": 0,
+      "max_size_bytes": 3145728,
+      "filename": "Files/7-Zip/7z.exe",
+      "capabilities": [
+        "archive_extract",
+        "archive_list",
+        "archive_test"
+      ],
+      "installer": {
+        "kind": "msi_administrative"
+      }
     }
   ]
 }
