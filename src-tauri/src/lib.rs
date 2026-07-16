@@ -464,21 +464,17 @@ fn open_compact_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> R
         existing.show().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "compact",
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("Ravyn downloads")
-    .inner_size(380.0, 190.0)
-    .min_inner_size(320.0, 150.0)
-    .maximizable(false)
-    .minimizable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .build()
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    tauri::WebviewWindowBuilder::new(&app, "compact", tauri::WebviewUrl::App("index.html".into()))
+        .title("Ravyn downloads")
+        .inner_size(380.0, 190.0)
+        .min_inner_size(320.0, 150.0)
+        .maximizable(false)
+        .minimizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Brings the main window to the foreground; used by the compact window.

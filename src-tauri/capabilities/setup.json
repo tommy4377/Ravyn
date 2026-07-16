@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "dialog:default",
+    "mcp-bridge:default",
     "allow-backend-info",
     "allow-desktop-appearance",
     "allow-setup-installation-info",

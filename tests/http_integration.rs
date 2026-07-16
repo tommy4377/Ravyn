@@ -31,6 +31,8 @@ struct ResourceState {
     etag: Arc<RwLock<String>>,
     reject_non_probe_ranges: Arc<AtomicBool>,
     range_requests: Arc<AtomicUsize>,
+    /// When non-zero, data responses close after this many body bytes.
+    fail_after_bytes: Arc<AtomicUsize>,
     delay_per_chunk: Duration,
 }
 
@@ -49,6 +51,7 @@ impl TestServer {
             etag: Arc::new(RwLock::new(etag.to_owned())),
             reject_non_probe_ranges: Arc::new(AtomicBool::new(false)),
             range_requests: Arc::new(AtomicUsize::new(0)),
+            fail_after_bytes: Arc::new(AtomicUsize::new(0)),
             delay_per_chunk,
         };
         let server_state = state.clone();
@@ -91,6 +94,12 @@ impl TestServer {
 
     fn range_requests(&self) -> usize {
         self.state.range_requests.load(Ordering::Acquire)
+    }
+
+    /// Zero disables the failure; any other value truncates data responses
+    /// after that many body bytes (probe-sized requests stay unaffected).
+    fn fail_after_bytes(&self, bytes: usize) {
+        self.state.fail_after_bytes.store(bytes, Ordering::Release);
     }
 }
 
@@ -162,8 +171,23 @@ async fn handle_connection(mut stream: TcpStream, state: ResourceState) -> std::
     response.push_str("\r\n");
     stream.write_all(response.as_bytes()).await?;
     if method != "HEAD" && !body.is_empty() {
+        // Probe-sized requests (single byte) are never truncated so the
+        // planner still sees a healthy resource.
+        let fail_after = state.fail_after_bytes.load(Ordering::Acquire);
+        let truncate = fail_after != 0 && length > 1;
+        let mut written = 0_usize;
         for chunk in body[start..=end].chunks(64 * 1024) {
-            stream.write_all(chunk).await?;
+            let allowed = if truncate {
+                fail_after.saturating_sub(written).min(chunk.len())
+            } else {
+                chunk.len()
+            };
+            stream.write_all(&chunk[..allowed]).await?;
+            written += allowed;
+            if truncate && written >= fail_after {
+                // Close mid-body: the client sees a short read.
+                return Ok(());
+            }
             if !state.delay_per_chunk.is_zero() {
                 tokio::time::sleep(state.delay_per_chunk).await;
             }
@@ -790,6 +814,72 @@ async fn resumed_single_stream_rebuilds_incremental_checksum_state() {
             .await
             .unwrap(),
         body
+    );
+    app.manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retrying_a_failed_job_resets_progress_and_creates_no_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let body = vec![0x7c; 4 * 1024 * 1024];
+    // The per-chunk delay keeps each attempt alive across the 250ms durable
+    // progress flush so the failure leaves persisted partial progress behind,
+    // mirroring a real dropped transfer.
+    let server = TestServer::start(body.clone(), "\"retry-v1\"", Duration::from_millis(30)).await;
+    server.fail_after_bytes(768 * 1024);
+    let app = Ravyn::bootstrap(test_config(temp.path())).await.unwrap();
+    app.manager.clone().start_workers().await.unwrap();
+
+    let mut request = create_request(server.url(), None);
+    request.options.overwrite = false;
+    let job = app.manager.create(request).await.unwrap();
+    let failed = wait_for_status(&app, job.id, &[JobStatus::Failed], Duration::from_secs(60)).await;
+    assert!(
+        failed.downloaded_bytes > 0,
+        "test setup: the failure should leave partial progress behind"
+    );
+
+    server.fail_after_bytes(0);
+    app.manager.retry(job.id).await.unwrap();
+    let retried = app.repository.get_job(job.id).await.unwrap();
+    assert_eq!(retried.status, JobStatus::Queued);
+    assert_eq!(
+        retried.downloaded_bytes, 0,
+        "retry must clear stale progress so the UI does not show a frozen bar"
+    );
+
+    let completed = wait_for_status(
+        &app,
+        job.id,
+        &[JobStatus::Completed, JobStatus::Failed],
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(
+        completed.status,
+        JobStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    let jobs = app.repository.list_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 1, "retry must reuse the job, not duplicate it");
+    let outputs = app.repository.list_job_outputs(job.id).await.unwrap();
+    assert_eq!(
+        outputs.len(),
+        1,
+        "retry must not register duplicate outputs"
+    );
+    assert_eq!(
+        tokio::fs::read(temp.path().join("downloads/payload.bin"))
+            .await
+            .unwrap(),
+        body
+    );
+    assert!(
+        !tokio::fs::try_exists(temp.path().join("downloads/payload (1).bin"))
+            .await
+            .unwrap(),
+        "retry must not auto-rename against its own previous attempt"
     );
     app.manager.shutdown().await;
 }

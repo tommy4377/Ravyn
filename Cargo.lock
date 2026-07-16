@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "ravyn"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3937,7 +3937,7 @@ dependencies = [
 
 [[package]]
 name = "ravyn-desktop"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "clap",
  "futures-util",

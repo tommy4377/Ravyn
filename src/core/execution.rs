@@ -363,18 +363,28 @@ impl JobManager {
                         produced_bytes = produced_bytes.saturating_add(metadata.len());
                     }
                     let is_primary = primary_path.as_deref() == Some(path.as_path());
-                    let artifact = self
+                    // A retried job can complete again over artifacts that an
+                    // earlier attempt already registered; reuse those rows so
+                    // history does not accumulate duplicate outputs.
+                    let existing = self
                         .repository
-                        .register_output_with_metadata(
-                            &job,
-                            &path,
-                            produced_artifact
-                                .output_type
-                                .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
-                            output_source(job.kind),
-                            produced_artifact.metadata,
-                        )
+                        .find_job_output_by_path(job.id, &path)
                         .await?;
+                    let artifact = if let Some(existing) = existing {
+                        existing
+                    } else {
+                        self.repository
+                            .register_output_with_metadata(
+                                &job,
+                                &path,
+                                produced_artifact
+                                    .output_type
+                                    .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
+                                output_source(job.kind),
+                                produced_artifact.metadata,
+                            )
+                            .await?
+                    };
                     if is_primary {
                         if let Some(value) = verified_primary_checksum.as_deref() {
                             self.repository
