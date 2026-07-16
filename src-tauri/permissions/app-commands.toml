@@ -87,3 +87,8 @@ commands.allow = ["remove_browser_integration"]
 identifier = "allow-take-browser-action"
 description = "Allows the main Ravyn window to consume a pending action delivered by the Firefox extension."
 commands.allow = ["take_browser_action"]
+
+[[permission]]
+identifier = "allow-prompt-torrent-default-app"
+description = "Allows the main Ravyn window to register Ravyn as a torrent handler and open Windows Default Apps for an explicit user choice."
+commands.allow = ["prompt_torrent_default_app"]

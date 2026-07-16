@@ -154,7 +154,6 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
     result
 }
 
-
 #[derive(Serialize)]
 struct DesktopReadyMarker<'a> {
     schema: u32,
@@ -190,14 +189,16 @@ fn write_desktop_ready_marker(info: &BackendInfo) {
             .ok_or_else(|| "the desktop readiness marker has no parent directory".to_owned())?;
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create the readiness marker directory: {error}"))?;
-        let bytes = serde_json::to_vec_pretty(&marker)
-            .map_err(|error| format!("failed to serialize the desktop readiness marker: {error}"))?;
+        let bytes = serde_json::to_vec_pretty(&marker).map_err(|error| {
+            format!("failed to serialize the desktop readiness marker: {error}")
+        })?;
         let temporary = path.with_extension("tmp");
         std::fs::write(&temporary, bytes)
             .map_err(|error| format!("failed to write the desktop readiness marker: {error}"))?;
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|error| format!("failed to replace the desktop readiness marker: {error}"))?;
+            std::fs::remove_file(&path).map_err(|error| {
+                format!("failed to replace the desktop readiness marker: {error}")
+            })?;
         }
         std::fs::rename(&temporary, &path)
             .map_err(|error| format!("failed to activate the desktop readiness marker: {error}"))?;
@@ -207,7 +208,6 @@ fn write_desktop_ready_marker(info: &BackendInfo) {
         tracing::warn!(%error, path = %path.display(), "failed to publish desktop readiness marker");
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -4,13 +4,13 @@ The Ravyn Firefox extension discovers downloadable page resources and delegates 
 
 ## Features
 
-- Safe interception modes: disabled, rules only, ask every time, or all compatible downloads.
+- New installations intercept compatible browser downloads immediately; Options can switch to disabled, rules only, or ask every time.
 - Pause-first handoff: Firefox downloads are cancelled only after Ravyn confirms that the job was persisted.
 - Context-menu actions for links, images, media, selections, and complete pages.
 - DOM, mutation, performance-entry, and optional network resource discovery.
 - Sidebar resource picker with type/domain/search filters, presets, tags, media options, subtitle options, and safe conversion presets.
 - Optional per-site session-cookie forwarding. Cookie values are read only when a download is submitted and are never stored by the extension.
-- Media overlays for non-protected HTML media.
+- Media overlays for non-protected HTML media, using the Ravyn application icon with an accessible download label.
 - Toolbar status, recent job summary, global pause/resume, and desktop navigation.
 - Memory-only resource caches, including private-window metadata.
 

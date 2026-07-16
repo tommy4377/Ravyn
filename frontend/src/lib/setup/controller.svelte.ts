@@ -56,6 +56,7 @@ const PROFILE_FEATURES: Record<Exclude<SetupProfile, "custom">, FeatureId[]> = {
     "standard_downloads",
     "video_extraction",
     "media_merging",
+    "torrent_support",
     "archive_extraction",
   ],
   full: [

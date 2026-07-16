@@ -32,7 +32,7 @@ The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `R
 
 ## Firefox extension
 
-The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. It supports rule-based or confirmed download interception, link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, media overlays, and a batch resource sidebar.
+The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. New installations intercept compatible downloads by default, with rule-based, confirmed, and disabled modes available in Options; it also supports link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, icon-only media overlays, and a batch resource sidebar.
 
 ```text
 cd extension
@@ -112,6 +112,8 @@ The generated document at `/openapi.json` is the authoritative contract.
 
 - `yt-dlp` for supported media sites.
 - `rqbit` for BitTorrent and magnet links.
+
+On Windows, **Settings > Browser integration > Torrent default app** registers Ravyn as a candidate for `.torrent` files and `magnet:` links, then opens Windows Default Apps so the user can make the final selection.
 - `ffmpeg` for audio/video conversion.
 - `7z` for archive extraction.
 

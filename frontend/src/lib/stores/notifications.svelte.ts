@@ -21,6 +21,7 @@ export interface AppNotification {
 
 const AUTO_DISMISS_MS = 6_000;
 const HISTORY_LIMIT = 100;
+const VISIBLE_LIMIT = 4;
 const HISTORY_STORAGE_KEY = "ravyn.notifications.history";
 const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -74,6 +75,10 @@ class NotificationsStore {
     const item: AppNotification = { ...notification, id, createdAt: Date.now(), read: false };
     this.visibleById.set(id, item);
     this.visibleOrder.push(id);
+    while (this.visibleOrder.length > VISIBLE_LIMIT) {
+      const oldestId = this.visibleOrder.shift();
+      if (oldestId) this.visibleById.delete(oldestId);
+    }
     this.historyById.set(id, item);
     this.historyOrder.push(id);
     this.trimHistory();

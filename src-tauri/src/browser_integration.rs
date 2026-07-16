@@ -97,7 +97,6 @@ fn restrict_action_file(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Handles explicit installer lifecycle commands without starting Tauri.
 pub fn try_handle_command_line() -> bool {
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -131,9 +130,9 @@ fn integration_command(arguments: &[std::ffi::OsString]) -> Option<bool> {
 }
 
 pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
-    let requested = arguments
-        .iter()
-        .any(|argument| argument == "--browser-action" || argument.starts_with("--browser-section="));
+    let requested = arguments.iter().any(|argument| {
+        argument == "--browser-action" || argument.starts_with("--browser-section=")
+    });
     if !requested {
         return None;
     }
@@ -148,7 +147,31 @@ pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
             .strip_prefix("--browser-source=")
             .and_then(sanitize_source_url)
     });
-    Some(BrowserAction { section, source_url })
+    Some(BrowserAction {
+        section,
+        source_url,
+    })
+}
+
+/// Parse a file or magnet URI delivered by the Windows association. Only a
+/// regular local `.torrent` file is accepted; this prevents arbitrary command
+/// line arguments from being surfaced as a download source.
+pub fn parse_torrent_association_action(arguments: &[String]) -> Option<BrowserAction> {
+    let source_url = arguments.iter().skip(1).find_map(|argument| {
+        if argument.to_ascii_lowercase().starts_with("magnet:") {
+            return Some(argument.clone());
+        }
+        let path = Path::new(argument);
+        (path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
+            && path.metadata().is_ok_and(|metadata| metadata.is_file()))
+        .then(|| path.display().to_string())
+    })?;
+    Some(BrowserAction {
+        section: Some("torrents".into()),
+        source_url: Some(source_url),
+    })
 }
 
 fn sanitize_section(value: &str) -> String {
@@ -194,7 +217,9 @@ pub fn status() -> BrowserIntegrationStatus {
             manifest_path: manifest.map(|path| path.display().to_string()),
             executable_path: executable.map(|path| path.display().to_string()),
             installed_mode,
-            error: Some("Firefox native messaging is unavailable on this platform or environment".into()),
+            error: Some(
+                "Firefox native messaging is unavailable on this platform or environment".into(),
+            ),
         },
     }
 }
@@ -215,9 +240,9 @@ pub fn register(executable: &Path) -> Result<(), String> {
     }
     let manifest = manifest_path()
         .ok_or_else(|| "cannot resolve the Firefox native-messaging manifest path".to_owned())?;
-    let parent = manifest
-        .parent()
-        .ok_or_else(|| "the Firefox native-messaging manifest has no parent directory".to_owned())?;
+    let parent = manifest.parent().ok_or_else(|| {
+        "the Firefox native-messaging manifest has no parent directory".to_owned()
+    })?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create the native-messaging directory: {error}"))?;
     let body = serde_json::json!({
@@ -251,7 +276,11 @@ pub fn unregister() -> Result<BrowserIntegrationStatus, String> {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("failed to remove the native-messaging manifest: {error}")),
+            Err(error) => {
+                return Err(format!(
+                    "failed to remove the native-messaging manifest: {error}"
+                ));
+            }
         }
     }
     Ok(status())
@@ -266,9 +295,11 @@ pub fn manifest_path() -> Option<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|path| path.join(".mozilla").join("native-messaging-hosts").join(HOST_MANIFEST_FILE))
+        std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join(".mozilla")
+                .join("native-messaging-hosts")
+                .join(HOST_MANIFEST_FILE)
+        })
     }
     #[cfg(target_os = "macos")]
     {
@@ -321,7 +352,9 @@ fn register_manifest_location(manifest: &Path) -> Result<(), String> {
     use winreg::enums::HKEY_CURRENT_USER;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key_path = format!(r"Software\Mozilla\NativeMessagingHosts\{HOST_NAME}");
-    let (key, _) = hkcu.create_subkey(key_path).map_err(|error| error.to_string())?;
+    let (key, _) = hkcu
+        .create_subkey(key_path)
+        .map_err(|error| error.to_string())?;
     key.set_value("", &manifest.display().to_string())
         .map_err(|error| error.to_string())
 }
@@ -376,10 +409,7 @@ mod tests {
     #[test]
     fn recognizes_installer_lifecycle_commands() {
         assert_eq!(
-            integration_command(&[
-                "Ravyn.exe".into(),
-                "--register-firefox-native-host".into(),
-            ]),
+            integration_command(&["Ravyn.exe".into(), "--register-firefox-native-host".into(),]),
             Some(true)
         );
         assert_eq!(
@@ -394,11 +424,8 @@ mod tests {
 
     #[test]
     fn browser_action_rejects_unknown_sections() {
-        let action = parse_browser_action(&[
-            "Ravyn".into(),
-            "--browser-section=unexpected".into(),
-        ])
-        .unwrap();
+        let action =
+            parse_browser_action(&["Ravyn".into(), "--browser-section=unexpected".into()]).unwrap();
         assert_eq!(action.section.as_deref(), Some("downloads"));
     }
 
@@ -410,6 +437,19 @@ mod tests {
             "--browser-source=https%3A%2F%2Fexample.com%2Fvideo".into(),
         ])
         .unwrap();
-        assert_eq!(action.source_url.as_deref(), Some("https://example.com/video"));
+        assert_eq!(
+            action.source_url.as_deref(),
+            Some("https://example.com/video")
+        );
+    }
+
+    #[test]
+    fn recognizes_magnet_association() {
+        let action = parse_torrent_association_action(&[
+            "Ravyn.exe".into(),
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+        ])
+        .unwrap();
+        assert_eq!(action.section.as_deref(), Some("torrents"));
     }
 }

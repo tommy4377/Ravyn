@@ -10,7 +10,8 @@ pub fn decode_framed_json(input: &[u8], maximum_bytes: usize) -> Result<Value, S
     if input.len() < 4 {
         return Err("native frame is missing its four-byte length prefix".into());
     }
-    let declared = u32::from_le_bytes(input[..4].try_into().expect("prefix length checked")) as usize;
+    let declared =
+        u32::from_le_bytes(input[..4].try_into().expect("prefix length checked")) as usize;
     if declared == 0 || declared > maximum_bytes {
         return Err(format!(
             "native message length must be between 1 and {maximum_bytes} bytes"
@@ -29,7 +30,8 @@ pub fn decode_json_body(body: &[u8], maximum_bytes: usize) -> Result<Value, Stri
             "native message length must be between 1 and {maximum_bytes} bytes"
         ));
     }
-    serde_json::from_slice(body).map_err(|error| format!("failed to decode the native message: {error}"))
+    serde_json::from_slice(body)
+        .map_err(|error| format!("failed to decode the native message: {error}"))
 }
 
 #[cfg(test)]

@@ -236,7 +236,10 @@ impl ComponentState {
 
     /// Whether the component can serve requests.
     pub fn is_operational(self) -> bool {
-        matches!(self, Self::Installed | Self::UpdateAvailable | Self::CustomPath)
+        matches!(
+            self,
+            Self::Installed | Self::UpdateAvailable | Self::CustomPath
+        )
     }
 
     /// Whether the component is actively being provisioned.
@@ -289,6 +292,7 @@ impl SetupProfile {
                 set.insert(FeatureId::StandardDownloads);
                 set.insert(FeatureId::VideoExtraction);
                 set.insert(FeatureId::MediaMerging);
+                set.insert(FeatureId::TorrentSupport);
                 set.insert(FeatureId::ArchiveExtraction);
                 set
             }
@@ -476,7 +480,8 @@ impl ProvisioningCancellation {
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const EMBEDDED_MANIFEST: &str = include_str!("../../assets/engines/stable.json");
-const ENGINE_MANIFEST_PUBLIC_KEY_HEX: Option<&str> = option_env!("RAVYN_ENGINE_MANIFEST_PUBLIC_KEY");
+const ENGINE_MANIFEST_PUBLIC_KEY_HEX: Option<&str> =
+    option_env!("RAVYN_ENGINE_MANIFEST_PUBLIC_KEY");
 
 /// Abstraction over manifest sources (built-in, local, remote, or hybrid).
 pub trait ManifestProvider: Send + Sync {
@@ -496,9 +501,8 @@ impl BuiltInManifestProvider {
     }
 
     pub fn embedded() -> Result<Self> {
-        let manifest = serde_json::from_str::<crate::services::engines::EngineManifest>(
-            EMBEDDED_MANIFEST,
-        )?;
+        let manifest =
+            serde_json::from_str::<crate::services::engines::EngineManifest>(EMBEDDED_MANIFEST)?;
         Self::new(manifest)
     }
 
@@ -558,7 +562,8 @@ impl ManifestProvider for FileManifestProvider {
             )
         })?;
         let bytes = std::fs::read(&self.path)?;
-        let signed: crate::services::engines::SignedEngineManifest = serde_json::from_slice(&bytes)?;
+        let signed: crate::services::engines::SignedEngineManifest =
+            serde_json::from_slice(&bytes)?;
         Ok(Some(signed.verify(&public_key)?.clone()))
     }
 
@@ -664,9 +669,7 @@ pub(crate) fn embedded_manifest_public_key() -> Result<Option<[u8; 32]>> {
         RavynError::Invalid("RAVYN_ENGINE_MANIFEST_PUBLIC_KEY must be hexadecimal".into())
     })?;
     let key: [u8; 32] = bytes.try_into().map_err(|_| {
-        RavynError::Invalid(
-            "RAVYN_ENGINE_MANIFEST_PUBLIC_KEY must contain exactly 32 bytes".into(),
-        )
+        RavynError::Invalid("RAVYN_ENGINE_MANIFEST_PUBLIC_KEY must contain exactly 32 bytes".into())
     })?;
     Ok(Some(key))
 }
@@ -1014,7 +1017,7 @@ impl ComponentManager {
             )
             .await?;
         let health = self
-            .health_check(component, config, &BTreeMap::new())
+            .installation_health_check(component, config, &BTreeMap::new())
             .await;
         if !health.healthy {
             let health_error = health
@@ -1066,7 +1069,10 @@ impl ComponentManager {
             .to_ascii_lowercase()
             .contains(&artifact.version.to_ascii_lowercase())
         {
-            let _ = self.engine_manager.deactivate(component.engine_name()).await;
+            let _ = self
+                .engine_manager
+                .deactivate(component.engine_name())
+                .await;
             return Err(RavynError::provisioning(
                 ProvisioningErrorCode::HealthCheckFailed,
                 format!(
@@ -1094,11 +1100,36 @@ impl ComponentManager {
         })
     }
 
+    /// Checks an already configured component, including rqbit's live API.
     pub async fn health_check(
         &self,
         component: ComponentId,
         configured: &crate::config::Config,
         records: &BTreeMap<ComponentId, PersistedComponent>,
+    ) -> ComponentHealth {
+        self.health_check_with_runtime(component, configured, records, true)
+            .await
+    }
+
+    /// Verifies an installed executable before a restart has applied its path
+    /// to the running backend. rqbit's HTTP API is intentionally excluded:
+    /// it is launched only after the fresh backend process starts.
+    async fn installation_health_check(
+        &self,
+        component: ComponentId,
+        configured: &crate::config::Config,
+        records: &BTreeMap<ComponentId, PersistedComponent>,
+    ) -> ComponentHealth {
+        self.health_check_with_runtime(component, configured, records, false)
+            .await
+    }
+
+    async fn health_check_with_runtime(
+        &self,
+        component: ComponentId,
+        configured: &crate::config::Config,
+        records: &BTreeMap<ComponentId, PersistedComponent>,
+        require_rqbit_api: bool,
     ) -> ComponentHealth {
         let Some(path) = self.effective_path(component, configured, records).await else {
             return ComponentHealth {
@@ -1130,13 +1161,8 @@ impl ComponentManager {
             stdout_bytes: 64 * 1024,
             stderr_bytes: 64 * 1024,
         };
-        match crate::services::process::run(
-            &mut command,
-            &limits,
-            None,
-            CancellationToken::new(),
-        )
-        .await
+        match crate::services::process::run(&mut command, &limits, None, CancellationToken::new())
+            .await
         {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1148,7 +1174,10 @@ impl ComponentManager {
                     .find(|line| !line.is_empty())
                     .map(ToOwned::to_owned);
                 let capability_error = match component {
-                    ComponentId::Rqbit => rqbit_api_health(configured).await.err(),
+                    ComponentId::Rqbit if require_rqbit_api => {
+                        rqbit_api_health(configured).await.err()
+                    }
+                    ComponentId::Rqbit => None,
                     ComponentId::Ffmpeg => ffmpeg_capability_check(&path).await.err(),
                     ComponentId::SevenZip => seven_zip_capability_check(&path).await.err(),
                     ComponentId::Ytdlp => ytdlp_capability_check(&path).await.err(),
@@ -1197,8 +1226,13 @@ impl ComponentManager {
         component: ComponentId,
         config: &crate::config::Config,
     ) -> Result<InstalledComponent> {
-        let path = self.engine_manager.rollback(component.engine_name()).await?;
-        let health = self.health_check(component, config, &BTreeMap::new()).await;
+        let path = self
+            .engine_manager
+            .rollback(component.engine_name())
+            .await?;
+        let health = self
+            .installation_health_check(component, config, &BTreeMap::new())
+            .await;
         if !health.healthy {
             let health_error = health
                 .message
@@ -1304,7 +1338,9 @@ async fn rqbit_api_health(config: &crate::config::Config) -> Result<()> {
 
     let mut request = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(config.rqbit_timeout_secs.min(10)))
+        .timeout(std::time::Duration::from_secs(
+            config.rqbit_timeout_secs.min(10),
+        ))
         .build()?
         .get(config.rqbit_api.trim_end_matches('/'));
     if let (Some(username), Some(password)) = (&config.rqbit_username, &config.rqbit_password) {
@@ -1340,10 +1376,16 @@ async fn rqbit_api_health(config: &crate::config::Config) -> Result<()> {
     let apis = root
         .get("apis")
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| RavynError::Unavailable("rqbit HTTP health response has no API map".into()))?;
+        .ok_or_else(|| {
+            RavynError::Unavailable("rqbit HTTP health response has no API map".into())
+        })?;
     let missing = REQUIRED_ENDPOINTS
         .iter()
-        .filter(|endpoint| !apis.keys().any(|actual| rqbit_endpoint_matches(actual, endpoint)))
+        .filter(|endpoint| {
+            !apis
+                .keys()
+                .any(|actual| rqbit_endpoint_matches(actual, endpoint))
+        })
         .copied()
         .collect::<Vec<_>>();
     if !missing.is_empty() {
@@ -1537,10 +1579,7 @@ async fn seven_zip_capability_check(path: &Path) -> Result<()> {
     }
 }
 
-fn component_config_path(
-    component: ComponentId,
-    config: &crate::config::Config,
-) -> &PathBuf {
+fn component_config_path(component: ComponentId, config: &crate::config::Config) -> &PathBuf {
     match component {
         ComponentId::Ytdlp => &config.ytdlp,
         ComponentId::Ffmpeg => &config.ffmpeg,
@@ -1695,7 +1734,10 @@ mod tests {
         let cd_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]);
         let cd_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]);
         assert_eq!(cd_offset as usize + cd_size as usize, bytes.len() - 22);
-        assert_eq!(&bytes[cd_offset as usize..cd_offset as usize + 4], &0x0201_4b50u32.to_le_bytes());
+        assert_eq!(
+            &bytes[cd_offset as usize..cd_offset as usize + 4],
+            &0x0201_4b50u32.to_le_bytes()
+        );
     }
 
     #[test]
@@ -1714,7 +1756,7 @@ mod tests {
         assert!(features.contains(&FeatureId::VideoExtraction));
         assert!(features.contains(&FeatureId::MediaMerging));
         assert!(features.contains(&FeatureId::ArchiveExtraction));
-        assert!(!features.contains(&FeatureId::TorrentSupport));
+        assert!(features.contains(&FeatureId::TorrentSupport));
     }
 
     #[test]
@@ -1837,7 +1879,10 @@ mod tests {
             registry.acquire(&cancellation),
         )
         .await;
-        assert!(unblocked.is_ok(), "releasing a permit must unblock a queued install");
+        assert!(
+            unblocked.is_ok(),
+            "releasing a permit must unblock a queued install"
+        );
         drop(second);
         drop(unblocked);
     }
@@ -1913,14 +1958,15 @@ mod tests {
         )
         .unwrap();
 
-        let provider = FileManifestProvider::new(
-            path.clone(),
-            Some(*signing_key.verifying_key().as_bytes()),
-        );
+        let provider =
+            FileManifestProvider::new(path.clone(), Some(*signing_key.verifying_key().as_bytes()));
         assert!(provider.load().unwrap().is_some());
 
-        std::fs::write(&path, br#"{"schema_version":1,"channel":"stable","artifacts":[]}"#)
-            .unwrap();
+        std::fs::write(
+            &path,
+            br#"{"schema_version":1,"channel":"stable","artifacts":[]}"#,
+        )
+        .unwrap();
         assert!(provider.load().is_err());
     }
 
@@ -1937,9 +1983,6 @@ mod tests {
             "GET /torrents/{id_or_infohash}/stats/v1",
             "GET /torrents/{id}/stats/v1"
         ));
-        assert!(!rqbit_endpoint_matches(
-            "GET /torrents",
-            "POST /torrents"
-        ));
+        assert!(!rqbit_endpoint_matches("GET /torrents", "POST /torrents"));
     }
 }

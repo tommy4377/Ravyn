@@ -28,6 +28,7 @@
   let manifestRefreshing = $state(false);
   let error = $state<string | null>(null);
   let busy = $state<Partial<Record<ComponentId, string>>>({});
+  let restartRequired = $state(false);
   let removeTarget = $state<ComponentStatus | null>(null);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
@@ -135,16 +136,23 @@
     try {
       if (operation === "install") {
         await connection.client.installComponent(component.component);
-        notifications.success(`${names[component.component]} installation started`);
+        const completed = await waitForComponent(component.component);
+        if (completed.state !== "installed" && completed.state !== "custom_path") throw new Error(completed.error_message ?? `${names[component.component]} installation did not complete.`);
+        restartRequired = true;
+        notifications.success(`${names[component.component]} installed`, "Restart Ravyn before using the new version.");
       } else if (operation === "update") {
         await connection.client.updateComponent(component.component);
-        notifications.success(`${names[component.component]} update started`);
+        const completed = await waitForComponent(component.component);
+        if (completed.state !== "installed" && completed.state !== "custom_path") throw new Error(completed.error_message ?? `${names[component.component]} update did not complete.`);
+        restartRequired = true;
+        notifications.success(`${names[component.component]} updated`, "Restart Ravyn before using the new version.");
       } else if (operation === "verify") {
         const health = await connection.client.verifyComponent(component.component);
         if (health.healthy) notifications.success(`${names[component.component]} verified`, health.version ?? undefined);
         else notifications.error(`${names[component.component]} verification failed`, health.message ?? undefined);
       } else if (operation === "rollback") {
         await connection.client.rollbackComponent(component.component);
+        restartRequired = true;
         notifications.success(`${names[component.component]} rolled back`);
       } else {
         const report = await connection.client.cleanupComponent(component.component);
@@ -158,6 +166,19 @@
       delete next[component.component];
       busy = next;
     }
+  }
+
+  async function waitForComponent(component: ComponentId): Promise<ComponentStatus> {
+    if (!connection.client) throw new Error("Ravyn is not connected.");
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const next = await connection.client.getComponents();
+      overview = next;
+      const status = next.components.find((item) => item.component === component);
+      if (!status) throw new Error("The component disappeared while it was being updated.");
+      if (!["queued", "downloading", "verifying", "installing"].includes(status.state)) return status;
+    }
+    throw new Error("The component installation timed out. Check its status and retry if needed.");
   }
 
   async function removeComponent(): Promise<void> {
@@ -200,6 +221,12 @@
     {:else if !overview}
       <EmptyState icon="components" title="Component information unavailable" />
     {:else}
+      {#if restartRequired}
+        <Surface padding="small" class="restart-surface">
+          <Icon name="warning" size={18} />
+          <div><strong>Restart Ravyn to activate updated components</strong><p>Media and torrent engines are loaded when the backend starts.</p></div>
+        </Surface>
+      {/if}
       {#if manifestStatus}
         <Surface padding="small" class="catalog-surface">
           <div class="catalog-row">
@@ -290,6 +317,8 @@
   .catalog-title { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
   .catalog-copy p { color: var(--text-secondary); font-size: var(--text-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .catalog-warning { display: block; margin-top: var(--space-1); color: var(--status-warning); }
+  :global(.restart-surface) { display: flex; align-items: flex-start; gap: var(--space-3); color: var(--status-warning); }
+  :global(.restart-surface p) { color: var(--text-secondary); font-size: var(--text-caption); }
   .catalog-expiry { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: var(--text-caption); }
   .catalog-expiry span { color: var(--text-tertiary); }
   .catalog-expiry strong { font-weight: 500; }

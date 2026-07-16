@@ -3,8 +3,14 @@ import { DEFAULT_SETTINGS } from "../../shared/settings";
 import { decideInterception } from "./state-machine";
 
 describe("decideInterception", () => {
-  it("does nothing when automatic interception is disabled", () => {
-    expect(decideInterception(DEFAULT_SETTINGS, "ravyn", true)).toBe("ignore");
+  it("does nothing when automatic interception is explicitly disabled", () => {
+    expect(
+      decideInterception(
+        { ...DEFAULT_SETTINGS, automaticInterception: false },
+        "ravyn",
+        true,
+      ),
+    ).toBe("ignore");
   });
 
   it("honors browser and ignore rules before forced domains", () => {

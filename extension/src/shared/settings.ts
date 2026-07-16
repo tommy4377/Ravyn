@@ -1,8 +1,10 @@
 import type { ExtensionSettings } from "./contracts";
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  interceptionMode: "rules-only",
-  automaticInterception: false,
+  // A download manager extension should work immediately after installation.
+  // Users can still choose Rules only, Ask every time, or Disabled in Options.
+  interceptionMode: "all-compatible",
+  automaticInterception: true,
   mediaDetection: true,
   networkObservation: false,
   videoOverlays: true,

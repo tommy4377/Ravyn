@@ -286,9 +286,7 @@ fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Res
     // executable but not overwriting it in place).
     let staged = dir.join(".ravyn.install.tmp");
     std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
-    if crate::installation::sha256_file(source)?
-        != crate::installation::sha256_file(&staged)?
-    {
+    if crate::installation::sha256_file(source)? != crate::installation::sha256_file(&staged)? {
         let _ = std::fs::remove_file(&staged);
         return Err("staged executable checksum does not match the source".into());
     }

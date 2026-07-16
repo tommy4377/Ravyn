@@ -12,7 +12,7 @@ const target = path.join(artifacts, `ravyn-firefox-${manifest.version}.xpi`);
 await mkdir(artifacts, { recursive: true });
 await rm(target, { force: true });
 await run(
-  "python3",
+  "python",
   [
     "scripts/deterministic-zip.py",
     "--root",

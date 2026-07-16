@@ -31,7 +31,8 @@ pub struct Ravyn {
     pub manager: Arc<JobManager>,
     pub provisioning_cancellation: services::components::ProvisioningCancellation,
     pub component_manifest: Arc<dyn services::components::ManifestProvider>,
-    pub component_manifest_refresh: Option<Arc<services::manifest_refresh::RemoteManifestRefresher>>,
+    pub component_manifest_refresh:
+        Option<Arc<services::manifest_refresh::RemoteManifestRefresher>>,
     _rqbit_process: Option<services::rqbit_process::RqbitProcessManager>,
 }
 
@@ -215,7 +216,11 @@ async fn reconcile_interrupted_component_operations(
         let state = manager
             .component_state(component, &config, &records, false)
             .await;
-        let active = manager.active_managed_component(component).await.ok().flatten();
+        let active = manager
+            .active_managed_component(component)
+            .await
+            .ok()
+            .flatten();
         let custom_path = component_config_path(component, &config);
         let custom = custom_path != std::path::Path::new(component.default_command());
         let now = chrono::Utc::now();
@@ -223,15 +228,13 @@ async fn reconcile_interrupted_component_operations(
             .save_component_record(&PersistedComponent {
                 component,
                 state,
-                managed_version: active
-                    .as_ref()
-                    .map(|installed| installed.version.clone()),
+                managed_version: active.as_ref().map(|installed| installed.version.clone()),
                 detected_version: previous.detected_version.clone(),
-                managed_path: active
-                    .as_ref()
-                    .map(|installed| installed.path.clone()),
+                managed_path: active.as_ref().map(|installed| installed.path.clone()),
                 custom_path: custom.then(|| custom_path.clone()),
-                error_message: Some("component operation was interrupted by a previous shutdown".into()),
+                error_message: Some(
+                    "component operation was interrupted by a previous shutdown".into(),
+                ),
                 last_checked_at: Some(now),
                 verified_at: previous.verified_at,
                 install_started_at: previous.install_started_at,
@@ -571,7 +574,10 @@ async fn provision_component(
     result
 }
 
-fn component_config_path(component: services::components::ComponentId, config: &Config) -> &std::path::PathBuf {
+fn component_config_path(
+    component: services::components::ComponentId,
+    config: &Config,
+) -> &std::path::PathBuf {
     match component {
         services::components::ComponentId::Ytdlp => &config.ytdlp,
         services::components::ComponentId::Ffmpeg => &config.ffmpeg,

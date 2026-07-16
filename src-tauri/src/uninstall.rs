@@ -4,7 +4,11 @@
 /// caller must exit instead of starting the Tauri application.
 pub fn try_handle_command_line() -> bool {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    if !arguments.iter().skip(1).any(|argument| argument == "--uninstall") {
+    if !arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--uninstall")
+    {
         return false;
     }
     let purge_data = arguments

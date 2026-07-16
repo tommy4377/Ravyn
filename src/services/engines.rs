@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header::LOCATION};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -180,9 +180,7 @@ impl EngineManifest {
                         "engine manifest expiry must be after its generation time".into(),
                     ));
                 }
-                if expires_at.signed_duration_since(generated_at.clone())
-                    > ChronoDuration::days(90)
-                {
+                if expires_at.signed_duration_since(*generated_at) > ChronoDuration::days(90) {
                     return Err(RavynError::Invalid(
                         "engine manifest validity window may not exceed 90 days".into(),
                     ));
@@ -240,11 +238,7 @@ impl EngineManifest {
     }
 
     pub fn remote_metadata(&self) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
-        Some((
-            self.manifest_version?,
-            self.generated_at.clone()?,
-            self.expires_at.clone()?,
-        ))
+        Some((self.manifest_version?, self.generated_at?, self.expires_at?))
     }
 
     pub fn artifact(&self, engine: &str, target: &str) -> Result<&EngineArtifact> {
@@ -343,9 +337,9 @@ impl EngineArtifact {
                 || member.len() > 512
                 || member.starts_with('/')
                 || member.contains('\\')
-                || member.split('/').any(|segment| {
-                    segment.is_empty() || segment == "." || segment == ".."
-                })
+                || member
+                    .split('/')
+                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
             {
                 return Err(RavynError::Invalid(
                     "managed engine archive member must be a safe relative forward-slash path"
@@ -354,8 +348,7 @@ impl EngineArtifact {
             }
             let member_sha256 = self.member_sha256.as_deref().ok_or_else(|| {
                 RavynError::Invalid(
-                    "managed engine artifacts with an archive member require member_sha256"
-                        .into(),
+                    "managed engine artifacts with an archive member require member_sha256".into(),
                 )
             })?;
             if member_sha256.len() != 64
@@ -373,7 +366,8 @@ impl EngineArtifact {
         }
         if self.installer.is_some() && self.archive_member.is_some() {
             return Err(RavynError::Invalid(
-                "managed engine installer and archive_member strategies are mutually exclusive".into(),
+                "managed engine installer and archive_member strategies are mutually exclusive"
+                    .into(),
             ));
         }
         if matches!(
@@ -383,7 +377,8 @@ impl EngineArtifact {
             || !self.target.to_ascii_lowercase().contains("windows"))
         {
             return Err(RavynError::Invalid(
-                "MSI administrative extraction requires a Windows target and an .msi artifact URL".into(),
+                "MSI administrative extraction requires a Windows target and an .msi artifact URL"
+                    .into(),
             ));
         }
         Ok(())
@@ -688,11 +683,7 @@ impl EngineManager {
     ) -> Result<(String, PathBuf, PathBuf, PathBuf)> {
         let engine_dir = self.root.join(&artifact.engine);
         tokio::fs::create_dir_all(&engine_dir).await?;
-        let directory_name = format!(
-            "{}-{}",
-            artifact.version,
-            uuid::Uuid::new_v4().simple()
-        );
+        let directory_name = format!("{}-{}", artifact.version, uuid::Uuid::new_v4().simple());
         validate_token(&directory_name, "installation directory")?;
         let version_dir = engine_dir.join(&directory_name);
         let destination = version_dir.join(&artifact.filename);
@@ -1045,8 +1036,7 @@ async fn remove_download_temp_files(dir: &Path, removed: &mut Vec<String>) -> Re
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !(name.starts_with('.') && (name.ends_with(".download") || name.ends_with(".extract")))
-        {
+        if !(name.starts_with('.') && (name.ends_with(".download") || name.ends_with(".extract"))) {
             continue;
         }
         if let Ok(metadata) = entry.metadata().await {
@@ -1323,7 +1313,10 @@ mod tests {
         spec.archive_member = Some("dist/bin/ffmpeg.exe".into());
         spec.member_sha256 = Some(hex::encode(Sha256::digest(member_bytes)));
 
-        let installed = manager.install_verified(&spec, &archive_bytes).await.unwrap();
+        let installed = manager
+            .install_verified(&spec, &archive_bytes)
+            .await
+            .unwrap();
         assert_eq!(tokio::fs::read(&installed).await.unwrap(), member_bytes);
         let info = manager.active_info("ffmpeg").await.unwrap().unwrap();
         assert_eq!(info.sha256, spec.member_sha256.unwrap());
@@ -1518,9 +1511,21 @@ mod tests {
             vec![".interrupted.download".to_owned()]
         );
         assert!(!tokio::fs::try_exists(&stale_temp).await.unwrap());
-        assert!(!tokio::fs::try_exists(v1_path.parent().unwrap()).await.unwrap());
-        assert!(tokio::fs::try_exists(v2_path.parent().unwrap()).await.unwrap());
-        assert!(tokio::fs::try_exists(v3_path.parent().unwrap()).await.unwrap());
+        assert!(
+            !tokio::fs::try_exists(v1_path.parent().unwrap())
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(v2_path.parent().unwrap())
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(v3_path.parent().unwrap())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

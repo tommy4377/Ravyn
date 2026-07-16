@@ -52,15 +52,17 @@ impl BackendDescriptorGuard {
             data_dir: info.data_dir.clone(),
             written_at_unix_ms: unix_time_ms(),
         };
-        let bytes = serde_json::to_vec_pretty(&descriptor)
-            .map_err(|error| format!("failed to serialize the native bridge descriptor: {error}"))?;
+        let bytes = serde_json::to_vec_pretty(&descriptor).map_err(|error| {
+            format!("failed to serialize the native bridge descriptor: {error}")
+        })?;
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, bytes)
             .map_err(|error| format!("failed to write the native bridge descriptor: {error}"))?;
         restrict_file_to_current_user(&temporary)?;
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|error| format!("failed to replace the native bridge descriptor: {error}"))?;
+            std::fs::remove_file(&path).map_err(|error| {
+                format!("failed to replace the native bridge descriptor: {error}")
+            })?;
         }
         std::fs::rename(&temporary, &path)
             .map_err(|error| format!("failed to activate the native bridge descriptor: {error}"))?;
@@ -103,19 +105,18 @@ pub fn try_handle_command_line() -> bool {
         return false;
     }
     if let Err(error) = run_host() {
-        let response = NativeResponse::error(
-            "startup",
-            "NATIVE_HOST_FAILED",
-            &error,
-            false,
-        );
+        let response = NativeResponse::error("startup", "NATIVE_HOST_FAILED", &error, false);
         let _ = write_message(&response);
     }
     true
 }
 
 fn is_native_host_invocation(arguments: &[String]) -> bool {
-    if arguments.iter().skip(1).any(|argument| argument == "--native-messaging-host") {
+    if arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--native-messaging-host")
+    {
         return true;
     }
     arguments.iter().skip(1).any(|argument| {
@@ -206,10 +207,20 @@ impl NativeResponse {
 
 fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) -> NativeResponse {
     if request.id.is_empty() || request.id.len() > 200 {
-        return NativeResponse::error("unknown", "INVALID_REQUEST_ID", "request id must contain between 1 and 200 characters", false);
+        return NativeResponse::error(
+            "unknown",
+            "INVALID_REQUEST_ID",
+            "request id must contain between 1 and 200 characters",
+            false,
+        );
     }
     if request.protocol_version != PROTOCOL_VERSION {
-        return NativeResponse::error(&request.id, "PROTOCOL_MISMATCH", "the extension and native host use incompatible protocol versions", false);
+        return NativeResponse::error(
+            &request.id,
+            "PROTOCOL_MISMATCH",
+            "the extension and native host use incompatible protocol versions",
+            false,
+        );
     }
     let result = match request.command.as_str() {
         "ping" => Ok(json!({ "pong": true, "hostVersion": env!("CARGO_PKG_VERSION") })),
@@ -217,20 +228,18 @@ fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) ->
         "open_ravyn" => open_ravyn(client, &request.payload),
         "subscribe_events" => Ok(json!({ "subscribed": true, "transport": "request-refresh" })),
         "unsubscribe_events" => Ok(json!({ "subscribed": false })),
-        command @ (
-            "create_download"
-            | "create_batch"
-            | "probe_media"
-            | "get_download_summary"
-            | "get_job"
-            | "pause_job"
-            | "resume_job"
-            | "cancel_job"
-            | "pause_all"
-            | "resume_all"
-            | "get_rules"
-            | "evaluate_url"
-        ) => with_backend(client, |descriptor| {
+        command @ ("create_download"
+        | "create_batch"
+        | "probe_media"
+        | "get_download_summary"
+        | "get_job"
+        | "pause_job"
+        | "resume_job"
+        | "cancel_job"
+        | "pause_all"
+        | "resume_all"
+        | "get_rules"
+        | "evaluate_url") => with_backend(client, |descriptor| {
             dispatch_backend(client, descriptor, command, &request.payload)
         }),
         command => Err(HostError::new(
@@ -241,7 +250,9 @@ fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) ->
     };
     match result {
         Ok(value) => NativeResponse::success(&request.id, value),
-        Err(error) => NativeResponse::error(&request.id, error.code, &error.message, error.retryable),
+        Err(error) => {
+            NativeResponse::error(&request.id, error.code, &error.message, error.retryable)
+        }
     }
 }
 
@@ -254,7 +265,11 @@ struct HostError {
 
 impl HostError {
     fn new(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
-        Self { code, message: message.into(), retryable }
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+        }
     }
 }
 
@@ -304,7 +319,11 @@ fn dispatch_backend(
         "resume_all" => bulk_action(client, descriptor, "resume"),
         "get_rules" => get_rules(client, descriptor),
         "evaluate_url" => evaluate_url(client, descriptor, payload),
-        _ => Err(HostError::new("UNKNOWN_COMMAND", format!("unsupported native command: {command}"), false)),
+        _ => Err(HostError::new(
+            "UNKNOWN_COMMAND",
+            format!("unsupported native command: {command}"),
+            false,
+        )),
     }
 }
 
@@ -384,22 +403,50 @@ fn create_download(
     descriptor: &BackendDescriptor,
     payload: &Value,
 ) -> Result<Value, HostError> {
-    let payload: CreateDownloadPayload = serde_json::from_value(payload.clone())
-        .map_err(|error| HostError::new("INVALID_DOWNLOAD", format!("invalid download request: {error}"), false))?;
+    let payload: CreateDownloadPayload =
+        serde_json::from_value(payload.clone()).map_err(|error| {
+            HostError::new(
+                "INVALID_DOWNLOAD",
+                format!("invalid download request: {error}"),
+                false,
+            )
+        })?;
     validate_source_context(&payload.source_context)?;
     let source = validate_network_url(&payload.url)?;
     let kind = match payload.kind.as_deref().unwrap_or("http") {
         "http" => "http",
         "media" => "media",
-        _ => return Err(HostError::new("INVALID_DOWNLOAD_KIND", "download kind must be http or media", false)),
+        _ => {
+            return Err(HostError::new(
+                "INVALID_DOWNLOAD_KIND",
+                "download kind must be http or media",
+                false,
+            ));
+        }
     };
-    let filename = payload.filename.as_deref().map(sanitize_filename).transpose()?;
+    let filename = payload
+        .filename
+        .as_deref()
+        .map(sanitize_filename)
+        .transpose()?;
     let preset_id = validate_uuid(payload.preset_id.as_deref())?;
-    let referer = payload.referer.as_deref().map(validate_optional_url).transpose()?;
-    let user_agent = payload.user_agent.as_deref().map(|value| sanitize_text(value, 512)).transpose()?;
+    let referer = payload
+        .referer
+        .as_deref()
+        .map(validate_optional_url)
+        .transpose()?;
+    let user_agent = payload
+        .user_agent
+        .as_deref()
+        .map(|value| sanitize_text(value, 512))
+        .transpose()?;
     let tags = sanitize_tags(&payload.tags)?;
     let cookies = sanitize_cookies(&payload.cookies, &source)?;
-    let media = payload.media.as_ref().map(sanitize_media_options).transpose()?;
+    let media = payload
+        .media
+        .as_ref()
+        .map(sanitize_media_options)
+        .transpose()?;
     let post_actions = post_actions_for(payload.post_processing_preset.as_deref())?;
     let body = json!({
         "preset_id": preset_id,
@@ -417,17 +464,24 @@ fn create_download(
             "user_agent": user_agent,
             "referer": referer,
             "tags": tags,
+            "initially_paused": payload.paused,
             "post_actions": post_actions,
             "media": media
         }
     });
-    let idempotency = payload.idempotency_key.as_deref().map(|value| sanitize_text(value, 200)).transpose()?;
-    let job = api_request(client, descriptor, reqwest::Method::POST, "/v1/jobs", Some(body), idempotency.as_deref())?;
-    if payload.paused {
-        if let Some(id) = job.get("id").and_then(Value::as_str) {
-            let _ = api_request(client, descriptor, reqwest::Method::POST, &format!("/v1/jobs/{id}/pause"), Some(json!({})), None);
-        }
-    }
+    let idempotency = payload
+        .idempotency_key
+        .as_deref()
+        .map(|value| sanitize_text(value, 200))
+        .transpose()?;
+    let job = api_request(
+        client,
+        descriptor,
+        reqwest::Method::POST,
+        "/v1/jobs",
+        Some(body),
+        idempotency.as_deref(),
+    )?;
     Ok(job)
 }
 
@@ -441,7 +495,11 @@ fn create_batch(
         .and_then(Value::as_array)
         .ok_or_else(|| HostError::new("INVALID_BATCH", "downloads must be an array", false))?;
     if downloads.is_empty() || downloads.len() > MAX_BATCH_ITEMS {
-        return Err(HostError::new("INVALID_BATCH", format!("batch size must be between 1 and {MAX_BATCH_ITEMS}"), false));
+        return Err(HostError::new(
+            "INVALID_BATCH",
+            format!("batch size must be between 1 and {MAX_BATCH_ITEMS}"),
+            false,
+        ));
     }
     let mut accepted = 0usize;
     let mut results = Vec::with_capacity(downloads.len());
@@ -457,7 +515,9 @@ fn create_batch(
             })),
         }
     }
-    Ok(json!({ "attempted": downloads.len(), "accepted": accepted, "failed": downloads.len() - accepted, "results": results }))
+    Ok(
+        json!({ "attempted": downloads.len(), "accepted": accepted, "failed": downloads.len() - accepted, "results": results }),
+    )
 }
 
 fn probe_media(
@@ -465,20 +525,42 @@ fn probe_media(
     descriptor: &BackendDescriptor,
     payload: &Value,
 ) -> Result<Value, HostError> {
-    let url = payload.get("url").and_then(Value::as_str)
-        .ok_or_else(|| HostError::new("INVALID_MEDIA_PROBE", "media probe requires a URL", false))?;
+    let url = payload.get("url").and_then(Value::as_str).ok_or_else(|| {
+        HostError::new("INVALID_MEDIA_PROBE", "media probe requires a URL", false)
+    })?;
     let url = validate_network_url(url)?;
-    api_request(client, descriptor, reqwest::Method::POST, "/v1/media/probe", Some(json!({
-        "url": url,
-        "cookies_from_browser": null,
-        "cookies_file": null,
-        "proxy": null
-    })), None)
+    api_request(
+        client,
+        descriptor,
+        reqwest::Method::POST,
+        "/v1/media/probe",
+        Some(json!({
+            "url": url,
+            "cookies_from_browser": null,
+            "cookies_file": null,
+            "proxy": null
+        })),
+        None,
+    )
 }
 
-fn download_summary(client: &reqwest::blocking::Client, descriptor: &BackendDescriptor) -> Result<Value, HostError> {
-    let page = api_request(client, descriptor, reqwest::Method::GET, "/v1/jobs?limit=20", None, None)?;
-    let items = page.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+fn download_summary(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+) -> Result<Value, HostError> {
+    let page = api_request(
+        client,
+        descriptor,
+        reqwest::Method::GET,
+        "/v1/jobs?limit=20",
+        None,
+        None,
+    )?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut active = 0usize;
     let mut queued = 0usize;
     let recent = items.iter().take(8).map(|job| {
@@ -505,22 +587,64 @@ fn job_action(
     payload: &Value,
     action: &str,
 ) -> Result<Value, HostError> {
-    let id = payload.get("id").and_then(Value::as_str)
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
         .ok_or_else(|| HostError::new("INVALID_JOB_ID", "job command requires an id", false))?;
-    let id = validate_uuid(Some(id))?.ok_or_else(|| HostError::new("INVALID_JOB_ID", "job id is invalid", false))?;
+    let id = validate_uuid(Some(id))?
+        .ok_or_else(|| HostError::new("INVALID_JOB_ID", "job id is invalid", false))?;
     if action == "get" {
-        return api_request(client, descriptor, reqwest::Method::GET, &format!("/v1/jobs/{id}"), None, None);
+        return api_request(
+            client,
+            descriptor,
+            reqwest::Method::GET,
+            &format!("/v1/jobs/{id}"),
+            None,
+            None,
+        );
     }
-    api_request(client, descriptor, reqwest::Method::POST, &format!("/v1/jobs/{id}/{action}"), Some(json!({})), None)
+    api_request(
+        client,
+        descriptor,
+        reqwest::Method::POST,
+        &format!("/v1/jobs/{id}/{action}"),
+        Some(json!({})),
+        None,
+    )
 }
 
-fn bulk_action(client: &reqwest::blocking::Client, descriptor: &BackendDescriptor, action: &str) -> Result<Value, HostError> {
-    api_request(client, descriptor, reqwest::Method::POST, "/v1/jobs/actions", Some(json!({ "ids": [], "action": action })), None)
+fn bulk_action(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+    action: &str,
+) -> Result<Value, HostError> {
+    api_request(
+        client,
+        descriptor,
+        reqwest::Method::POST,
+        "/v1/jobs/actions",
+        Some(json!({ "ids": [], "action": action })),
+        None,
+    )
 }
 
-fn get_rules(client: &reqwest::blocking::Client, descriptor: &BackendDescriptor) -> Result<Value, HostError> {
-    let page = api_request(client, descriptor, reqwest::Method::GET, "/v1/rules?limit=1000", None, None)?;
-    let rules = page.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+fn get_rules(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+) -> Result<Value, HostError> {
+    let page = api_request(
+        client,
+        descriptor,
+        reqwest::Method::GET,
+        "/v1/rules?limit=1000",
+        None,
+        None,
+    )?;
+    let rules = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     Ok(Value::Array(rules.into_iter().map(|rule| json!({
         "id": rule.get("id").and_then(Value::as_str).unwrap_or_default(),
         "name": rule.get("name").and_then(Value::as_str).unwrap_or("Rule"),
@@ -534,28 +658,52 @@ fn get_rules(client: &reqwest::blocking::Client, descriptor: &BackendDescriptor)
     })).collect()))
 }
 
-fn evaluate_url(client: &reqwest::blocking::Client, descriptor: &BackendDescriptor, payload: &Value) -> Result<Value, HostError> {
-    let url = payload.get("url").and_then(Value::as_str)
-        .ok_or_else(|| HostError::new("INVALID_RULE_INPUT", "rule evaluation requires a URL", false))?;
+fn evaluate_url(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+    payload: &Value,
+) -> Result<Value, HostError> {
+    let url = payload.get("url").and_then(Value::as_str).ok_or_else(|| {
+        HostError::new(
+            "INVALID_RULE_INPUT",
+            "rule evaluation requires a URL",
+            false,
+        )
+    })?;
     let source = validate_network_url(url)?;
-    let mime = payload.get("mime").and_then(Value::as_str).map(|value| sanitize_text(value, 200)).transpose()?;
-    let extension = payload.get("extension").and_then(Value::as_str).map(|value| sanitize_text(value, 32)).transpose()?;
-    api_request(client, descriptor, reqwest::Method::POST, "/v1/rules/preview", Some(json!({
-        "request": {
-            "preset_id": null,
-            "kind": "http",
-            "source": source,
-            "destination": null,
-            "filename": null,
-            "priority": 0,
-            "speed_limit_bps": null,
-            "expected_sha256": null,
-            "duplicate_policy": "allow",
-            "options": {}
-        },
-        "mime": mime,
-        "extension": extension
-    })), None)
+    let mime = payload
+        .get("mime")
+        .and_then(Value::as_str)
+        .map(|value| sanitize_text(value, 200))
+        .transpose()?;
+    let extension = payload
+        .get("extension")
+        .and_then(Value::as_str)
+        .map(|value| sanitize_text(value, 32))
+        .transpose()?;
+    api_request(
+        client,
+        descriptor,
+        reqwest::Method::POST,
+        "/v1/rules/preview",
+        Some(json!({
+            "request": {
+                "preset_id": null,
+                "kind": "http",
+                "source": source,
+                "destination": null,
+                "filename": null,
+                "priority": 0,
+                "speed_limit_bps": null,
+                "expected_sha256": null,
+                "duplicate_policy": "allow",
+                "options": {}
+            },
+            "mime": mime,
+            "extension": extension
+        })),
+        None,
+    )
 }
 
 fn open_ravyn(client: &reqwest::blocking::Client, payload: &Value) -> Result<Value, HostError> {
@@ -591,7 +739,15 @@ fn focus_existing_process(process_id: u32) {
         "$shell = New-Object -ComObject WScript.Shell; [void]$shell.AppActivate({process_id})"
     );
     let mut command = std::process::Command::new("powershell.exe");
-    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        &script,
+    ]);
     configure_detached_process(&mut command);
     let _ = command.spawn();
 }
@@ -600,14 +756,22 @@ fn focus_existing_process(process_id: u32) {
 fn focus_existing_process(_process_id: u32) {}
 
 fn launch_desktop(action: Option<(&str, Option<&str>)>) -> Result<(), HostError> {
-    let executable = std::env::current_exe()
-        .map_err(|error| HostError::new("APP_LAUNCH_FAILED", format!("failed to resolve Ravyn: {error}"), true))?;
+    let executable = std::env::current_exe().map_err(|error| {
+        HostError::new(
+            "APP_LAUNCH_FAILED",
+            format!("failed to resolve Ravyn: {error}"),
+            true,
+        )
+    })?;
     let mut command = std::process::Command::new(&executable);
     if let Some((section, source)) = action {
         command.arg("--browser-action");
         command.arg(format!("--browser-section={}", sanitize_section(section)));
         if let Some(source) = source.and_then(|value| validate_optional_url(value).ok()) {
-            command.arg(format!("--browser-source={}", percent_encoding::utf8_percent_encode(&source, percent_encoding::NON_ALPHANUMERIC)));
+            command.arg(format!(
+                "--browser-source={}",
+                percent_encoding::utf8_percent_encode(&source, percent_encoding::NON_ALPHANUMERIC)
+            ));
         }
     } else {
         command.arg("--browser-bridge-start");
@@ -616,9 +780,13 @@ fn launch_desktop(action: Option<(&str, Option<&str>)>) -> Result<(), HostError>
         command.current_dir(parent);
     }
     configure_detached_process(&mut command);
-    command.spawn()
-        .map(|_| ())
-        .map_err(|error| HostError::new("APP_LAUNCH_FAILED", format!("failed to launch Ravyn: {error}"), true))
+    command.spawn().map(|_| ()).map_err(|error| {
+        HostError::new(
+            "APP_LAUNCH_FAILED",
+            format!("failed to launch Ravyn: {error}"),
+            true,
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -640,21 +808,49 @@ fn wait_for_backend(client: &reqwest::blocking::Client) -> Result<BackendDescrip
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err(HostError::new("BACKEND_UNAVAILABLE", "Ravyn did not start its local backend in time", true))
+    Err(HostError::new(
+        "BACKEND_UNAVAILABLE",
+        "Ravyn did not start its local backend in time",
+        true,
+    ))
 }
 
-fn load_live_descriptor(client: &reqwest::blocking::Client) -> Result<BackendDescriptor, HostError> {
+fn load_live_descriptor(
+    client: &reqwest::blocking::Client,
+) -> Result<BackendDescriptor, HostError> {
     let data_dir = crate::backend::resolve_data_dir();
     let path = descriptor_path(&data_dir);
-    let bytes = std::fs::read(&path)
-        .map_err(|error| HostError::new("BACKEND_UNAVAILABLE", format!("Ravyn backend descriptor is unavailable: {error}"), true))?;
-    let descriptor: BackendDescriptor = serde_json::from_slice(&bytes)
-        .map_err(|error| HostError::new("BACKEND_DESCRIPTOR_INVALID", format!("invalid Ravyn backend descriptor: {error}"), true))?;
-    if descriptor.schema != 1 || descriptor.api_token.len() < 20 || descriptor.data_dir != data_dir.display().to_string() {
-        return Err(HostError::new("BACKEND_DESCRIPTOR_INVALID", "Ravyn backend descriptor failed validation", true));
+    let bytes = std::fs::read(&path).map_err(|error| {
+        HostError::new(
+            "BACKEND_UNAVAILABLE",
+            format!("Ravyn backend descriptor is unavailable: {error}"),
+            true,
+        )
+    })?;
+    let descriptor: BackendDescriptor = serde_json::from_slice(&bytes).map_err(|error| {
+        HostError::new(
+            "BACKEND_DESCRIPTOR_INVALID",
+            format!("invalid Ravyn backend descriptor: {error}"),
+            true,
+        )
+    })?;
+    if descriptor.schema != 1
+        || descriptor.api_token.len() < 20
+        || descriptor.data_dir != data_dir.display().to_string()
+    {
+        return Err(HostError::new(
+            "BACKEND_DESCRIPTOR_INVALID",
+            "Ravyn backend descriptor failed validation",
+            true,
+        ));
     }
-    let url = url::Url::parse(&descriptor.base_url)
-        .map_err(|_| HostError::new("BACKEND_DESCRIPTOR_INVALID", "Ravyn backend URL is invalid", true))?;
+    let url = url::Url::parse(&descriptor.base_url).map_err(|_| {
+        HostError::new(
+            "BACKEND_DESCRIPTOR_INVALID",
+            "Ravyn backend URL is invalid",
+            true,
+        )
+    })?;
     if url.scheme() != "http"
         || url.host_str() != Some("127.0.0.1")
         || url.port().is_none()
@@ -674,9 +870,22 @@ fn load_live_descriptor(client: &reqwest::blocking::Client) -> Result<BackendDes
         .get(format!("{}/health/ready", descriptor.base_url))
         .bearer_auth(&descriptor.api_token)
         .send()
-        .map_err(|error| HostError::new("BACKEND_UNAVAILABLE", format!("Ravyn backend is unreachable: {error}"), true))?;
+        .map_err(|error| {
+            HostError::new(
+                "BACKEND_UNAVAILABLE",
+                format!("Ravyn backend is unreachable: {error}"),
+                true,
+            )
+        })?;
     if !response.status().is_success() {
-        return Err(HostError::new("BACKEND_UNAVAILABLE", format!("Ravyn backend readiness returned HTTP {}", response.status()), true));
+        return Err(HostError::new(
+            "BACKEND_UNAVAILABLE",
+            format!(
+                "Ravyn backend readiness returned HTTP {}",
+                response.status()
+            ),
+            true,
+        ));
     }
     Ok(descriptor)
 }
@@ -698,33 +907,71 @@ fn api_request(
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send()
-        .map_err(|error| HostError::new("BACKEND_REQUEST_FAILED", format!("Ravyn backend request failed: {error}"), true))?;
+    let response = request.send().map_err(|error| {
+        HostError::new(
+            "BACKEND_REQUEST_FAILED",
+            format!("Ravyn backend request failed: {error}"),
+            true,
+        )
+    })?;
     let status = response.status();
-    let bytes = response.bytes()
-        .map_err(|error| HostError::new("BACKEND_RESPONSE_INVALID", format!("failed to read the Ravyn backend response: {error}"), true))?;
+    let bytes = response.bytes().map_err(|error| {
+        HostError::new(
+            "BACKEND_RESPONSE_INVALID",
+            format!("failed to read the Ravyn backend response: {error}"),
+            true,
+        )
+    })?;
     if !status.is_success() {
-        let message = serde_json::from_slice::<Value>(&bytes).ok()
-            .and_then(|value| value.get("message").and_then(Value::as_str).map(ToOwned::to_owned))
-            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).chars().take(1_000).collect());
-        return Err(HostError::new("BACKEND_REJECTED", format!("Ravyn rejected the request with HTTP {status}: {message}"), status.is_server_error()));
+        let message = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| {
+                String::from_utf8_lossy(&bytes)
+                    .chars()
+                    .take(1_000)
+                    .collect()
+            });
+        return Err(HostError::new(
+            "BACKEND_REJECTED",
+            format!("Ravyn rejected the request with HTTP {status}: {message}"),
+            status.is_server_error(),
+        ));
     }
     if bytes.is_empty() {
         return Ok(json!({ "ok": true }));
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| HostError::new("BACKEND_RESPONSE_INVALID", format!("Ravyn returned invalid JSON: {error}"), true))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        HostError::new(
+            "BACKEND_RESPONSE_INVALID",
+            format!("Ravyn returned invalid JSON: {error}"),
+            true,
+        )
+    })
 }
 
 fn validate_source_context(context: &SourceContext) -> Result<(), HostError> {
     if context.browser != "firefox" {
-        return Err(HostError::new("INVALID_SOURCE_CONTEXT", "browser source must be Firefox", false));
+        return Err(HostError::new(
+            "INVALID_SOURCE_CONTEXT",
+            "browser source must be Firefox",
+            false,
+        ));
     }
     if let Some(url) = context.page_url.as_deref() {
         validate_optional_url(url)?;
     }
-    if let Some(value) = context.container_id.as_deref() { sanitize_text(value, 200)?; }
-    if let Some(value) = context.page_title.as_deref() { sanitize_text(value, 500)?; }
+    if let Some(value) = context.container_id.as_deref() {
+        sanitize_text(value, 200)?;
+    }
+    if let Some(value) = context.page_title.as_deref() {
+        sanitize_text(value, 500)?;
+    }
     let _ = (context.incognito, context.tab_id, context.frame_id);
     Ok(())
 }
@@ -732,11 +979,22 @@ fn validate_source_context(context: &SourceContext) -> Result<(), HostError> {
 fn validate_network_url(value: &str) -> Result<String, HostError> {
     let parsed = url::Url::parse(value)
         .map_err(|_| HostError::new("INVALID_URL", "download URL is invalid", false))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.username() != "" || parsed.password().is_some() {
-        return Err(HostError::new("INVALID_URL", "only credential-free HTTP and HTTPS URLs are accepted", false));
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.username() != ""
+        || parsed.password().is_some()
+    {
+        return Err(HostError::new(
+            "INVALID_URL",
+            "only credential-free HTTP and HTTPS URLs are accepted",
+            false,
+        ));
     }
     if value.len() > 16_384 {
-        return Err(HostError::new("INVALID_URL", "download URL is too long", false));
+        return Err(HostError::new(
+            "INVALID_URL",
+            "download URL is too long",
+            false,
+        ));
     }
     Ok(parsed.to_string())
 }
@@ -746,17 +1004,31 @@ fn validate_optional_url(value: &str) -> Result<String, HostError> {
 }
 
 fn validate_uuid(value: Option<&str>) -> Result<Option<String>, HostError> {
-    value.map(|value| {
-        uuid::Uuid::parse_str(value)
-            .map(|id| id.to_string())
-            .map_err(|_| HostError::new("INVALID_IDENTIFIER", "identifier must be a UUID", false))
-    }).transpose()
+    value
+        .map(|value| {
+            uuid::Uuid::parse_str(value)
+                .map(|id| id.to_string())
+                .map_err(|_| {
+                    HostError::new("INVALID_IDENTIFIER", "identifier must be a UUID", false)
+                })
+        })
+        .transpose()
 }
 
 fn sanitize_filename(value: &str) -> Result<String, HostError> {
     let value = sanitize_text(value, 255)?;
-    if value.is_empty() || value == "." || value == ".." || value.chars().any(|character| matches!(character, '/' | '\\' | '\0')) {
-        return Err(HostError::new("INVALID_FILENAME", "filename contains invalid path characters", false));
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        return Err(HostError::new(
+            "INVALID_FILENAME",
+            "filename contains invalid path characters",
+            false,
+        ));
     }
     Ok(value)
 }
@@ -764,45 +1036,85 @@ fn sanitize_filename(value: &str) -> Result<String, HostError> {
 fn sanitize_text(value: &str, max: usize) -> Result<String, HostError> {
     let trimmed = value.trim();
     if trimmed.len() > max || trimmed.chars().any(char::is_control) {
-        return Err(HostError::new("INVALID_TEXT", format!("text value exceeds {max} characters or contains control characters"), false));
+        return Err(HostError::new(
+            "INVALID_TEXT",
+            format!("text value exceeds {max} characters or contains control characters"),
+            false,
+        ));
     }
     Ok(trimmed.to_owned())
 }
 
 fn sanitize_tags(values: &[String]) -> Result<Vec<String>, HostError> {
     if values.len() > 50 {
-        return Err(HostError::new("INVALID_TAGS", "at most 50 tags are accepted", false));
+        return Err(HostError::new(
+            "INVALID_TAGS",
+            "at most 50 tags are accepted",
+            false,
+        ));
     }
-    let mut tags = values.iter().map(|value| sanitize_text(value, 64)).collect::<Result<Vec<_>, _>>()?;
+    let mut tags = values
+        .iter()
+        .map(|value| sanitize_text(value, 64))
+        .collect::<Result<Vec<_>, _>>()?;
     tags.retain(|value| !value.is_empty());
     tags.sort();
     tags.dedup();
     Ok(tags)
 }
 
-fn sanitize_cookies(values: &[CookieValue], source: &str) -> Result<BTreeMap<String, String>, HostError> {
+fn sanitize_cookies(
+    values: &[CookieValue],
+    source: &str,
+) -> Result<BTreeMap<String, String>, HostError> {
     if values.len() > MAX_COOKIES {
-        return Err(HostError::new("INVALID_COOKIES", format!("at most {MAX_COOKIES} cookies are accepted"), false));
+        return Err(HostError::new(
+            "INVALID_COOKIES",
+            format!("at most {MAX_COOKIES} cookies are accepted"),
+            false,
+        ));
     }
-    let source_host = url::Url::parse(source).ok().and_then(|url| url.host_str().map(str::to_ascii_lowercase)).unwrap_or_default();
+    let source_host = url::Url::parse(source)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
     let mut cookies = BTreeMap::new();
     for cookie in values {
         let name = sanitize_text(&cookie.name, 256)?;
         let value = sanitize_text(&cookie.value, 4_096)?;
         let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
-        if name.is_empty() || !(source_host == domain || source_host.ends_with(&format!(".{domain}"))) {
+        if name.is_empty()
+            || !(source_host == domain || source_host.ends_with(&format!(".{domain}")))
+        {
             continue;
         }
-        let _ = (&cookie.path, cookie.secure, cookie.http_only, &cookie.same_site);
+        let _ = (
+            &cookie.path,
+            cookie.secure,
+            cookie.http_only,
+            &cookie.same_site,
+        );
         cookies.insert(name, value);
     }
     Ok(cookies)
 }
 
 fn sanitize_media_options(value: &BrowserMediaOptions) -> Result<Value, HostError> {
-    let format = value.format.as_deref().map(|value| sanitize_text(value, 200)).transpose()?;
-    let audio_format = value.audio_format.as_deref().map(|value| sanitize_text(value, 20)).transpose()?;
-    let subtitle_languages = value.subtitle_languages.as_deref().unwrap_or_default().iter()
+    let format = value
+        .format
+        .as_deref()
+        .map(|value| sanitize_text(value, 200))
+        .transpose()?;
+    let audio_format = value
+        .audio_format
+        .as_deref()
+        .map(|value| sanitize_text(value, 20))
+        .transpose()?;
+    let subtitle_languages = value
+        .subtitle_languages
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
         .take(50)
         .map(|value| sanitize_text(value, 32))
         .collect::<Result<Vec<_>, _>>()?;
@@ -817,7 +1129,9 @@ fn sanitize_media_options(value: &BrowserMediaOptions) -> Result<Value, HostErro
 }
 
 fn post_actions_for(preset: Option<&str>) -> Result<Vec<Value>, HostError> {
-    let Some(preset) = preset else { return Ok(Vec::new()); };
+    let Some(preset) = preset else {
+        return Ok(Vec::new());
+    };
     let (extension, ffmpeg_preset) = match preset {
         "image-webp" => ("webp", "image-webp"),
         "image-avif" => ("avif", "image-avif"),
@@ -825,7 +1139,13 @@ fn post_actions_for(preset: Option<&str>) -> Result<Vec<Value>, HostError> {
         "audio-opus" => ("opus", "audio-opus"),
         "video-h264" => ("mp4", "video-h264"),
         "video-h265" => ("mkv", "video-h265"),
-        _ => return Err(HostError::new("INVALID_POST_PROCESSING", "unsupported browser post-processing preset", false)),
+        _ => {
+            return Err(HostError::new(
+                "INVALID_POST_PROCESSING",
+                "unsupported browser post-processing preset",
+                false,
+            ));
+        }
     };
     Ok(vec![json!({
         "type": "convert_media",
@@ -854,7 +1174,10 @@ fn descriptor_path(data_dir: &Path) -> PathBuf {
 }
 
 fn unix_time_ms() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn read_message(reader: &mut impl Read) -> Result<Option<Value>, String> {
@@ -866,10 +1189,13 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Value>, String> {
     }
     let length = u32::from_le_bytes(length) as usize;
     if length == 0 || length > MAX_MESSAGE_BYTES {
-        return Err(format!("native message length must be between 1 and {MAX_MESSAGE_BYTES} bytes"));
+        return Err(format!(
+            "native message length must be between 1 and {MAX_MESSAGE_BYTES} bytes"
+        ));
     }
     let mut body = vec![0u8; length];
-    reader.read_exact(&mut body)
+    reader
+        .read_exact(&mut body)
         .map_err(|error| format!("failed to read the native message body: {error}"))?;
     ravyn::native_protocol::decode_json_body(&body, MAX_MESSAGE_BYTES).map(Some)
 }
@@ -881,7 +1207,8 @@ fn write_message(value: &impl Serialize) -> Result<(), String> {
         return Err("native response exceeds the protocol size limit".into());
     }
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(&(bytes.len() as u32).to_le_bytes())
+    stdout
+        .write_all(&(bytes.len() as u32).to_le_bytes())
         .and_then(|_| stdout.write_all(&bytes))
         .and_then(|_| stdout.flush())
         .map_err(|error| format!("failed to write the native response: {error}"))
@@ -898,7 +1225,10 @@ mod tests {
             r"C:\Users\Test\com.ravyn.download_manager.json".into(),
             crate::browser_integration::EXTENSION_ID.into(),
         ]));
-        assert!(!is_native_host_invocation(&["Ravyn.exe".into(), "--browser-action".into()]));
+        assert!(!is_native_host_invocation(&[
+            "Ravyn.exe".into(),
+            "--browser-action".into()
+        ]));
     }
 
     #[test]
@@ -960,7 +1290,10 @@ mod tests {
             },
         ];
         let sanitized = sanitize_cookies(&cookies, "https://media.example.com/file").unwrap();
-        assert_eq!(sanitized.get("session").map(String::as_str), Some("allowed"));
+        assert_eq!(
+            sanitized.get("session").map(String::as_str),
+            Some("allowed")
+        );
         assert!(!sanitized.contains_key("foreign"));
     }
 

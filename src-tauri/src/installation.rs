@@ -64,7 +64,6 @@ pub fn detect() -> InstallationInfo {
     }
 }
 
-
 /// Compute the SHA-256 of an executable or staged application file.
 pub fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
@@ -98,7 +97,10 @@ pub fn default_install_dir() -> Option<String> {
 }
 
 fn normalized(path: &str) -> String {
-    path.trim().trim_matches('"').replace('/', "\\").to_ascii_lowercase()
+    path.trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .to_ascii_lowercase()
 }
 
 /// Return whether an executable path is inside the supplied installation root.
@@ -122,8 +124,7 @@ pub fn current_executable_is_installed() -> bool {
         return false;
     };
     let executable = executable.display().to_string();
-    default_install_dir()
-        .is_some_and(|root| path_is_within(&executable, &root))
+    default_install_dir().is_some_and(|root| path_is_within(&executable, &root))
 }
 
 #[cfg(windows)]

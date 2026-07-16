@@ -30,6 +30,15 @@ desktop.ini
 frontend/node_modules/
 frontend/dist/
 
+# Firefox extension build output and local dependencies
+extension/node_modules/
+extension/dist/
+extension/artifacts/
+extension/.web-ext/
+extension/web-ext-artifacts/
+extension/coverage/
+extension/.vite/
+
 # Local validation caches
 /node_modules/
 **/__pycache__/

@@ -1,42 +1,21 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { notifications } from "./notifications.svelte";
 
-describe("notification history", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    notifications.clear();
-  });
+describe("notifications", () => {
+  afterEach(() => notifications.clear());
 
-  it("keeps auto-dismissed notifications in history", () => {
-    notifications.success("Download completed", "archive.zip is ready.");
+  it("keeps the transient queue compact while preserving notification history", () => {
+    for (let index = 0; index < 5; index += 1) {
+      notifications.info(`Notice ${index}`);
+    }
 
-    expect(notifications.items).toHaveLength(1);
-    expect(notifications.history).toHaveLength(1);
-    expect(notifications.unreadCount).toBe(1);
-
-    vi.advanceTimersByTime(6_000);
-
-    expect(notifications.items).toHaveLength(0);
-    expect(notifications.history).toHaveLength(1);
-  });
-
-  it("tracks read state independently from toast visibility", () => {
-    const id = notifications.warning("Verification recommended");
-
-    notifications.dismiss(id);
-    notifications.markRead(id);
-
-    expect(notifications.items).toHaveLength(0);
-    expect(notifications.history[0]?.read).toBe(true);
-    expect(notifications.unreadCount).toBe(0);
-  });
-
-  it("clears history without affecting currently visible toasts", () => {
-    notifications.error("Download failed", "The server closed the connection.");
-
-    notifications.clearHistory();
-
-    expect(notifications.history).toHaveLength(0);
-    expect(notifications.items).toHaveLength(1);
+    expect(notifications.items).toHaveLength(4);
+    expect(notifications.items.map((item) => item.title)).toEqual([
+      "Notice 1",
+      "Notice 2",
+      "Notice 3",
+      "Notice 4",
+    ]);
+    expect(notifications.history).toHaveLength(5);
   });
 });

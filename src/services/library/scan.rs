@@ -151,7 +151,10 @@ async fn import_directory_inner(
             Err(error) => {
                 let mut current = status.write().await;
                 current.skipped += 1;
-                push_bounded_error(&mut current.errors, format!("{}: {error}", directory.display()));
+                push_bounded_error(
+                    &mut current.errors,
+                    format!("{}: {error}", directory.display()),
+                );
                 continue;
             }
         };
@@ -162,7 +165,10 @@ async fn import_directory_inner(
                 Err(error) => {
                     let mut current = status.write().await;
                     current.skipped += 1;
-                    push_bounded_error(&mut current.errors, format!("{}: {error}", directory.display()));
+                    push_bounded_error(
+                        &mut current.errors,
+                        format!("{}: {error}", directory.display()),
+                    );
                     break;
                 }
             };
@@ -206,10 +212,7 @@ async fn import_directory_inner(
                 Err(error) => {
                     let mut current = status.write().await;
                     current.skipped += 1;
-                    push_bounded_error(
-                        &mut current.errors,
-                        format!("{}: {error}", path.display()),
-                    );
+                    push_bounded_error(&mut current.errors, format!("{}: {error}", path.display()));
                     continue;
                 }
             };
@@ -517,8 +520,12 @@ mod tests {
         let repository = Repository::connect(&config.database_url()).await.unwrap();
         let source = root.join("Documents");
         tokio::fs::create_dir_all(&source).await.unwrap();
-        tokio::fs::write(source.join("one.pdf"), b"one").await.unwrap();
-        tokio::fs::write(source.join("two.pdf"), b"two").await.unwrap();
+        tokio::fs::write(source.join("one.pdf"), b"one")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("two.pdf"), b"two")
+            .await
+            .unwrap();
         let request = LibraryImportRequest {
             path: source,
             tags: Vec::new(),
