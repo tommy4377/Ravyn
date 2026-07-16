@@ -3568,6 +3568,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "percent-encoding",
  "ravyn",
  "reqwest",
  "semver",

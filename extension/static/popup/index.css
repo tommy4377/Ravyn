@@ -1,0 +1,59 @@
+body {
+  width: 370px;
+  min-height: 520px;
+}
+main {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+header,
+footer,
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.brand img {
+  width: 28px;
+  height: 28px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.jobs {
+  display: grid;
+  margin-top: 7px;
+}
+.job {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.job:first-child {
+  border-top: 0;
+}
+.job-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+#message {
+  min-height: 17px;
+  color: var(--muted);
+  font-size: 12px;
+}

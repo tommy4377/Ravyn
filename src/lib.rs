@@ -6,6 +6,7 @@ pub mod config;
 pub mod core;
 pub mod download;
 pub mod error;
+pub mod native_protocol;
 pub mod postprocess;
 pub mod services;
 pub mod storage;

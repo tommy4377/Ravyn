@@ -55,6 +55,31 @@ jobs:
           npm test --prefix frontend
           npm run build --prefix frontend
 
+  firefox-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --prefix extension
+      - name: Validate and package Firefox extension
+        run: |
+          npm run check --prefix extension
+          npm run package:verify --prefix extension
+      - name: Upload extension validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ravyn-firefox-validation
+          path: extension/artifacts/*
+          if-no-files-found: error
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppearanceSettings from "./AppearanceSettings.svelte";
+  import BrowserIntegrationSettings from "./BrowserIntegrationSettings.svelte";
   import AboutSettings from "./AboutSettings.svelte";
   import DownloadSettings from "./DownloadSettings.svelte";
   import GeneralSettings from "./GeneralSettings.svelte";
@@ -75,6 +76,7 @@
           {:else if controller.category === "network"}<NetworkSettings {controller} />
           {:else if controller.category === "updates"}<UpdateSettings {controller} />
           {:else if controller.category === "privacy"}<SecretSettings {controller} />
+          {:else if controller.category === "browser"}<BrowserIntegrationSettings />
           {:else if controller.category === "troubleshooting"}<TroubleshootingSettings {controller} />
           {:else}<AboutSettings {controller} />{/if}
         </div>

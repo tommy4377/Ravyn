@@ -7,6 +7,7 @@
   import DownloadsView from "../downloads/DownloadsView.svelte";
   import JobDetailsPane from "../downloads/JobDetailsPane.svelte";
   import { JobsService } from "../services/jobs";
+  import { takeBrowserAction, type BrowserAction } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
@@ -21,8 +22,30 @@
 
   navigation.init();
   notifications.init();
+
+  function applyBrowserAction(action: BrowserAction | null): void {
+    if (!action) return;
+    if (action.source_url) {
+      navigation.requestAdd(action.section === "media" ? "media" : "http", action.source_url);
+      return;
+    }
+    const section = action.section;
+    if (section === "library" || section === "media" || section === "torrents" || section === "automation" || section === "settings") {
+      navigation.navigate(section);
+    } else if (section === "components") {
+      navigation.navigate("settings");
+    } else {
+      navigation.navigate("downloads");
+    }
+  }
+
   onMount(() => {
     const disposeAppearance = systemAppearance.init();
+    const readBrowserAction = (): void => {
+      void takeBrowserAction().then(applyBrowserAction).catch(() => undefined);
+    };
+    readBrowserAction();
+    const browserActionTimer = window.setInterval(readBrowserAction, 750);
     const onKeydown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       const editing = target?.matches("input, textarea, select, [contenteditable='true']") ?? false;
@@ -60,6 +83,7 @@
     window.addEventListener("keydown", onKeydown);
     return () => {
       window.removeEventListener("keydown", onKeydown);
+      window.clearInterval(browserActionTimer);
       disposeAppearance?.();
     };
   });

@@ -83,11 +83,16 @@ fn finish_report(
                 .map(|error| format!("{}: {error}", step.step))
         })
         .collect::<Vec<_>>();
+    let native_host_completed = installed_exe.is_none()
+        || steps
+            .iter()
+            .any(|step| step.step == "register_firefox_native_host" && step.applied);
     let integration_completed = installed_exe
         .as_deref()
         .is_some_and(std::path::Path::is_file)
         && installed_sha256.is_some()
-        && registration_completed;
+        && registration_completed
+        && native_host_completed;
 
     IntegrationReport {
         steps,
@@ -169,6 +174,7 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
             ("start_menu_shortcut", request.start_menu_shortcut),
             ("desktop_shortcut", request.desktop_shortcut),
             ("launch_at_startup", request.launch_at_startup),
+            ("register_firefox_native_host", true),
         ] {
             steps.push(skipped(
                 step,
@@ -246,6 +252,20 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         }
     } else {
         steps.push(skipped("launch_at_startup", "not requested"));
+    }
+
+    // 6. Firefox native-messaging host. Registration is per-user and safe
+    // even when Firefox is not installed yet; the extension becomes usable as
+    // soon as it is added to the browser.
+    match &effective_exe {
+        Some(exe) => match crate::browser_integration::register(exe) {
+            Ok(()) => steps.push(ok("register_firefox_native_host")),
+            Err(error) => steps.push(failed("register_firefox_native_host", error)),
+        },
+        None => steps.push(failed(
+            "register_firefox_native_host",
+            "no executable to register as the native host".into(),
+        )),
     }
 
     finish_report(

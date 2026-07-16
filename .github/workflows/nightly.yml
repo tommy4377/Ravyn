@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in url_security cron import_lines engine_manifest metalink content_disposition content_range ytdlp_progress rqbit_payload browser_origin restore_marker; do
+          for target in url_security cron import_lines engine_manifest metalink content_disposition content_range ytdlp_progress rqbit_payload browser_origin restore_marker native_message; do
             cargo fuzz run "$target" -- -max_total_time=60 -timeout=10
           done
 

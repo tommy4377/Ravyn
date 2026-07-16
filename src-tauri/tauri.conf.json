@@ -49,7 +49,16 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": [
+          "./windows/firefox-native-host.wxs"
+        ],
+        "componentRefs": [
+          "RavynFirefoxNativeHostRegistration"
+        ]
       }
     }
   },

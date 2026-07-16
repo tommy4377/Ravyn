@@ -60,6 +60,7 @@ class NavigationStore {
   notificationDrawerOpen = $state(false);
   systemAccent = $state<string | null>(null);
   pendingAddKind = $state<"http" | "media" | "torrent" | null>(null);
+  pendingAddSource = $state("");
   settingsDirty = $state(false);
   pendingSection = $state<NavSection | null>(null);
 
@@ -216,9 +217,16 @@ class NavigationStore {
     if (id) this.detailsPaneOpen = true;
   }
 
-  requestAdd(kind: "http" | "media" | "torrent" = "http"): void {
+  requestAdd(kind: "http" | "media" | "torrent" = "http", source = ""): void {
     this.pendingAddKind = kind;
+    this.pendingAddSource = source;
     this.navigate("downloads");
+  }
+
+  consumeAddSource(): string {
+    const source = this.pendingAddSource;
+    this.pendingAddSource = "";
+    return source;
   }
 
   consumeAddRequest(): "http" | "media" | "torrent" | null {

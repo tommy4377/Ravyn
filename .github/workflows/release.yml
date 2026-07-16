@@ -59,9 +59,11 @@ jobs:
           $frontend = (Get-Content 'frontend\package.json' -Raw | ConvertFrom-Json).version
           $root = ([regex]::Match((Get-Content 'Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
           $desktop = ([regex]::Match((Get-Content 'src-tauri\Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
-          $versions = @($tauri, $frontend, $root, $desktop) | Select-Object -Unique
+          $extension = (Get-Content 'extension\package.json' -Raw | ConvertFrom-Json).version
+          $extensionManifest = (Get-Content 'extension\manifests\base.json' -Raw | ConvertFrom-Json).version
+          $versions = @($tauri, $frontend, $root, $desktop, $extension, $extensionManifest) | Select-Object -Unique
           if ($versions.Count -ne 1) {
-            throw "Ravyn versions are not synchronized: tauri=$tauri frontend=$frontend root=$root desktop=$desktop"
+            throw "Ravyn versions are not synchronized: tauri=$tauri frontend=$frontend root=$root desktop=$desktop extension=$extension manifest=$extensionManifest"
           }
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
@@ -292,6 +294,21 @@ jobs:
             throw 'The installer did not register an installation location.'
           }
 
+          $nativeHostKey = 'HKCU:\Software\Mozilla\NativeMessagingHosts\com.ravyn.download_manager'
+          $nativeHostManifest = Join-Path $env:LOCALAPPDATA 'Ravyn\browser\com.ravyn.download_manager.json'
+          if (-not (Test-Path $nativeHostKey)) {
+            throw 'The NSIS post-install hook did not register the Firefox native host.'
+          }
+          if (-not (Test-Path $nativeHostManifest)) {
+            throw 'The NSIS post-install hook did not create the Firefox native-host manifest.'
+          }
+          $manifest = Get-Content $nativeHostManifest -Raw | ConvertFrom-Json
+          if ($manifest.name -ne 'com.ravyn.download_manager' -or
+              $manifest.path -ne $installedExe -or
+              $manifest.allowed_extensions -notcontains 'firefox-extension@ravyn.app') {
+            throw 'The Firefox native-host manifest does not match the installed Ravyn executable and extension.'
+          }
+
           $env:RAVYN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ravyn-smoke-data'
           $readyMarker = Join-Path $env:RUNNER_TEMP 'ravyn-desktop-ready.json'
           Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
@@ -329,6 +346,12 @@ jobs:
           Start-Sleep -Seconds 2
           if (Test-Path $installedExe) {
             throw 'The smoke-test uninstall left the desktop executable behind.'
+          }
+          if (Test-Path $nativeHostKey) {
+            throw 'The smoke-test uninstall left the Firefox native-host registry entry behind.'
+          }
+          if (Test-Path $nativeHostManifest) {
+            throw 'The smoke-test uninstall left the Firefox native-host manifest behind.'
           }
 
       - name: Generate CycloneDX SBOM
@@ -371,6 +394,79 @@ jobs:
             Remove-Item "Cert:\CurrentUser\My\$env:RAVYN_AUTHENTICODE_THUMBPRINT" -Force -ErrorAction SilentlyContinue
           }
 
+  firefox-extension:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --prefix extension
+      - name: Validate deterministic Firefox packages
+        run: |
+          npm run check --prefix extension
+          npm run package:verify --prefix extension
+      - name: Validate synchronized extension version
+        shell: bash
+        run: |
+          set -euo pipefail
+          extension_version="$(node -p "require('./extension/package.json').version")"
+          manifest_version="$(node -p "require('./extension/manifests/base.json').version")"
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          test "$extension_version" = "$manifest_version"
+          test "$extension_version" = "$app_version"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test "${GITHUB_REF_NAME#v}" = "$extension_version"
+          fi
+      - name: Sign Firefox extension through AMO
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: extension
+        env:
+          AMO_API_KEY: ${{ secrets.RAVYN_AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.RAVYN_AMO_API_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$AMO_API_KEY" || { echo 'RAVYN_AMO_API_KEY is required for tagged releases.' >&2; exit 1; }
+          test -n "$AMO_API_SECRET" || { echo 'RAVYN_AMO_API_SECRET is required for tagged releases.' >&2; exit 1; }
+          mkdir -p artifacts/signed
+          npx web-ext sign \
+            --source-dir dist/firefox \
+            --artifacts-dir artifacts/signed \
+            --api-key "$AMO_API_KEY" \
+            --api-secret "$AMO_API_SECRET" \
+            --channel unlisted \
+            --upload-source-code "artifacts/ravyn-firefox-source-$(node -p "require('./package.json').version").zip" \
+            --no-input
+          signed="$(find artifacts/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+          test -n "$signed" || { echo 'AMO did not return a signed XPI.' >&2; exit 1; }
+          version="$(node -p "require('./package.json').version")"
+          mv "$signed" "artifacts/ravyn-firefox-${version}-signed.xpi"
+      - name: Generate extension checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in extension/artifacts/*.xpi extension/artifacts/*.zip; do
+            sha256sum "$file" > "$file.sha256"
+          done
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            extension/artifacts/*.xpi
+            extension/artifacts/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravyn-firefox-extension
+          path: extension/artifacts/*
+          if-no-files-found: error
+
   backend-portable:
     strategy:
       fail-fast: false
@@ -405,7 +501,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows-desktop, backend-portable]
+    needs: [windows-desktop, firefox-extension, backend-portable]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -6,7 +6,9 @@
 mod app_updates;
 mod appearance;
 mod backend;
+mod browser_integration;
 mod installation;
+mod native_messaging;
 mod integration;
 mod setup_guard;
 mod shell_paths;
@@ -278,6 +280,48 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
 
 
 
+
+/// Return the current Firefox native-messaging registration state.
+#[tauri::command]
+fn browser_integration_status(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    Ok(browser_integration::status())
+}
+
+/// Repair the per-user Firefox native-messaging manifest and registry entry.
+#[tauri::command]
+async fn repair_browser_integration(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(browser_integration::repair_for_current_executable)
+        .await
+        .map_err(|error| format!("the browser integration worker failed: {error}"))?
+}
+
+/// Remove the Firefox native-messaging registration for the current user.
+#[tauri::command]
+async fn remove_browser_integration(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(browser_integration::unregister)
+        .await
+        .map_err(|error| format!("the browser integration worker failed: {error}"))?
+}
+
+/// Consume a browser action delivered before the main webview was ready.
+#[tauri::command]
+fn take_browser_action(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, browser_integration::BrowserActionState>,
+) -> Result<Option<browser_integration::BrowserAction>, String> {
+    require_window(&window, "main")?;
+    Ok(state.take())
+}
+
 /// Open an existing file in its Windows default application or open a folder.
 #[tauri::command]
 async fn open_native_path(
@@ -419,6 +463,12 @@ fn create_main_window(
 }
 
 pub fn run() {
+    if native_messaging::try_handle_command_line() {
+        return;
+    }
+    if browser_integration::try_handle_command_line() {
+        return;
+    }
     if uninstall::try_handle_command_line() {
         return;
     }
@@ -429,9 +479,17 @@ pub fn run() {
         )
         .init();
 
+    let initial_arguments = std::env::args().collect::<Vec<_>>();
+    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments);
+    let browser_action_state = browser_integration::BrowserActionState::default();
+    if let Some(action) = initial_browser_action {
+        browser_action_state.replace(action);
+    }
+
     let (handle, _receiver) = backend::start();
 
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init());
     // MCP automation bridge for explicitly enabled development-time testing only.
     #[cfg(all(debug_assertions, feature = "mcp-automation"))]
     {
@@ -444,6 +502,7 @@ pub fn run() {
 
     builder
         .manage(handle.clone())
+        .manage(browser_action_state)
         .manage(setup_guard::SetupCommandGuard::default())
         .manage(app_updates::AppUpdateState::default())
         .invoke_handler(tauri::generate_handler![
@@ -459,6 +518,10 @@ pub fn run() {
             cancel_app_update,
             install_app_update_now,
             desktop_appearance,
+            browser_integration_status,
+            repair_browser_integration,
+            remove_browser_integration,
+            take_browser_action,
             open_native_path,
             reveal_native_path,
         ])
@@ -480,6 +543,13 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            if crate::installation::current_executable_is_installed() {
+                tauri::async_runtime::spawn_blocking(|| {
+                    if let Err(error) = crate::browser_integration::repair_for_current_executable() {
+                        tracing::warn!(%error, "failed to repair Firefox browser integration at startup");
+                    }
+                });
+            }
             let app_handle = app.handle().clone();
             let backend = handle.clone();
             // Open the correct first window once the backend reports state.

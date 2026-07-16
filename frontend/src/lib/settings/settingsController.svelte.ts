@@ -44,6 +44,7 @@ export type SettingsCategory =
   | "network"
   | "updates"
   | "privacy"
+  | "browser"
   | "troubleshooting"
   | "about";
 
