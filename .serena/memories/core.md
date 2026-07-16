@@ -1,13 +1,15 @@
 # Ravyn map
-- Cargo workspace, 3 parts: root crate `ravyn` (backend, `src/`), `src-tauri` (`ravyn-desktop`, Tauri 2 shell), `frontend/` (Svelte 5 runes + Vite, TS). `fuzz/` excluded from workspace.
+- Cargo workspace, 4 product surfaces: root crate `ravyn` (backend, `src/`), `src-tauri` (`ravyn-desktop`, Tauri 2 shell), `frontend/` (Svelte 5 runes + Vite, TS), `extension/` (Firefox MV3 browser extension). `fuzz/` excluded from workspace.
 - Backend is embedded in-process by the desktop shell on an ephemeral loopback port; the webview never trusts local setup-state, it re-reads everything from the authenticated backend API via `backend_info`.
-- Entrypoints: `src/main.rs` (standalone backend binary), `src-tauri/src/main.rs`+`lib.rs` (desktop shell), `frontend/src/main.ts`+`App.svelte` (webview root, serves both setup flow and main app).
+- The Firefox extension communicates via native messaging through the installed Ravyn desktop executable, with a `BackendDescriptorGuard` ensuring the native host manifest points at the running backend port.
+- Entrypoints: `src/main.rs` (standalone backend binary), `src-tauri/src/main.rs`+`lib.rs` (desktop shell), `frontend/src/main.ts`+`App.svelte` (webview root, serves both setup flow and main app), `extension/src/background/index.ts` (extension background worker).
 - Backend domain map and persistence invariants: `mem:backend/core`.
 - Library features (persistent library, presets, basket, profiles, trust, cleanup, statistics): `mem:backend/library`.
-- Desktop shell (Tauri commands, updater, installation/integration, setup handoff): `mem:desktop/core`.
+- Desktop shell (Tauri commands, updater, installation/integration, setup handoff, browser integration): `mem:desktop/core`.
 - Frontend structure and module boundaries: `mem:frontend/core`. Downloads vertical-slice non-obvious rules: `mem:frontend/downloads`.
-- Dependency/toolchain pins across all three parts: `mem:tech_stack`.
+- Extension structure and contracts: `mem:extension/core`.
+- Dependency/toolchain pins across all parts: `mem:tech_stack`.
 - Repository conventions and security defaults: `mem:conventions`.
 - Commands: `mem:suggested_commands`; completion gates: `mem:task_completion`.
-- Root-level status/roadmap `.md` docs (AGENTS.md, PROJECT_STATUS.md, phase-report files, todo.md) were deleted from the working tree as of 2026-07-14 — do not reference them as memory sources; only `CLAUDE.md`, `README.md`, and `docs/*.md` remain as authoritative repo docs.
+- Only `CLAUDE.md`, `README.md`, `docs/*.md` are authoritative repo docs.
 - `docs/APP_UPDATES.md`, `docs/COMPONENT_MANIFESTS.md`, `docs/SETUP_CAPABILITY_MATRIX.md` must stay synchronized with updater/component/setup code changes per CLAUDE.md working rules.
