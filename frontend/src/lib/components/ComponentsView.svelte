@@ -95,7 +95,9 @@
 
   async function load(): Promise<void> {
     if (!connection.client) return;
-    loading = true;
+    // Only block the view before the first successful load; later refreshes
+    // update the cards in place so operations don't flash the whole page.
+    if (overview === null) loading = true;
     error = null;
     try {
       [overview, manifestStatus] = await Promise.all([

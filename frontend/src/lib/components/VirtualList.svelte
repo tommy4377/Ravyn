@@ -101,6 +101,9 @@
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Keep row width independent of scrollbar visibility so rows stay
+       aligned with fixed column headers rendered outside the viewport. */
+    scrollbar-gutter: stable;
   }
   .spacer {
     position: relative;

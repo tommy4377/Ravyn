@@ -546,7 +546,9 @@
   .filter-field { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); }
   .filter-field label { color: var(--text-secondary); font-size: var(--text-caption); font-weight: 600; }
   .filter-field :global(.dropdown), .filter-field :global(select) { width: 100%; }
-  .column-header { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(180px, 1.25fr) minmax(115px, .72fr) minmax(82px, .55fr) minmax(96px, .64fr) 32px; gap: var(--space-3); min-height: 36px; align-items: center; padding: 0 var(--space-3) 0 var(--space-4); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
+  /* scrollbar-gutter mirrors the VirtualList viewport so header and row
+     columns stay aligned whether or not the list currently scrolls. */
+  .column-header { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(180px, 1.25fr) minmax(115px, .72fr) minmax(82px, .55fr) minmax(96px, .64fr) 32px; gap: var(--space-3); min-height: 36px; align-items: center; padding: 0 var(--space-3) 0 var(--space-4); overflow-y: hidden; scrollbar-gutter: stable; border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
   .column-header button { min-width: 0; display: inline-flex; align-items: center; gap: 4px; justify-self: start; padding: 4px 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: default; }
   .column-header button:hover { color: var(--text-primary); }
   .column-header button :global(svg) { opacity: .55; }

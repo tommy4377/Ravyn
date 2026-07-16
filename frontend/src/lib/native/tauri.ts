@@ -4,6 +4,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 export interface BackendInfo {
@@ -235,4 +236,26 @@ export function openNativePath(path: string): Promise<void> {
 
 export function revealNativePath(path: string): Promise<void> {
   return invoke("reveal_native_path", { path });
+}
+
+/** Shows a native Windows notification for a download event. */
+export function notifyNative(title: string, body?: string): Promise<void> {
+  return invoke("notify_native", { title, body });
+}
+
+/** Opens the compact always-on-top download progress window. */
+export function openCompactWindow(): Promise<void> {
+  return invoke("open_compact_window");
+}
+
+/** Brings the main Ravyn window to the foreground. */
+export function focusMainWindow(): Promise<void> {
+  return invoke("focus_main_window");
+}
+
+export type TrayAction = "pause-all" | "resume-all";
+
+/** Subscribes to actions triggered from the system tray menu. */
+export function onTrayAction(handler: (action: TrayAction) => void): Promise<UnlistenFn> {
+  return listen<TrayAction>("ravyn://tray-action", (event) => handler(event.payload));
 }

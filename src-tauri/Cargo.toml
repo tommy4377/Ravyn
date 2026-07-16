@@ -28,8 +28,9 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 # Debug-only automation bridge used by the tauri-mcp test tooling.
 tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "sync", "time"] }

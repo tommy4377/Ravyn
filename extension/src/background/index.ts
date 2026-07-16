@@ -345,12 +345,11 @@ async function downloadCurrentPage(): Promise<void> {
   });
 }
 
-function updateBadge(status: ConnectionStatus): void {
-  const text = status.backendConnected ? "" : status.hostAvailable ? "!" : "×";
-  void browser.action.setBadgeText({ text });
-  void browser.action.setBadgeBackgroundColor({
-    color: status.backendConnected ? "#2f7d32" : "#a33a3a",
-  });
+function updateBadge(_status: ConnectionStatus): void {
+  // The toolbar icon stays badge-free: transient reconnect windows made the
+  // "!" marker flash misleadingly while Ravyn was perfectly healthy. The
+  // popup itself reports the live connection state instead.
+  void browser.action.setBadgeText({ text: "" });
 }
 
 async function broadcast(message: unknown): Promise<void> {

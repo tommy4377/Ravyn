@@ -12,7 +12,9 @@ mod integration;
 mod native_messaging;
 mod setup_guard;
 mod shell_paths;
+mod silent_command;
 mod torrent_association;
+mod tray;
 mod uninstall;
 
 use tauri::Manager;
@@ -362,7 +364,7 @@ async fn desktop_appearance(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<appearance::DesktopAppearance, String> {
-    if !matches!(window.label(), "main" | "setup") {
+    if !matches!(window.label(), "main" | "setup" | "compact") {
         return Err("command is not available from this window".into());
     }
     appearance::read(app, window).await
@@ -445,9 +447,71 @@ async fn main_window_ready(
     if let Some(setup) = app.get_webview_window("setup") {
         setup.close().map_err(|e| e.to_string())?;
     }
+    if let Err(error) = tray::ensure(&app) {
+        tracing::warn!(%error, "failed to create the system tray icon");
+    }
     app_updates::confirm_update_readiness(&app)?;
     app_updates::start_background_check(app);
     Ok(())
+}
+
+/// Opens (or focuses) the compact download progress window. Called by the
+/// main window when a transfer starts while Ravyn is minimized or unfocused.
+#[tauri::command]
+fn open_compact_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    require_window(&window, "main")?;
+    if let Some(existing) = app.get_webview_window("compact") {
+        existing.show().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "compact",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Ravyn downloads")
+    .inner_size(380.0, 190.0)
+    .min_inner_size(320.0, 150.0)
+    .maximizable(false)
+    .minimizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .build()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+/// Brings the main window to the foreground; used by the compact window.
+#[tauri::command]
+fn focus_main_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "compact") {
+        return Err("command is not available from this window".into());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window does not exist".to_owned())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.unminimize().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Show a native desktop notification for a download event. The message
+/// content is provided by the main window, which owns the job metadata.
+#[tauri::command]
+fn notify_native(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    title: String,
+    body: Option<String>,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    use tauri_plugin_notification::NotificationExt;
+    let mut builder = app.notification().builder().title(title);
+    if let Some(body) = body {
+        builder = builder.body(body);
+    }
+    builder.show().map_err(|error| error.to_string())
 }
 
 fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -502,7 +566,9 @@ pub fn run() {
     let (handle, _receiver) = backend::start();
 
     #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init());
     // MCP automation bridge for explicitly enabled development-time testing only.
     #[cfg(all(debug_assertions, feature = "mcp-automation"))]
     {
@@ -538,6 +604,9 @@ pub fn run() {
             prompt_torrent_default_app,
             open_native_path,
             reveal_native_path,
+            notify_native,
+            open_compact_window,
+            focus_main_window,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {

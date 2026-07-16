@@ -10,7 +10,8 @@
     | "torrent" | "file" | "video" | "music" | "document" | "image" | "archive"
     | "database" | "shield" | "wrench" | "sun" | "moon" | "palette" | "compact"
     | "menu" | "speed" | "peer" | "tag" | "calendar" | "rule" | "cloud" | "copy"
-    | "hard-drive" | "restore" | "verify" | "eye" | "edit" | "save" | "bolt" | "bell";
+    | "hard-drive" | "restore" | "verify" | "eye" | "edit" | "save" | "bolt" | "bell"
+    | "check";
 
   let { name, size = 16 }: { name: IconName; size?: number } = $props();
 </script>
@@ -93,6 +94,7 @@
   {:else if name === "save"}<path d="M4 3.5h10l2 2V16H4zM7 3.5V8h6V3.5M7 16v-5h6v5" />
   {:else if name === "bolt"}<path d="M11.5 2.8L5 11h4l-.5 6.2L15 9h-4z" />
   {:else if name === "bell"}<path d="M5 8.5a5 5 0 0 1 10 0v3.2l1.5 2.3h-13L5 11.7zM8 16h4" />
+  {:else if name === "check"}<path d="M4 10.5l4 4 8-9" />
   {/if}
 </svg>
 

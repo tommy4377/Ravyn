@@ -6,7 +6,8 @@
   import DownloadsView from "../downloads/DownloadsView.svelte";
   import JobDetailsPane from "../downloads/JobDetailsPane.svelte";
   import { JobsService } from "../services/jobs";
-  import { takeBrowserAction, type BrowserAction } from "../native/tauri";
+  import { onTrayAction, takeBrowserAction, type BrowserAction, type TrayAction } from "../native/tauri";
+  import { notifyDownloadEvent } from "./downloadNotifications";
   import { connection } from "../stores/connection.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
@@ -101,10 +102,32 @@
 
   $effect(() => {
     if (connection.status !== "ready" || !connection.client || !connection.events) return;
-    jobsStore.init(new JobsService(connection.client));
-    const unsubscribe = connection.events.subscribe((event) => jobsStore.applyEvent(event));
+    const service = new JobsService(connection.client);
+    jobsStore.init(service);
+    const unsubscribe = connection.events.subscribe((event) => {
+      notifyDownloadEvent(event);
+      jobsStore.applyEvent(event);
+    });
+    let unlistenTray: (() => void) | undefined;
+    void onTrayAction((action: TrayAction) => {
+      const ids = jobsStore.list
+        .filter((job) =>
+          action === "pause-all"
+            ? job.status === "queued" || job.status === "downloading"
+            : job.status === "paused",
+        )
+        .map((job) => job.id);
+      if (ids.length > 0) {
+        void service
+          .bulkAction(action === "pause-all" ? "pause" : "resume", ids)
+          .catch(() => undefined);
+      }
+    })
+      .then((unlisten) => (unlistenTray = unlisten))
+      .catch(() => undefined);
     return () => {
       unsubscribe();
+      unlistenTray?.();
       jobsStore.dispose();
     };
   });

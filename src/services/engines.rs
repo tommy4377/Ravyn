@@ -955,7 +955,9 @@ async fn install_msi_administrative(
     use tokio::process::Command;
 
     let target_argument = format!("TARGETDIR={}", target.display());
-    let mut child = Command::new("msiexec.exe")
+    let mut command = Command::new("msiexec.exe");
+    crate::services::process::hide_console_window(&mut command);
+    let mut child = command
         .arg("/a")
         .arg(installer)
         .arg("/qn")

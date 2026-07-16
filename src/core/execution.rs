@@ -356,8 +356,12 @@ impl JobManager {
                     outcome.artifacts
                 };
                 let mut registered = Vec::with_capacity(produced.len());
+                let mut produced_bytes: u64 = 0;
                 for produced_artifact in produced {
                     let path = produced_artifact.path;
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        produced_bytes = produced_bytes.saturating_add(metadata.len());
+                    }
                     let is_primary = primary_path.as_deref() == Some(path.as_path());
                     let artifact = self
                         .repository
@@ -401,6 +405,21 @@ impl JobManager {
                     if produced_artifact.postprocess {
                         registered.push((artifact.id, path));
                     }
+                }
+                if job.kind == JobKind::Media && produced_bytes > 0 {
+                    // yt-dlp progress is per file, so the last downloaded file
+                    // (often a tiny subtitle) would otherwise define the job
+                    // size. Report the real on-disk output total instead.
+                    self.repository
+                        .update_progress(job.id, produced_bytes, Some(produced_bytes))
+                        .await?;
+                    self.events
+                        .publish(Event::Progress(crate::core::models::ProgressSnapshot {
+                            job_id: job.id,
+                            downloaded_bytes: produced_bytes,
+                            total_bytes: Some(produced_bytes),
+                            bytes_per_second: 0,
+                        }));
                 }
                 if let Some(filename) = inferred_completed_filename(
                     job.kind,

@@ -107,9 +107,11 @@ async function handle(
       });
       break;
     case MenuId.linkScanPage:
+      // Opens the linked page in Ravyn's add flow, where the backend sniffer
+      // classifies the page. Previously this duplicated "Schedule link".
       if (directUrl)
         await native.request("open_ravyn", {
-          section: "automation",
+          section: "downloads",
           sourceUrl: directUrl,
         });
       break;

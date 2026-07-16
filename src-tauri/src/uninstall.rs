@@ -82,16 +82,16 @@ fn schedule_self_delete(executable: &std::path::Path) -> Result<(), String> {
     let script = format!(
         "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue"
     );
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            &script,
-        ])
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        &script,
+    ]);
+    crate::silent_command::hide_console_window(&mut command);
+    command.spawn().map_err(|error| error.to_string())?;
     Ok(())
 }

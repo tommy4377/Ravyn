@@ -432,10 +432,10 @@ fn create_shortcut(target: &std::path::Path, link: &std::path::Path) -> Result<(
                 .unwrap_or_default()
         ),
     );
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut command = std::process::Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    crate::silent_command::hide_console_window(&mut command);
+    let output = command.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
     } else {
