@@ -20,7 +20,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check": "npm run format:check && npm run lint && npm test && npm run package && npm run build:source",
-    "lint:python": "python3 -m py_compile scripts/deterministic-zip.py",
+    "lint:python": "python -m py_compile scripts/deterministic-zip.py",
     "package:verify": "node scripts/verify-packages.mjs",
     "test:fixtures": "node test-pages/server.mjs"
   },

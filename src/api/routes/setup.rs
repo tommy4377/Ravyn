@@ -17,8 +17,7 @@ const MAX_LIBRARY_PATH_BYTES: usize = 4096;
 /// repair and update flows must use dedicated APIs instead of silently
 /// reopening first-run privileges.
 pub(super) async fn ensure_setup_mutable(s: &ApiState) -> Result<()> {
-    if s
-        .repository
+    if s.repository
         .load_setup_state()
         .await?
         .is_some_and(|state| state.completed)
@@ -206,11 +205,9 @@ async fn verify_completed_installation(
         )));
     }
 
-    let actual = crate::services::checksum::sha256(
-        &path,
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+    let actual =
+        crate::services::checksum::sha256(&path, &tokio_util::sync::CancellationToken::new())
+            .await?;
     if !actual.eq_ignore_ascii_case(installed_sha256) {
         return Err(crate::error::RavynError::Conflict(
             "the reported executable checksum does not match the file on disk".into(),
@@ -235,9 +232,12 @@ fn installation_ready(installation: Option<&crate::storage::InstallationRecord>)
         .installed_version
         .as_deref()
         .is_some_and(|version| !version.trim().is_empty());
-    let checksum_ready = installation.installed_sha256.as_deref().is_some_and(|sha256| {
-        sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    });
+    let checksum_ready = installation
+        .installed_sha256
+        .as_deref()
+        .is_some_and(|sha256| {
+            sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
 
     INSTALLATION_MODES.contains(&installation.installation_mode.as_str())
         && executable_ready
@@ -288,7 +288,9 @@ pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<Se
     let completed = record.as_ref().is_some_and(|r| r.completed);
     let features_selected = selections.is_some();
     let installation_is_ready = installation_ready(
-        record.as_ref().and_then(|state| state.installation.as_ref()),
+        record
+            .as_ref()
+            .and_then(|state| state.installation.as_ref()),
     );
     let integration_consent_saved = record
         .as_ref()
@@ -326,9 +328,7 @@ pub(super) async fn get_setup_state(State(s): State<ApiState>) -> Result<Json<Se
             .as_ref()
             .and_then(|r| r.installation.clone())
             .map(Into::into),
-        integration_consent: record
-            .and_then(|r| r.integration_consent)
-            .map(Into::into),
+        integration_consent: record.and_then(|r| r.integration_consent).map(Into::into),
     }))
 }
 
@@ -363,8 +363,7 @@ pub(super) async fn save_integration_consent(
             || request.launch_at_startup)
     {
         return Err(crate::error::RavynError::Invalid(
-            "portable and development modes cannot request Windows installation integration"
-                .into(),
+            "portable and development modes cannot request Windows installation integration".into(),
         ));
     }
     let consent = crate::storage::IntegrationConsentRecord {
@@ -632,7 +631,8 @@ pub(super) async fn complete_setup(State(s): State<ApiState>) -> Result<Json<Set
         .is_none_or(|runtime| !paths_equivalent(&library_root, runtime))
     {
         return Err(crate::error::RavynError::Conflict(
-            "the backend must restart before setup can be completed with the selected library".into(),
+            "the backend must restart before setup can be completed with the selected library"
+                .into(),
         ));
     }
     let library_root_str = library_root.display().to_string();
@@ -732,10 +732,12 @@ mod tests {
             relaunch_pending: false,
         };
         assert!(installation_ready(Some(&installation)));
-        assert!(!installation_ready(Some(&crate::storage::InstallationRecord {
-            integration_completed: false,
-            ..installation
-        })));
+        assert!(!installation_ready(Some(
+            &crate::storage::InstallationRecord {
+                integration_completed: false,
+                ..installation
+            }
+        )));
     }
 
     #[test]

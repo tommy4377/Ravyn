@@ -243,6 +243,12 @@
           "markdownDescription": "Enables the open_native_path command without any pre-configured scope."
         },
         {
+          "description": "Enables the prompt_torrent_default_app command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-prompt-torrent-default-app",
+          "markdownDescription": "Enables the prompt_torrent_default_app command without any pre-configured scope."
+        },
+        {
           "description": "Allows the main Ravyn window to remove the current-user Firefox native-messaging registration.",
           "type": "string",
           "const": "allow-remove-browser-integration",
@@ -343,6 +349,12 @@
           "type": "string",
           "const": "deny-open-native-path",
           "markdownDescription": "Denies the open_native_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the prompt_torrent_default_app command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-prompt-torrent-default-app",
+          "markdownDescription": "Denies the prompt_torrent_default_app command without any pre-configured scope."
         },
         {
           "description": "Denies the repair_application command without any pre-configured scope.",

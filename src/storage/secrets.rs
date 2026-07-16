@@ -25,7 +25,9 @@ fn validate_secret_value(secret_type: &str, secret: &str) -> Result<()> {
     match secret_type {
         "proxy_credentials" => {
             reqwest::Proxy::all(secret.trim()).map_err(|error| {
-                RavynError::Invalid(format!("proxy secret must contain a valid proxy URL: {error}"))
+                RavynError::Invalid(format!(
+                    "proxy secret must contain a valid proxy URL: {error}"
+                ))
             })?;
         }
         "rqbit_credentials" => {
@@ -46,8 +48,8 @@ fn validate_secret_value(secret_type: &str, secret: &str) -> Result<()> {
             }
         }
         "cookies" => {
-            let cookies: std::collections::BTreeMap<String, String> =
-                serde_json::from_str(secret).map_err(|_| {
+            let cookies: std::collections::BTreeMap<String, String> = serde_json::from_str(secret)
+                .map_err(|_| {
                     RavynError::Invalid(
                         "cookie secret must be a JSON object of string name/value pairs".into(),
                     )
@@ -210,15 +212,16 @@ mod tests {
 
     #[test]
     fn validates_structured_secret_payloads() {
-        assert!(validate_secret_value(
-            "rqbit_credentials",
-            r#"{"username":"ravyn","password":"secret"}"#,
-        )
-        .is_ok());
+        assert!(
+            validate_secret_value(
+                "rqbit_credentials",
+                r#"{"username":"ravyn","password":"secret"}"#,
+            )
+            .is_ok()
+        );
         assert!(validate_secret_value("cookies", r#"{"session":"value"}"#).is_ok());
         assert!(
-            validate_secret_value("proxy_credentials", "http://user:pass@127.0.0.1:8080")
-                .is_ok()
+            validate_secret_value("proxy_credentials", "http://user:pass@127.0.0.1:8080").is_ok()
         );
         assert!(validate_secret_value("authentication_header", "Bearer token").is_ok());
     }
@@ -229,11 +232,8 @@ mod tests {
         assert!(validate_secret_value("cookies", "[]").is_err());
         assert!(validate_secret_value("proxy_credentials", "not a URL").is_err());
         assert!(
-            validate_secret_value(
-                "authentication_header",
-                "Bearer value\r\nInjected: true",
-            )
-            .is_err()
+            validate_secret_value("authentication_header", "Bearer value\r\nInjected: true",)
+                .is_err()
         );
     }
 }

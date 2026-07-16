@@ -121,9 +121,8 @@ impl AppUpdateManifest {
 
 impl SignedAppUpdateManifest {
     pub fn verify(&self, public_key: &[u8; 32]) -> Result<&AppUpdateManifest> {
-        let signature_bytes = hex::decode(&self.signature).map_err(|_| {
-            RavynError::Invalid("app update signature must be hexadecimal".into())
-        })?;
+        let signature_bytes = hex::decode(&self.signature)
+            .map_err(|_| RavynError::Invalid("app update signature must be hexadecimal".into()))?;
         let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
             RavynError::Invalid("app update signature must contain 64 bytes".into())
         })?;

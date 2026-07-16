@@ -86,10 +86,18 @@ export class MediaOverlayController {
     const shadow = host.attachShadow({ mode: "closed" });
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = "Download with Ravyn";
+    // Use the product mark in the overlay. The accessible name retains the
+    // explicit action without covering video controls with a text label.
+    const icon = document.createElement("img");
+    icon.src = browser.runtime.getURL("icons/ravyn-32.png");
+    icon.alt = "";
+    icon.width = 20;
+    icon.height = 20;
+    button.append(icon);
     button.setAttribute("aria-label", "Download this media with Ravyn");
     button.style.cssText =
-      "pointer-events:auto;border:1px solid rgba(255,255,255,.28);border-radius:8px;padding:7px 10px;background:rgba(22,22,24,.88);color:#fff;font:600 12px/1.2 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.35);backdrop-filter:blur(16px);cursor:pointer";
+      "pointer-events:auto;display:grid;place-items:center;width:34px;height:34px;border:1px solid rgba(255,255,255,.32);border-radius:50%;padding:0;background:#0f6cbd;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.35);backdrop-filter:blur(16px);cursor:pointer";
+    icon.style.cssText = "width:20px;height:20px";
     shadow.append(button);
     document.documentElement.append(host);
 
@@ -98,8 +106,8 @@ export class MediaOverlayController {
       const rect = element.getBoundingClientRect();
       const visible =
         rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0;
-      host.style.left = `${Math.max(8, Math.min(window.innerWidth - 162, rect.right - 154))}px`;
-      host.style.top = `${Math.max(8, Math.min(window.innerHeight - 42, rect.top + 10))}px`;
+      host.style.left = `${Math.max(8, Math.min(window.innerWidth - 42, rect.right - 42))}px`;
+      host.style.top = `${Math.max(8, Math.min(window.innerHeight - 42, rect.top + 8))}px`;
       host.style.display = visible ? "block" : "none";
     };
     const show = (): void => {
@@ -128,7 +136,7 @@ export class MediaOverlayController {
     };
 
     const protectedMedia = (): void => {
-      button.textContent = "Protected media";
+      button.replaceChildren("!");
       button.setAttribute(
         "aria-label",
         "Protected media cannot be downloaded by Ravyn",

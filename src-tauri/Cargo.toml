@@ -23,7 +23,7 @@ futures-util = "0.3"
 hex = "0.4"
 percent-encoding = "2"
 ravyn = { path = ".." }
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "http2", "stream", "json", "blocking"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "http2", "stream", "json", "blocking"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -25,6 +25,8 @@ suite exercises the path.
 | Setup completion and handoff | `POST /v1/setup/complete`, `finish_setup_handoff` | Completion stage | tested |
 | System capabilities/dependencies | system diagnostics routes | Diagnostics and Troubleshooting | connected |
 | Uninstall | `Ravyn.exe --uninstall` | Installed Apps registration | tested in release smoke flow |
+| Firefox download handoff | Native Messaging host + `/v1/jobs` | Popup, sidebar, interception, and media actions | tested |
+| Torrent default-app prompt | Windows association registration + Default Apps | Browser integration settings | tested |
 
 ## Component model
 
@@ -40,6 +42,11 @@ Managed component identifiers are `ytdlp`, `ffmpeg`, `rqbit`, and `seven_zip`.
 The built-in Windows x64 catalogue contains all four components. 7-Zip uses a
 verified MSI administrative extraction into Ravyn's private engine directory;
 it does not register a machine-wide 7-Zip installation.
+
+Managed engine paths are applied when the backend starts. Setup therefore
+hands off to a fresh Ravyn process after provisioning; the Components screen
+waits for install/update completion and clearly prompts for a restart before
+using a newly changed engine.
 
 Component states are `not_installed`, `queued`, `downloading`, `verifying`,
 `installing`, `installed`, `update_available`, `failed`, `unsupported`,
@@ -66,5 +73,9 @@ The repository gates the setup surface with:
 - Windows release installation, readiness, and uninstall smoke tests;
 - signed component catalogue validation and Windows provisioning checks.
 
-The browser extension is intentionally outside the desktop completion scope.
-The backend browser-token/import routes remain available for a future extension.
+The Firefox extension is a supported companion surface. It uses the installed
+desktop executable as its Native Messaging host, which relays authenticated
+requests to the in-process backend. Its compact toolbar popup shows recent
+jobs, while the resource sidebar remains available for page analysis. New
+installations intercept compatible Firefox downloads automatically and safely
+resume the browser transfer if the native handoff is unavailable.

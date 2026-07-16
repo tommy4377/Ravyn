@@ -134,8 +134,8 @@ fn platform_appearance(
 ) -> Result<DesktopAppearance, String> {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     let desktop = current_user
@@ -161,9 +161,7 @@ fn platform_appearance(
     let accent_color = current_user
         .open_subkey(r"Software\Microsoft\Windows\DWM")
         .ok()
-        .and_then(|key| {
-            key.get_value::<u32, _>("ColorizationColor").ok()
-        })
+        .and_then(|key| key.get_value::<u32, _>("ColorizationColor").ok())
         .map(argb_to_css);
 
     let source_path = PathBuf::from(source.trim_matches('\0'));
@@ -218,73 +216,80 @@ fn platform_appearance(
         accent_color,
         transparency_enabled,
     })
-
 }
 
 #[cfg(target_os = "windows")]
 fn copy_if_changed(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
-        let source_metadata = source.metadata().map_err(|error| {
-            format!("failed to inspect the Windows wallpaper {}: {error}", source.display())
-        })?;
-        let unchanged = destination.metadata().ok().is_some_and(|destination_metadata| {
+    let source_metadata = source.metadata().map_err(|error| {
+        format!(
+            "failed to inspect the Windows wallpaper {}: {error}",
+            source.display()
+        )
+    })?;
+    let unchanged = destination
+        .metadata()
+        .ok()
+        .is_some_and(|destination_metadata| {
             destination_metadata.len() == source_metadata.len()
                 && destination_metadata.modified().ok() == source_metadata.modified().ok()
         });
-        if unchanged {
-            return Ok(());
-        }
-        let temporary = destination.with_extension("ravyn-part");
-        std::fs::copy(source, &temporary).map_err(|error| {
-            format!("failed to cache the Windows wallpaper {}: {error}", source.display())
-        })?;
-        if destination.exists() {
-            let _ = std::fs::remove_file(destination);
-        }
-        std::fs::rename(&temporary, destination).map_err(|error| {
-            format!("failed to activate the cached Windows wallpaper: {error}")
-        })?;
-        Ok(())
+    if unchanged {
+        return Ok(());
     }
+    let temporary = destination.with_extension("ravyn-part");
+    std::fs::copy(source, &temporary).map_err(|error| {
+        format!(
+            "failed to cache the Windows wallpaper {}: {error}",
+            source.display()
+        )
+    })?;
+    if destination.exists() {
+        let _ = std::fs::remove_file(destination);
+    }
+    std::fs::rename(&temporary, destination)
+        .map_err(|error| format!("failed to activate the cached Windows wallpaper: {error}"))?;
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 fn remove_stale_wallpapers(cache_dir: &std::path::Path, keep: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(cache_dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != keep
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("desktop-wallpaper."))
-            {
-                let _ = std::fs::remove_file(path);
-            }
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path != keep
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("desktop-wallpaper."))
+        {
+            let _ = std::fs::remove_file(path);
         }
     }
+}
 
 #[cfg(target_os = "windows")]
 fn wallpaper_position(style: &str, tiled: &str) -> &'static str {
-        if tiled.trim() == "1" {
-            return "tile";
-        }
-        match style.trim() {
-            "0" => "center",
-            "2" => "stretch",
-            "6" => "fit",
-            "22" => "span",
-            _ => "fill",
-        }
+    if tiled.trim() == "1" {
+        return "tile";
     }
+    match style.trim() {
+        "0" => "center",
+        "2" => "stretch",
+        "6" => "fit",
+        "22" => "span",
+        _ => "fill",
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn argb_to_css(value: u32) -> String {
-        let red = (value >> 16) & 0xff;
-        let green = (value >> 8) & 0xff;
-        let blue = value & 0xff;
-        format!("#{red:02x}{green:02x}{blue:02x}")
-    }
+    let red = (value >> 16) & 0xff;
+    let green = (value >> 8) & 0xff;
+    let blue = value & 0xff;
+    format!("#{red:02x}{green:02x}{blue:02x}")
+}
 
 #[cfg(not(target_os = "windows"))]
 fn platform_appearance(

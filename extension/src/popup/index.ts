@@ -11,6 +11,7 @@ const jobs = element("jobs");
 const summaryText = element("summary");
 const urlInput = element<HTMLInputElement>("url");
 let currentTab: browser.tabs.Tab | undefined;
+let summaryRefreshTimer: number | undefined;
 
 void initialize();
 
@@ -22,6 +23,15 @@ async function initialize(): Promise<void> {
     element("page-host").textContent = safeHost(currentTab.url);
   bind();
   await Promise.all([refreshConnection(), refreshSummary()]);
+  summaryRefreshTimer = window.setInterval(() => void refreshSummary(), 2_000);
+  window.addEventListener(
+    "unload",
+    () => {
+      if (summaryRefreshTimer !== undefined)
+        window.clearInterval(summaryRefreshTimer);
+    },
+    { once: true },
+  );
 }
 
 function bind(): void {

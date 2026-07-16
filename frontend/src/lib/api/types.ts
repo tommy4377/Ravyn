@@ -300,6 +300,7 @@ export interface DownloadOptions {
   segments?: number | null;
   overwrite?: boolean;
   library_auto_destination?: boolean;
+  initially_paused?: boolean;
   tags?: string[];
   post_actions?: PostAction[];
   media?: MediaOptions | null;

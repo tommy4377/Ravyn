@@ -57,12 +57,10 @@ pub struct ApiState {
         Option<Arc<crate::services::manifest_refresh::RemoteManifestRefresher>>,
     pub protection: super::ApiProtectionState,
     pub library_import_status: crate::services::library::SharedImportStatus,
-    pub library_import_cancellation: Arc<
-        tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>,
-    >,
-    pub library_move_cancellation: Arc<
-        tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>,
-    >,
+    pub library_import_cancellation:
+        Arc<tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>>,
+    pub library_move_cancellation:
+        Arc<tokio::sync::Mutex<Option<(Uuid, tokio_util::sync::CancellationToken)>>>,
     pub library_maintenance_lock: Arc<tokio::sync::Mutex<()>>,
     pub provisioning_cancellation: crate::services::components::ProvisioningCancellation,
 }

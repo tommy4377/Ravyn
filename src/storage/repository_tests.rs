@@ -18,7 +18,7 @@ use crate::{
 mod resume_identity_tests {
     use super::*;
     use crate::{
-        core::models::{DownloadOptions, DuplicatePolicy},
+        core::models::{DownloadOptions, DuplicatePolicy, JobStatus},
         storage::segments::{self, SegmentRecord},
     };
 
@@ -48,6 +48,35 @@ mod resume_identity_tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn initially_paused_jobs_are_never_queued_for_dispatch() {
+        let (_temp, repository) = repository().await;
+        let job = repository
+            .insert_job(
+                CreateJob {
+                    preset_id: None,
+                    kind: JobKind::Http,
+                    source: "https://example.test/paused.bin".into(),
+                    destination: Some(PathBuf::from("downloads")),
+                    filename: Some("paused.bin".into()),
+                    priority: 0,
+                    speed_limit_bps: None,
+                    expected_sha256: None,
+                    duplicate_policy: DuplicatePolicy::Allow,
+                    options: DownloadOptions {
+                        initially_paused: true,
+                        ..DownloadOptions::default()
+                    },
+                },
+                PathBuf::from("downloads"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(job.status, JobStatus::Paused);
+        assert!(repository.claim_next_queued().await.unwrap().is_none());
     }
 
     #[tokio::test]

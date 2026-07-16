@@ -174,6 +174,9 @@ pub struct DownloadOptions {
     /// Internal marker set when Ravyn selected the destination from the library layout.
     /// Client-provided values are ignored during job creation.
     pub library_auto_destination: bool,
+    /// Creates the job in the paused state before the dispatcher can claim it.
+    #[serde(default)]
+    pub initially_paused: bool,
     pub tags: Vec<String>,
     pub post_actions: Vec<PostAction>,
     pub media: Option<MediaOptions>,

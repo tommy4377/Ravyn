@@ -50,10 +50,12 @@ fn platform_reveal(path: &Path) -> Result<(), String> {
     } else {
         command.arg(format!("/select,{}", path.display()));
     }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Windows Explorer could not reveal {}: {error}", path.display()))
+    command.spawn().map(|_| ()).map_err(|error| {
+        format!(
+            "Windows Explorer could not reveal {}: {error}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

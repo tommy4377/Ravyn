@@ -9,6 +9,7 @@
     browserIntegrationStatus,
     removeBrowserIntegration,
     repairBrowserIntegration,
+    promptTorrentDefaultApp,
     type BrowserIntegrationStatus,
   } from "../native/tauri";
   import { notifications } from "../stores/notifications.svelte";
@@ -60,6 +61,19 @@
       busy = false;
     }
   }
+
+  async function setTorrentDefault(): Promise<void> {
+    busy = true;
+    error = null;
+    try {
+      await promptTorrentDefaultApp();
+      notifications.info("Choose Ravyn for torrent files", "Windows Default Apps is open. Select Ravyn for .torrent files and magnet links.");
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <SettingsCategoryHeader
@@ -103,6 +117,16 @@
     <dt>Manifest</dt><dd class="path">{status?.manifest_path ?? "Unavailable"}</dd>
     <dt>Executable</dt><dd class="path">{status?.executable_path ?? "Unavailable"}</dd>
   </dl>
+</Surface>
+
+<Surface>
+  <div class="status-row">
+    <div class="status-copy">
+      <div class="heading-row"><h3>Torrent default app</h3></div>
+      <p>Register Ravyn for .torrent files and magnet links, then choose it in Windows Default Apps. Windows keeps this choice under your control.</p>
+    </div>
+    <Button disabled={busy} onclick={() => void setTorrentDefault()}>Set as default…</Button>
+  </div>
 </Surface>
 
 <Surface>

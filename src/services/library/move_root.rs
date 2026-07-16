@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -203,10 +207,14 @@ pub(crate) struct LibraryMoveItemRecord {
     pub entry_id: Uuid,
     pub source_path: PathBuf,
     pub destination_path: PathBuf,
+    #[allow(dead_code)] // Retained for persisted move recovery and diagnostics.
     pub source_entry_path: PathBuf,
+    #[allow(dead_code)] // Retained for persisted move recovery and diagnostics.
     pub destination_entry_path: PathBuf,
+    #[allow(dead_code)] // Retained for persisted move recovery and diagnostics.
     pub was_trashed: bool,
     pub expected_sha256: Option<String>,
+    #[allow(dead_code)] // Retained for persisted move recovery and diagnostics.
     pub size_bytes: u64,
     pub state: String,
     pub created_destination: bool,
@@ -346,7 +354,10 @@ pub async fn execute_library_move(
         rollback_unactivated_move(repository, run_id, LibraryMoveState::Cancelled, None).await?;
         return Err(RavynError::Cancelled);
     }
-    if !matches!(status.state, LibraryMoveState::Running | LibraryMoveState::Cancelling) {
+    if !matches!(
+        status.state,
+        LibraryMoveState::Running | LibraryMoveState::Cancelling
+    ) {
         return Ok(());
     }
 
@@ -358,7 +369,8 @@ pub async fn execute_library_move(
     )
     .await?;
 
-    let result = execute_library_move_inner(repository, run_id, status.conflict_policy, cancellation).await;
+    let result =
+        execute_library_move_inner(repository, run_id, status.conflict_policy, cancellation).await;
     match result {
         Ok(()) => {
             let mut settings = repository
@@ -369,24 +381,22 @@ pub async fn execute_library_move(
                 .get_library_move_status(run_id)
                 .await?
                 .and_then(|value| value.destination_root)
-                .ok_or_else(|| RavynError::Internal("Library move lost its destination root".into()))?;
+                .ok_or_else(|| {
+                    RavynError::Internal("Library move lost its destination root".into())
+                })?;
             settings.library_root = Some(destination);
             repository.activate_library_move(run_id, &settings).await?;
             Ok(())
         }
         Err(RavynError::Cancelled) => {
-            rollback_unactivated_move(repository, run_id, LibraryMoveState::Cancelled, None).await?;
+            rollback_unactivated_move(repository, run_id, LibraryMoveState::Cancelled, None)
+                .await?;
             Err(RavynError::Cancelled)
         }
         Err(error) => {
             let message = error.to_string();
-            rollback_unactivated_move(
-                repository,
-                run_id,
-                LibraryMoveState::Failed,
-                Some(&message),
-            )
-            .await?;
+            rollback_unactivated_move(repository, run_id, LibraryMoveState::Failed, Some(&message))
+                .await?;
             Err(error)
         }
     }
@@ -427,7 +437,8 @@ async fn execute_library_move_inner(
 
         let source_hash = match item.expected_sha256.as_deref() {
             Some(expected) => {
-                let actual = crate::services::checksum::sha256(&item.source_path, cancellation).await?;
+                let actual =
+                    crate::services::checksum::sha256(&item.source_path, cancellation).await?;
                 if !actual.eq_ignore_ascii_case(expected) {
                     return Err(RavynError::Conflict(format!(
                         "{} changed after the Library move was planned",
@@ -465,7 +476,11 @@ async fn execute_library_move_inner(
                 .update_library_move_item(
                     run_id,
                     item.entry_id,
-                    if recovered_commit { "verified" } else { "reused" },
+                    if recovered_commit {
+                        "verified"
+                    } else {
+                        "reused"
+                    },
                     Some(&source_hash),
                     recovered_commit,
                     None,
@@ -598,14 +613,13 @@ pub async fn finalize_activated_library_move(repository: &Repository) -> Result<
         }
         validate_regular_file(&item.destination_path)?;
         let Some(expected) = item.expected_sha256.as_deref() else {
-            rollback_activated_move(repository, run_id, "a destination checksum is unavailable").await?;
+            rollback_activated_move(repository, run_id, "a destination checksum is unavailable")
+                .await?;
             return Ok(());
         };
-        let actual = crate::services::checksum::sha256(
-            &item.destination_path,
-            &CancellationToken::new(),
-        )
-        .await?;
+        let actual =
+            crate::services::checksum::sha256(&item.destination_path, &CancellationToken::new())
+                .await?;
         if !actual.eq_ignore_ascii_case(expected) {
             rollback_activated_move(repository, run_id, "destination verification failed").await?;
             return Ok(());
@@ -619,11 +633,7 @@ pub async fn finalize_activated_library_move(repository: &Repository) -> Result<
         let destination_same_file = same_file_path(&item.source_path, &item.destination_path);
         if !destination_same_file {
             tokio::fs::remove_file(&item.source_path).await?;
-            remove_empty_ancestors(
-                item.source_path.parent(),
-                status.source_root.as_deref(),
-            )
-            .await;
+            remove_empty_ancestors(item.source_path.parent(), status.source_root.as_deref()).await;
         }
         repository
             .update_library_move_item(
@@ -654,9 +664,13 @@ async fn rollback_activated_move(
     let mut settings = repository
         .load_persistent_settings()
         .await?
-        .ok_or_else(|| RavynError::Internal("persistent settings disappeared during rollback".into()))?;
+        .ok_or_else(|| {
+            RavynError::Internal("persistent settings disappeared during rollback".into())
+        })?;
     settings.library_root = status.source_root.clone();
-    repository.rollback_library_move_activation(run_id, &settings, reason).await?;
+    repository
+        .rollback_library_move_activation(run_id, &settings, reason)
+        .await?;
     cleanup_created_destinations(repository, run_id).await?;
     Ok(())
 }
@@ -754,7 +768,9 @@ async fn build_move_plan(
             continue;
         }
         let metadata = match std::fs::symlink_metadata(&source_path) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Some(metadata),
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                Some(metadata)
+            }
             _ => None,
         };
         let missing = metadata.is_none() || entry.state == LibraryEntryState::Missing;
@@ -853,7 +869,7 @@ fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
             "{label} must be a non-symlink directory"
         )));
     }
-    Ok(std::fs::canonicalize(path)?)
+    canonical_path(path)
 }
 
 fn canonical_destination_directory(path: &Path) -> Result<PathBuf> {
@@ -877,21 +893,40 @@ fn canonical_destination_directory(path: &Path) -> Result<PathBuf> {
         RavynError::Invalid("the new Library root has no parent directory".into())
     })?;
     let parent = canonical_existing_directory(parent, "new Library parent")?;
-    let name = path.file_name().ok_or_else(|| {
-        RavynError::Invalid("the new Library root has no directory name".into())
-    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| RavynError::Invalid("the new Library root has no directory name".into()))?;
     Ok(parent.join(name))
 }
 
 fn absolute_existing_or_lexical(path: &Path) -> Result<PathBuf> {
     if path.exists() {
-        return Ok(std::fs::canonicalize(path)?);
+        return canonical_path(path);
     }
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
+}
+
+fn canonical_path(path: &Path) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        // Windows canonicalization adds the extended-length prefix (\\?\), which
+        // is unsuitable for persisted, user-facing Library paths. The directory
+        // has already been canonicalized for validation, so preserve the ordinary
+        // Win32 spelling for storage and API responses.
+        let value = canonical.to_string_lossy();
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(path) = value.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    Ok(canonical)
 }
 
 fn validate_regular_file(path: &Path) -> Result<()> {
@@ -946,7 +981,7 @@ async fn copy_and_hash(
 #[cfg(windows)]
 async fn commit_temporary_file(temporary: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
 
     let temporary = temporary.to_path_buf();
     let destination = destination.to_path_buf();
@@ -1029,7 +1064,8 @@ async fn remove_empty_ancestors(mut directory: Option<&Path>, stop: Option<&Path
 fn same_file_path(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
-        left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
     }
     #[cfg(not(windows))]
     {
@@ -1087,7 +1123,9 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let source = temporary.path().join("source");
         let destination = temporary.path().join("destination");
-        tokio::fs::create_dir_all(source.join("Documents")).await.unwrap();
+        tokio::fs::create_dir_all(source.join("Documents"))
+            .await
+            .unwrap();
         let config = Config::try_parse_from([
             "ravyn",
             "--data-dir",
@@ -1162,7 +1200,9 @@ mod tests {
             destination: destination.clone(),
             conflict_policy: LibraryMoveConflictPolicy::Fail,
         };
-        let plan = build_move_plan(&config, &repository, &request).await.unwrap();
+        let plan = build_move_plan(&config, &repository, &request)
+            .await
+            .unwrap();
         repository.create_library_move(&plan).await.unwrap();
         execute_library_move(&config, &repository, plan.id, &CancellationToken::new())
             .await
@@ -1171,7 +1211,12 @@ mod tests {
         let moved = repository.get_library_entry(entry.id).await.unwrap();
         assert!(moved.path.starts_with(&destination));
         assert_eq!(
-            repository.get_library_move_status(plan.id).await.unwrap().unwrap().state,
+            repository
+                .get_library_move_status(plan.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LibraryMoveState::RestartRequired
         );
 
@@ -1179,7 +1224,12 @@ mod tests {
         assert!(!source_file.exists());
         assert!(moved.path.exists());
         assert_eq!(
-            repository.get_library_move_status(plan.id).await.unwrap().unwrap().state,
+            repository
+                .get_library_move_status(plan.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LibraryMoveState::Completed
         );
     }
@@ -1193,19 +1243,24 @@ mod tests {
             destination: destination.clone(),
             conflict_policy: LibraryMoveConflictPolicy::Fail,
         };
-        let plan = build_move_plan(&config, &repository, &request).await.unwrap();
+        let plan = build_move_plan(&config, &repository, &request)
+            .await
+            .unwrap();
         repository.create_library_move(&plan).await.unwrap();
-        let item = repository.list_library_move_items(plan.id).await.unwrap().remove(0);
+        let item = repository
+            .list_library_move_items(plan.id)
+            .await
+            .unwrap()
+            .remove(0);
         tokio::fs::create_dir_all(item.destination_path.parent().unwrap())
             .await
             .unwrap();
-        let source_hash = crate::services::checksum::sha256(
-            &source_file,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        let temporary = temporary_copy_path(&item.destination_path, plan.id, item.entry_id).unwrap();
+        let source_hash =
+            crate::services::checksum::sha256(&source_file, &CancellationToken::new())
+                .await
+                .unwrap();
+        let temporary =
+            temporary_copy_path(&item.destination_path, plan.id, item.entry_id).unwrap();
         copy_and_hash(&source_file, &temporary, &CancellationToken::new())
             .await
             .unwrap();
@@ -1227,11 +1282,20 @@ mod tests {
         execute_library_move(&config, &repository, plan.id, &CancellationToken::new())
             .await
             .unwrap();
-        let recovered = repository.list_library_move_items(plan.id).await.unwrap().remove(0);
+        let recovered = repository
+            .list_library_move_items(plan.id)
+            .await
+            .unwrap()
+            .remove(0);
         assert_eq!(recovered.state, "verified");
         assert!(recovered.created_destination);
         assert_eq!(
-            repository.get_library_move_status(plan.id).await.unwrap().unwrap().state,
+            repository
+                .get_library_move_status(plan.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LibraryMoveState::RestartRequired
         );
     }
@@ -1252,7 +1316,9 @@ mod tests {
             destination: destination.clone(),
             conflict_policy: LibraryMoveConflictPolicy::Fail,
         };
-        let plan = build_move_plan(&config, &repository, &request).await.unwrap();
+        let plan = build_move_plan(&config, &repository, &request)
+            .await
+            .unwrap();
         repository.create_library_move(&plan).await.unwrap();
         execute_library_move(&config, &repository, plan.id, &CancellationToken::new())
             .await
@@ -1279,7 +1345,9 @@ mod tests {
             destination: destination.clone(),
             conflict_policy: LibraryMoveConflictPolicy::Fail,
         };
-        let plan = build_move_plan(&config, &repository, &request).await.unwrap();
+        let plan = build_move_plan(&config, &repository, &request)
+            .await
+            .unwrap();
         repository.create_library_move(&plan).await.unwrap();
         let cancellation = CancellationToken::new();
         cancellation.cancel();

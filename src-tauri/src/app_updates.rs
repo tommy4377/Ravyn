@@ -59,7 +59,6 @@ pub enum AppUpdatePhase {
     Error,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppUpdateResult {
     pub outcome: String,
@@ -200,9 +199,9 @@ impl Default for AppUpdateState {
     fn default() -> Self {
         let status = match configuration() {
             Ok(Some(_)) => AppUpdateStatus::idle(),
-            Ok(None) => AppUpdateStatus::disabled(
-                "application updates are not configured for this build",
-            ),
+            Ok(None) => {
+                AppUpdateStatus::disabled("application updates are not configured for this build")
+            }
             Err(error) => AppUpdateStatus::disabled(error),
         };
         Self(Mutex::new(Inner {
@@ -233,8 +232,7 @@ fn configuration() -> Result<Option<UpdateConfiguration>, String> {
     }
     if endpoint.is_empty() || public_key.is_empty() {
         return Err(
-            "both RAVYN_APP_UPDATE_ENDPOINT and RAVYN_APP_UPDATE_PUBLIC_KEY are required"
-                .into(),
+            "both RAVYN_APP_UPDATE_ENDPOINT and RAVYN_APP_UPDATE_PUBLIC_KEY are required".into(),
         );
     }
     let endpoint = url::Url::parse(endpoint)
@@ -382,9 +380,9 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
     let journal_phase = std::fs::read_to_string(update_dir.join(UPDATE_JOURNAL_FILENAME))
         .map(|phase| phase.trim().to_owned())
         .unwrap_or_default();
-    let action = transaction.as_ref().map_or(
-        RecoveryAction::CleanupFailed,
-        |transaction| {
+    let action = transaction
+        .as_ref()
+        .map_or(RecoveryAction::CleanupFailed, |transaction| {
             plan_recovery(
                 transaction.schema,
                 &transaction.to_version,
@@ -392,8 +390,7 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 env!("CARGO_PKG_VERSION"),
                 unix_timestamp_ms(),
             )
-        },
-    );
+        });
     match action {
         RecoveryAction::LeaveAlone => Ok(()),
         RecoveryAction::FinalizeSucceeded => {
@@ -405,7 +402,11 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 completed_at_unix_ms: unix_timestamp_ms(),
                 message: format!(
                     "The update installed, but its helper was interrupted (last phase: {}). Ravyn finalized it on startup.",
-                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                    if journal_phase.is_empty() {
+                        "unknown"
+                    } else {
+                        &journal_phase
+                    },
                 ),
             };
             write_json_atomic_sync(&transaction.result_path, &result)?;
@@ -433,7 +434,11 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 completed_at_unix_ms: unix_timestamp_ms(),
                 message: format!(
                     "The update helper was interrupted (last phase: {}) and the update did not complete. Use Check now to retry, or Repair to reinstall the current version.",
-                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                    if journal_phase.is_empty() {
+                        "unknown"
+                    } else {
+                        &journal_phase
+                    },
                 ),
             };
             write_json_atomic_sync(&update_dir.join(UPDATE_RESULT_FILENAME), &result)?;
@@ -458,12 +463,7 @@ fn automatic_retry_delay(consecutive_failures: u32) -> Duration {
 fn schedule_next_check(app: &AppHandle, delay: Duration) {
     if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
         inner.status.next_check_at_unix_ms = Some(
-            unix_timestamp_ms().saturating_add(
-                delay
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX),
-            ),
+            unix_timestamp_ms().saturating_add(delay.as_millis().try_into().unwrap_or(u64::MAX)),
         );
     }
 }
@@ -479,8 +479,8 @@ pub fn start_background_check(app: AppHandle) {
         };
         let automatic = installed_build && inner.status.configured;
         inner.status.automatic = automatic;
-        inner.status.automatic_check_interval_secs = automatic
-            .then_some(AUTOMATIC_CHECK_INTERVAL.as_secs());
+        inner.status.automatic_check_interval_secs =
+            automatic.then_some(AUTOMATIC_CHECK_INTERVAL.as_secs());
         if !installed_build && inner.status.configured {
             inner.status.phase = AppUpdatePhase::Disabled;
             inner.status.last_error = Some(
@@ -550,9 +550,8 @@ pub async fn check_now(app: AppHandle) -> Result<AppUpdateStatus, String> {
         if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
             inner.status.automatic = false;
             inner.status.phase = AppUpdatePhase::Disabled;
-            inner.status.last_error = Some(
-                "application updates are available only for installed Windows builds".into(),
-            );
+            inner.status.last_error =
+                Some("application updates are available only for installed Windows builds".into());
         }
         return status(&app);
     }
@@ -621,7 +620,6 @@ pub fn cancel(app: &AppHandle) -> Result<AppUpdateStatus, String> {
     }
     status(app)
 }
-
 
 fn ensure_update_not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
     if cancellation.is_cancelled() {
@@ -742,7 +740,10 @@ async fn perform_check_and_stage(
     }
     .error_for_status()
     .map_err(|error| format!("the app update service returned an error: {error}"))?;
-    if response.content_length().is_some_and(|size| size > METADATA_LIMIT) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > METADATA_LIMIT)
+    {
         return Err("app update metadata exceeds the maximum size".into());
     }
     let metadata = read_response_bounded(
@@ -1103,8 +1104,8 @@ pub fn install_pending_on_close(app: &AppHandle) -> Result<bool, String> {
         pending
     };
 
-    let transaction = verify_staged_installer(&pending)
-        .and_then(|()| prepare_update_transaction(app, &pending));
+    let transaction =
+        verify_staged_installer(&pending).and_then(|()| prepare_update_transaction(app, &pending));
     let install_result = transaction
         .as_ref()
         .map_err(|error| error.clone())
@@ -1181,7 +1182,9 @@ fn prepare_update_transaction(
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("failed to resolve the running Ravyn executable: {error}"))?;
     if !same_path(&current_exe, &installed_exe) {
-        return Err("application updates can only start from the installed Ravyn executable".into());
+        return Err(
+            "application updates can only start from the installed Ravyn executable".into(),
+        );
     }
 
     let update_dir = update_directory(app)?;
@@ -1189,9 +1192,7 @@ fn prepare_update_transaction(
         .map_err(|error| format!("failed to create the update state directory: {error}"))?;
     let transaction_path = update_dir.join(UPDATE_TRANSACTION_FILENAME);
     if transaction_path.exists() {
-        return Err(
-            "a previous application update transaction is still awaiting recovery".into(),
-        );
+        return Err("a previous application update transaction is still awaiting recovery".into());
     }
     let token = uuid::Uuid::new_v4().simple().to_string();
     let transaction = PendingUpdateTransaction {
@@ -1259,11 +1260,7 @@ fn build_installer_helper_script(
     transaction: &PendingUpdateTransaction,
     parent_pid: u32,
 ) -> String {
-    build_installer_helper_script_with_timeout(
-        transaction,
-        parent_pid,
-        READINESS_TIMEOUT_SECS,
-    )
+    build_installer_helper_script_with_timeout(transaction, parent_pid, READINESS_TIMEOUT_SECS)
 }
 
 fn build_installer_helper_script_with_timeout(
@@ -1600,7 +1597,13 @@ mod tests {
         assert!(script.contains("Remove-ItemProperty"));
         assert!(script.contains(r"Desktop\Ravyn.lnk"));
         // Journal phases are advanced before every state-changing step.
-        for phase in ["'backup'", "'install'", "'verify'", "'rollback'", "'finalize'"] {
+        for phase in [
+            "'backup'",
+            "'install'",
+            "'verify'",
+            "'rollback'",
+            "'finalize'",
+        ] {
             assert!(
                 script.contains(&format!("Write-Journal {phase}")),
                 "missing journal phase {phase}"
@@ -1614,13 +1617,25 @@ mod tests {
     fn recovery_leaves_fresh_transactions_alone() {
         let now = 1_000_000_000_000_u64;
         assert_eq!(
-            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "0.3.0", now - 60_000, "0.2.0", now),
+            plan_recovery(
+                UPDATE_TRANSACTION_SCHEMA,
+                "0.3.0",
+                now - 60_000,
+                "0.2.0",
+                now
+            ),
             RecoveryAction::LeaveAlone
         );
         // Freshly installed target version: the helper is still waiting for
         // the readiness marker; recovery must not race it.
         assert_eq!(
-            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "v0.3.0", now - 60_000, "0.3.0", now),
+            plan_recovery(
+                UPDATE_TRANSACTION_SCHEMA,
+                "v0.3.0",
+                now - 60_000,
+                "0.3.0",
+                now
+            ),
             RecoveryAction::LeaveAlone
         );
     }

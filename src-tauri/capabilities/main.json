@@ -21,6 +21,7 @@
     "allow-browser-integration-status",
     "allow-repair-browser-integration",
     "allow-remove-browser-integration",
-    "allow-take-browser-action"
+    "allow-take-browser-action",
+    "allow-prompt-torrent-default-app"
   ]
 }

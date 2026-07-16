@@ -5,7 +5,6 @@
   "windows": ["setup", "main"],
   "permissions": [
     "core:default",
-    "dialog:default",
-    "mcp-bridge:default"
+    "dialog:default"
   ]
 }

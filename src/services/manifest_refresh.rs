@@ -4,7 +4,11 @@
 //! embedded catalogue, while configured release builds gain conditional HTTP
 //! refresh, bounded metadata reads, replay protection, and an atomic cache.
 
-use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
@@ -334,10 +338,7 @@ impl RemoteManifestRefresher {
 }
 
 pub fn cache_directory(data_dir: &Path, channel: &str) -> PathBuf {
-    data_dir
-        .join("engines")
-        .join("manifests")
-        .join(channel)
+    data_dir.join("engines").join("manifests").join(channel)
 }
 
 pub fn cache_manifest_path(data_dir: &Path, channel: &str) -> PathBuf {
@@ -399,7 +400,9 @@ fn validate_cache_metadata_pair(
         || metadata.manifest_version != version
         || metadata.generated_at != generated_at
         || metadata.expires_at != expires_at
-        || !metadata.payload_sha256.eq_ignore_ascii_case(&payload_sha256)
+        || !metadata
+            .payload_sha256
+            .eq_ignore_ascii_case(&payload_sha256)
     {
         return Err(RavynError::Invalid(
             "component manifest cache metadata does not match the signed payload".into(),
@@ -433,7 +436,7 @@ fn reject_replay(
     let Some(previous) = previous else {
         return Ok(());
     };
-    if version < previous.manifest_version || generated_at < previous.generated_at.clone() {
+    if version < previous.manifest_version || generated_at < previous.generated_at {
         return Err(RavynError::provisioning(
             ProvisioningErrorCode::InvalidManifestSignature,
             "component manifest downgrade or replay was rejected",
@@ -456,8 +459,8 @@ fn status_from_metadata(
     last_error: Option<String>,
 ) -> ManifestRefreshStatus {
     let now = Utc::now();
-    let stale = metadata.is_some_and(|value| value.expires_at.clone() <= now);
-    let usable = metadata.is_some_and(|value| value.expires_at.clone() + stale_grace > now);
+    let stale = metadata.is_some_and(|value| value.expires_at <= now);
+    let usable = metadata.is_some_and(|value| value.expires_at + stale_grace > now);
     let phase = if metadata.is_none() {
         if last_error.is_some() {
             ManifestRefreshPhase::Error
@@ -478,12 +481,12 @@ fn status_from_metadata(
         endpoint: Some(endpoint.to_owned()),
         source: if usable { "remote-cache" } else { "built-in" },
         manifest_version: metadata.map(|value| value.manifest_version),
-        generated_at: metadata.map(|value| value.generated_at.clone()),
-        expires_at: metadata.map(|value| value.expires_at.clone()),
+        generated_at: metadata.map(|value| value.generated_at),
+        expires_at: metadata.map(|value| value.expires_at),
         stale,
         etag: metadata.and_then(|value| value.etag.clone()),
-        last_checked_at: metadata.map(|value| value.last_checked_at.clone()),
-        last_updated_at: metadata.map(|value| value.last_updated_at.clone()),
+        last_checked_at: metadata.map(|value| value.last_checked_at),
+        last_updated_at: metadata.map(|value| value.last_updated_at),
         last_error,
     }
 }
@@ -532,14 +535,9 @@ fn header_string(value: Option<&reqwest::header::HeaderValue>) -> Result<Option<
                     "component manifest response validator header is too large".into(),
                 ));
             }
-            value
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| {
-                    RavynError::Protocol(
-                        "component manifest response header is not valid ASCII".into(),
-                    )
-                })
+            value.to_str().map(str::to_owned).map_err(|_| {
+                RavynError::Protocol("component manifest response header is not valid ASCII".into())
+            })
         })
         .transpose()
 }
@@ -560,7 +558,12 @@ async fn write_cache_transaction(
     let metadata_temp = cache_dir.join("metadata.next");
     let manifest_backup = cache_dir.join("manifest.previous");
     let metadata_backup = cache_dir.join("metadata.previous");
-    for path in [&manifest_temp, &metadata_temp, &manifest_backup, &metadata_backup] {
+    for path in [
+        &manifest_temp,
+        &metadata_temp,
+        &manifest_backup,
+        &metadata_backup,
+    ] {
         let _ = tokio::fs::remove_file(path).await;
     }
     tokio::fs::write(&manifest_temp, manifest_bytes).await?;
@@ -605,9 +608,9 @@ async fn write_cache_transaction(
 }
 
 async fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        RavynError::Invalid("component manifest cache path has no parent".into())
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| RavynError::Invalid("component manifest cache path has no parent".into()))?;
     tokio::fs::create_dir_all(parent).await?;
     let temporary = path.with_extension("tmp");
     let backup = path.with_extension("bak");

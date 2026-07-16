@@ -482,7 +482,9 @@ pub(super) async fn create_preset(
     Json(input): Json<crate::storage::PutDownloadPreset>,
 ) -> Result<(StatusCode, Json<crate::storage::DownloadPreset>)> {
     if let Some(options) = input.payload.options.as_ref() {
-        s.manager.validate_download_secret_references(options).await?;
+        s.manager
+            .validate_download_secret_references(options)
+            .await?;
     }
     let result = s.repository.create_download_preset(input).await;
     Ok((
@@ -504,7 +506,9 @@ pub(super) async fn update_preset(
     Json(input): Json<crate::storage::PutDownloadPreset>,
 ) -> Result<Json<crate::storage::DownloadPreset>> {
     if let Some(options) = input.payload.options.as_ref() {
-        s.manager.validate_download_secret_references(options).await?;
+        s.manager
+            .validate_download_secret_references(options)
+            .await?;
     }
     let result = s.repository.update_download_preset(id, input).await;
     let resource_id = id.to_string();

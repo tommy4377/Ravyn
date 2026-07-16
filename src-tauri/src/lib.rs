@@ -8,10 +8,11 @@ mod appearance;
 mod backend;
 mod browser_integration;
 mod installation;
-mod native_messaging;
 mod integration;
+mod native_messaging;
 mod setup_guard;
 mod shell_paths;
+mod torrent_association;
 mod uninstall;
 
 use tauri::Manager;
@@ -106,9 +107,9 @@ async fn require_backend_integration_consent(
     {
         return Err("Windows integration has already been verified for this setup".into());
     }
-    let consent = setup
-        .integration_consent
-        .ok_or_else(|| "installation preferences must be confirmed before Windows integration".to_owned())?;
+    let consent = setup.integration_consent.ok_or_else(|| {
+        "installation preferences must be confirmed before Windows integration".to_owned()
+    })?;
     if consent.installation_mode != "installed"
         || consent.install_application != request.install_application
         || consent.register_installed_app != request.register_installed_app
@@ -179,7 +180,7 @@ async fn finish_setup_handoff(
     require_backend_setup_state(&backend, true).await?;
     guard.begin_handoff()?;
 
-    let result = prepare_setup_handoff(&app, installed_exe, launch_after_setup);
+    let result = prepare_setup_handoff(installed_exe, launch_after_setup);
     guard.finish_handoff(result.is_ok())?;
     let should_exit = result?;
     if should_exit {
@@ -191,7 +192,6 @@ async fn finish_setup_handoff(
 /// Prepare the setup handoff and report whether the current process should
 /// exit after the guard has committed the transition.
 fn prepare_setup_handoff(
-    app: &tauri::AppHandle,
     installed_exe: Option<String>,
     launch_after_setup: bool,
 ) -> Result<bool, String> {
@@ -219,11 +219,20 @@ fn prepare_setup_handoff(
         return Ok(true);
     }
 
-    // Portable/development mode remains in the current process.
-    if app.get_webview_window("main").is_none() {
-        create_main_window(app, false).map_err(|error| error.to_string())?;
-    }
-    Ok(false)
+    // Managed component paths are resolved when the backend starts. Portable
+    // and development setups therefore need the same fresh-process handoff as
+    // installed setups; otherwise newly provisioned media and torrent engines
+    // remain unavailable until the user happens to restart manually.
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve the Ravyn executable: {error}"))?;
+    let working_directory = executable
+        .parent()
+        .ok_or_else(|| "Ravyn executable has no parent directory".to_owned())?;
+    std::process::Command::new(&executable)
+        .current_dir(working_directory)
+        .spawn()
+        .map_err(|error| format!("failed to launch the refreshed Ravyn process: {error}"))?;
+    Ok(true)
 }
 
 fn require_window(window: &tauri::WebviewWindow, expected: &str) -> Result<(), String> {
@@ -278,9 +287,6 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
-
-
-
 /// Return the current Firefox native-messaging registration state.
 #[tauri::command]
 fn browser_integration_status(
@@ -322,12 +328,19 @@ fn take_browser_action(
     Ok(state.take())
 }
 
+/// Register Ravyn as a candidate for torrent files and let Windows ask the
+/// user to choose the default application.
+#[tauri::command]
+async fn prompt_torrent_default_app(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(torrent_association::register_and_prompt)
+        .await
+        .map_err(|error| format!("the torrent association worker failed: {error}"))?
+}
+
 /// Open an existing file in its Windows default application or open a folder.
 #[tauri::command]
-async fn open_native_path(
-    window: tauri::WebviewWindow,
-    path: String,
-) -> Result<(), String> {
+async fn open_native_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
     require_window(&window, "main")?;
     tauri::async_runtime::spawn_blocking(move || shell_paths::open(&path))
         .await
@@ -336,10 +349,7 @@ async fn open_native_path(
 
 /// Reveal an existing file in Explorer, or open the directory itself.
 #[tauri::command]
-async fn reveal_native_path(
-    window: tauri::WebviewWindow,
-    path: String,
-) -> Result<(), String> {
+async fn reveal_native_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
     require_window(&window, "main")?;
     tauri::async_runtime::spawn_blocking(move || shell_paths::reveal(&path))
         .await
@@ -480,7 +490,8 @@ pub fn run() {
         .init();
 
     let initial_arguments = std::env::args().collect::<Vec<_>>();
-    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments);
+    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments)
+        .or_else(|| browser_integration::parse_torrent_association_action(&initial_arguments));
     let browser_action_state = browser_integration::BrowserActionState::default();
     if let Some(action) = initial_browser_action {
         browser_action_state.replace(action);
@@ -488,8 +499,8 @@ pub fn run() {
 
     let (handle, _receiver) = backend::start();
 
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init());
+    #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     // MCP automation bridge for explicitly enabled development-time testing only.
     #[cfg(all(debug_assertions, feature = "mcp-automation"))]
     {
@@ -522,6 +533,7 @@ pub fn run() {
             repair_browser_integration,
             remove_browser_integration,
             take_browser_action,
+            prompt_torrent_default_app,
             open_native_path,
             reveal_native_path,
         ])

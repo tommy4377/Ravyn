@@ -1,9 +1,17 @@
 //! Supervision of Ravyn-owned rqbit daemon processes.
 
-use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::Serialize;
-use tokio::{process::{Child, Command}, sync::Mutex, time::Instant};
+use tokio::{
+    process::{Child, Command},
+    sync::Mutex,
+    time::Instant,
+};
 
 use crate::error::{RavynError, Result};
 
@@ -82,8 +90,13 @@ impl RqbitProcessManager {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            if let (Some(username), Some(password)) = (&config.rqbit_username, &config.rqbit_password) {
-                command.env("RQBIT_HTTP_BASIC_AUTH_USERPASS", format!("{username}:{password}"));
+            if let (Some(username), Some(password)) =
+                (&config.rqbit_username, &config.rqbit_password)
+            {
+                command.env(
+                    "RQBIT_HTTP_BASIC_AUTH_USERPASS",
+                    format!("{username}:{password}"),
+                );
             }
             let child = command.spawn().map_err(|error| {
                 RavynError::Unavailable(format!("failed to start rqbit: {error}"))
@@ -106,7 +119,8 @@ impl RqbitProcessManager {
             }
         }
         self.inner.lock().await.state = RqbitProcessState::Failed;
-        Err(last_error.unwrap_or_else(|| RavynError::Unavailable("rqbit did not become ready".into())))
+        Err(last_error
+            .unwrap_or_else(|| RavynError::Unavailable("rqbit did not become ready".into())))
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -143,7 +157,9 @@ impl RqbitProcessManager {
                 }
             }
             let mut request = client.get(format!("{api_url}/"));
-            if let (Some(username), Some(password)) = (&config.rqbit_username, &config.rqbit_password) {
+            if let (Some(username), Some(password)) =
+                (&config.rqbit_username, &config.rqbit_password)
+            {
                 request = request.basic_auth(username, Some(password));
             }
             if let Ok(response) = request.send().await {
@@ -151,14 +167,17 @@ impl RqbitProcessManager {
                     let body = response.bytes().await?;
                     if body.len() <= 4 * 1024 * 1024 {
                         let value: serde_json::Value = serde_json::from_slice(&body)?;
-                        if value.get("server").and_then(serde_json::Value::as_str) == Some("rqbit") {
+                        if value.get("server").and_then(serde_json::Value::as_str) == Some("rqbit")
+                        {
                             return Ok(());
                         }
                     }
                 }
             }
             if Instant::now() >= deadline {
-                return Err(RavynError::Unavailable("timed out waiting for rqbit HTTP readiness".into()));
+                return Err(RavynError::Unavailable(
+                    "timed out waiting for rqbit HTTP readiness".into(),
+                ));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

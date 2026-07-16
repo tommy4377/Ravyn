@@ -26,7 +26,14 @@
   function applyBrowserAction(action: BrowserAction | null): void {
     if (!action) return;
     if (action.source_url) {
-      navigation.requestAdd(action.section === "media" ? "media" : "http", action.source_url);
+      navigation.requestAdd(
+        action.section === "media"
+          ? "media"
+          : action.section === "torrents"
+            ? "torrent"
+            : "http",
+        action.source_url,
+      );
       return;
     }
     const section = action.section;

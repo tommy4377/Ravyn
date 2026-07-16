@@ -33,7 +33,7 @@ const entries = [
 await mkdir(artifacts, { recursive: true });
 await rm(output, { force: true });
 await run(
-  "python3",
+  "python",
   [
     "scripts/deterministic-zip.py",
     "--root",

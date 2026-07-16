@@ -27,6 +27,7 @@
   import Surface from "../components/Surface.svelte";
   import TextArea from "../components/TextArea.svelte";
   import TextField from "../components/TextField.svelte";
+  import { promptTorrentDefaultApp } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
@@ -73,6 +74,7 @@
   let peersInput = $state("");
   let peersBusy = $state(false);
   let peersError = $state<string | null>(null);
+  let defaultAppBusy = $state(false);
 
   const visible = $derived(
     search.trim()
@@ -112,6 +114,19 @@
     if (normalized.includes("pause") || normalized.includes("stop")) return "warning";
     if (normalized.includes("download") || normalized.includes("active") || normalized.includes("queue")) return "info";
     return "neutral";
+  }
+
+  async function promptTorrentDefault(): Promise<void> {
+    if (defaultAppBusy) return;
+    defaultAppBusy = true;
+    try {
+      await promptTorrentDefaultApp();
+      notifications.info("Choose Ravyn for torrent files", "Windows Default Apps is open. Select Ravyn for .torrent files and magnet links.");
+    } catch (cause) {
+      notifications.error("Couldn't open torrent defaults", describeError(cause));
+    } finally {
+      defaultAppBusy = false;
+    }
   }
 
   async function load(): Promise<void> {
@@ -258,6 +273,7 @@
 
 <PageScaffold title="Torrents" summary="Managed torrent downloads, selected files, peers, trackers, and seeding.">
   {#snippet actions()}
+    <Button variant="subtle" disabled={defaultAppBusy} onclick={() => void promptTorrentDefault()}><Icon name="settings" size={16} /> {defaultAppBusy ? "Opening defaults…" : "Set as default"}</Button>
     <Button variant="accent" onclick={() => navigation.requestAdd("torrent")}><Icon name="add" size={16} /> Add torrent</Button>
   {/snippet}
 

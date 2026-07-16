@@ -111,12 +111,11 @@ impl Repository {
     }
 
     pub(crate) async fn library_move_cancel_requested(&self, id: Uuid) -> Result<bool> {
-        let value: Option<i64> = sqlx::query_scalar(
-            "SELECT cancel_requested FROM library_move_transactions WHERE id=?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(self.pool())
-        .await?;
+        let value: Option<i64> =
+            sqlx::query_scalar("SELECT cancel_requested FROM library_move_transactions WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(self.pool())
+                .await?;
         value
             .map(|value| value != 0)
             .ok_or_else(|| RavynError::NotFound(format!("library move {id}")))
@@ -140,12 +139,8 @@ impl Repository {
                 entry_id: Uuid::parse_str(&row.try_get::<String, _>("entry_id")?)
                     .map_err(|error| RavynError::Internal(error.to_string()))?,
                 source_path: PathBuf::from(row.try_get::<String, _>("source_path")?),
-                destination_path: PathBuf::from(
-                    row.try_get::<String, _>("destination_path")?,
-                ),
-                source_entry_path: PathBuf::from(
-                    row.try_get::<String, _>("source_entry_path")?,
-                ),
+                destination_path: PathBuf::from(row.try_get::<String, _>("destination_path")?),
+                source_entry_path: PathBuf::from(row.try_get::<String, _>("source_entry_path")?),
                 destination_entry_path: PathBuf::from(
                     row.try_get::<String, _>("destination_entry_path")?,
                 ),
@@ -351,15 +346,13 @@ impl Repository {
             let source: String = item.try_get("source_path")?;
             let source_entry: String = item.try_get("source_entry_path")?;
             let was_trashed: bool = item.try_get("was_trashed")?;
-            sqlx::query(
-                "UPDATE library_entries SET path=?,trash_path=?,updated_at=? WHERE id=?",
-            )
-            .bind(&source_entry)
-            .bind(was_trashed.then_some(source))
-            .bind(now)
-            .bind(item.try_get::<String, _>("entry_id")?)
-            .execute(&mut *tx)
-            .await?;
+            sqlx::query("UPDATE library_entries SET path=?,trash_path=?,updated_at=? WHERE id=?")
+                .bind(&source_entry)
+                .bind(was_trashed.then_some(source))
+                .bind(now)
+                .bind(item.try_get::<String, _>("entry_id")?)
+                .execute(&mut *tx)
+                .await?;
         }
         sqlx::query(
             "INSERT INTO runtime_settings(id,settings_json,updated_at) VALUES(1,?,?) \
@@ -432,9 +425,7 @@ fn row_to_status(row: sqlx::sqlite::SqliteRow) -> Result<LibraryMoveStatus> {
         ),
         state: LibraryMoveState::from_str(&row.try_get::<String, _>("state")?)?,
         source_root: Some(PathBuf::from(row.try_get::<String, _>("source_root")?)),
-        destination_root: Some(PathBuf::from(
-            row.try_get::<String, _>("destination_root")?,
-        )),
+        destination_root: Some(PathBuf::from(row.try_get::<String, _>("destination_root")?)),
         conflict_policy: LibraryMoveConflictPolicy::from_str(
             &row.try_get::<String, _>("conflict_policy")?,
         )?,

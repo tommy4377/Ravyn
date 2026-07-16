@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prompt-torrent-default-app"
+description = "Enables the prompt_torrent_default_app command without any pre-configured scope."
+commands.allow = ["prompt_torrent_default_app"]
+
+[[permission]]
+identifier = "deny-prompt-torrent-default-app"
+description = "Denies the prompt_torrent_default_app command without any pre-configured scope."
+commands.deny = ["prompt_torrent_default_app"]

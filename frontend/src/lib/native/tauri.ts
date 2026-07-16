@@ -121,6 +121,11 @@ export function mainWindowReady(): Promise<void> {
   return invoke("main_window_ready");
 }
 
+/** Register Ravyn as a torrent handler and open Windows Default Apps. */
+export function promptTorrentDefaultApp(): Promise<void> {
+  return invoke("prompt_torrent_default_app");
+}
+
 export function appUpdateStatus(): Promise<AppUpdateStatus> {
   return invoke<AppUpdateStatus>("app_update_status");
 }
