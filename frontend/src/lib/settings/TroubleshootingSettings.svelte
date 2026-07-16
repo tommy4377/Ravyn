@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { describeError } from "../api/errors";
   import type { ReadinessStatus } from "../api/types";
   import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
@@ -62,7 +63,9 @@
     }
   }
 
-  $effect(() => { void runDiagnostics(); });
+  $effect(() => {
+    if (connection.client) untrack(() => void runDiagnostics());
+  });
 </script>
 
 <SettingsCategoryHeader title="Troubleshooting" description="Check overall health first, then open technical diagnostics only when they are needed." />

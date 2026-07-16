@@ -42,7 +42,7 @@
   .divider { width: 1px; height: 12px; background: var(--stroke-divider); }
   .notifications { display: inline-flex; align-items: center; gap: var(--space-1); height: 22px; padding: 0 var(--space-2); border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); font: inherit; }
   .notifications:hover { background: var(--bg-subtle-hover); color: var(--text-primary); }
-  .badge { min-width: 16px; height: 16px; display: inline-grid; place-items: center; padding: 0 4px; border-radius: var(--radius-pill); background: var(--accent-default); color: var(--text-on-accent); font-size: 10px; font-weight: 700; }
+  .badge { box-sizing: border-box; min-width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0 4px; border-radius: var(--radius-pill); background: var(--accent-default); color: var(--text-on-accent); font-size: 10px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
   .version { margin-left: auto; color: var(--text-tertiary); }
   @media (max-width: 640px) { .notifications > span:not(.badge) { display: none; } }
 </style>

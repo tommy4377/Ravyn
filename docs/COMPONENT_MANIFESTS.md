@@ -52,6 +52,14 @@ semantic version. Activation metadata is atomic and retains the previous
 candidate, so a failed health check can roll back without the new files having
 overwritten the old version.
 
+At backend startup, Ravyn activates every checksum-verified managed engine
+whose configured command still uses the built-in default. The managed rqbit
+server is supervised on an ephemeral loopback HTTP port whenever an active
+rqbit installation exists, including components installed after the original
+setup profile was saved. Managed FFmpeg is passed to yt-dlp explicitly with
+`--ffmpeg-location`, because private engine directories are intentionally not
+added to the process-wide `PATH`.
+
 ## Remote manifest contract
 
 Remote schema-1 manifests add a monotonic `manifest_version`, `generated_at`,

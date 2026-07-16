@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { Snippet } from "svelte";
   import Icon from "./Icon.svelte";
 
@@ -17,11 +18,54 @@
   let open = $state(false);
   let root = $state<HTMLDivElement | null>(null);
   let trigger = $state<HTMLButtonElement | null>(null);
+  let flyout = $state<HTMLDivElement | null>(null);
+  let x = $state(0);
+  let y = $state(0);
+  let positioned = $state(false);
+
+  function positionFlyout(): void {
+    if (!trigger || !flyout) return;
+    const margin = 8;
+    const triggerRect = trigger.getBoundingClientRect();
+    const flyoutRect = flyout.getBoundingClientRect();
+    x = Math.max(
+      margin,
+      Math.min(triggerRect.right - flyoutRect.width, window.innerWidth - flyoutRect.width - margin),
+    );
+    y = Math.max(
+      margin,
+      Math.min(triggerRect.bottom + 5, window.innerHeight - flyoutRect.height - margin),
+    );
+    positioned = true;
+  }
+
+  function syncPopoverState(event: ToggleEvent): void {
+    if (event.newState === "closed" && open) {
+      open = false;
+    }
+  }
 
   $effect(() => {
-    if (!open) return;
+    if (!open || !flyout) return;
+    positioned = false;
+    if (typeof flyout.showPopover === "function") {
+      flyout.setAttribute("popover", "auto");
+      try {
+        flyout.showPopover();
+      } catch {
+        // A reactive position update can run while the flyout is already open.
+      }
+    }
+    void tick().then(positionFlyout);
     const closeFromOutside = (event: PointerEvent): void => {
-      if (root && event.target instanceof Node && !root.contains(event.target)) open = false;
+      if (
+        root &&
+        flyout &&
+        event.target instanceof Node &&
+        !root.contains(event.target) &&
+        !flyout.contains(event.target)
+      )
+        open = false;
     };
     const closeFromKeyboard = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
@@ -30,11 +74,18 @@
         trigger?.focus();
       }
     };
+    const closeFromScroll = (): void => {
+      open = false;
+    };
     window.addEventListener("pointerdown", closeFromOutside, true);
     window.addEventListener("keydown", closeFromKeyboard, true);
+    window.addEventListener("resize", positionFlyout);
+    window.addEventListener("scroll", closeFromScroll, true);
     return () => {
       window.removeEventListener("pointerdown", closeFromOutside, true);
       window.removeEventListener("keydown", closeFromKeyboard, true);
+      window.removeEventListener("resize", positionFlyout);
+      window.removeEventListener("scroll", closeFromScroll, true);
     };
   });
 </script>
@@ -54,7 +105,14 @@
   </button>
 
   {#if open}
-    <div class="flyout" role="dialog" aria-label="Filters">
+    <div
+      bind:this={flyout}
+      class="flyout"
+      role="dialog"
+      aria-label="Filters"
+      ontoggle={syncPopoverState}
+      style="left:{x}px; top:{y}px; visibility:{positioned ? 'visible' : 'hidden'};"
+    >
       <header>
         <strong>Filters</strong>
         {#if count > 0 && onClear}
@@ -97,10 +155,10 @@
     font-weight: 700;
   }
   .flyout {
-    position: absolute;
+    position: fixed;
+    inset: auto;
+    margin: 0;
     z-index: 160;
-    top: calc(100% + 5px);
-    right: 0;
     width: min(300px, calc(100vw - 32px));
     padding: var(--space-2);
     border: 1px solid var(--stroke-surface);

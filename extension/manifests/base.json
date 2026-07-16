@@ -45,9 +45,9 @@
     }
   ],
   "commands": {
-    "open-sidebar": {
+    "open-popup": {
       "suggested_key": { "default": "Alt+Shift+R" },
-      "description": "Open the Ravyn resource sidebar"
+      "description": "Open the Ravyn resource picker"
     },
     "download-current-page": {
       "suggested_key": { "default": "Alt+Shift+D" },

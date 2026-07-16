@@ -23,7 +23,7 @@ Installed Ravyn executable in native-host mode
 Embedded Ravyn backend
 ```
 
-Content scripts scan the DOM, observe mutations, and render closed-shadow-root media controls. The sidebar owns review and batch submission. The extension never receives the administrative backend bearer token.
+Content scripts scan the DOM, observe mutations, and render closed-shadow-root media controls. A compact two-view toolbar popup owns review and batch submission, including filters, previews, monitoring, per-site cookies, and media/post-processing options. The extension never receives the administrative backend bearer token.
 
 ## Installation lifecycle
 

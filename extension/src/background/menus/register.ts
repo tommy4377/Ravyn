@@ -24,7 +24,7 @@ export const MenuId = {
   pageMedia: "ravyn-page-media",
   pageYtdlp: "ravyn-page-ytdlp",
   pageMonitor: "ravyn-page-monitor",
-  pageSidebar: "ravyn-page-sidebar",
+  pagePopup: "ravyn-page-popup",
 } as const;
 
 export async function registerMenus(): Promise<void> {
@@ -52,7 +52,7 @@ export async function registerMenus(): Promise<void> {
   create(MenuId.pageMedia, "Download all media", ["page"]);
   create(MenuId.pageYtdlp, "Send page to yt-dlp", ["page"]);
   create(MenuId.pageMonitor, "Monitor page for new resources", ["page"]);
-  create(MenuId.pageSidebar, "Open Ravyn sidebar", ["page"]);
+  create(MenuId.pagePopup, "Open Ravyn resource picker", ["page"]);
 }
 
 function create(

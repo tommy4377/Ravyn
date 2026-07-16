@@ -26,6 +26,7 @@ import { registerMenus } from "./menus/register";
 import { NativeClient } from "./native/client";
 import { ResourceCache } from "./network/cache";
 import { NetworkObserver } from "./network/observer";
+import { openResourcePopup } from "./popup";
 import { RuleCache } from "./rules/cache";
 
 const native = new NativeClient();
@@ -54,7 +55,7 @@ async function initialize(): Promise<void> {
   void native.connect().catch(() => undefined);
   browser.tabs.onRemoved.addListener((tabId) => resources.clear(tabId));
   browser.commands.onCommand.addListener((command) => {
-    if (command === "open-sidebar") void browser.sidebarAction.open();
+    if (command === "open-popup") void openResourcePopup();
     if (command === "download-current-page") void downloadCurrentPage();
   });
 }
@@ -134,9 +135,6 @@ async function handleMessage(
       await broadcast({ type: "ravyn-resources-updated", tabId });
       return merged;
     }
-    case "open-sidebar":
-      await browser.sidebarAction.open();
-      return null;
     case "open-ravyn":
       return native.request("open_ravyn", { section: request.section });
     case "get-summary":

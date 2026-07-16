@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import DialogHarness from "../../test/DialogHarness.svelte";
 import TooltipHarness from "../../test/TooltipHarness.svelte";
 import Menu from "./Menu.svelte";
+import MenuButton from "./MenuButton.svelte";
 
 afterEach(() => {
   cleanup();
@@ -12,6 +13,19 @@ afterEach(() => {
 });
 
 describe("shared overlay components", () => {
+  it("gives icon-only menu triggers their contextual accessible label", () => {
+    const { getByRole } = render(MenuButton, {
+      props: {
+        label: "More actions for example.zip",
+        icon: "more",
+        iconOnly: true,
+        items: [],
+      },
+    });
+
+    expect(getByRole("button", { name: "More actions for example.zip" })).not.toBeNull();
+  });
+
   it("assigns a unique accessible title relationship to every dialog", () => {
     const { getAllByRole } = render(DialogHarness);
     const dialogs = getAllByRole("dialog");
@@ -55,7 +69,7 @@ describe("shared overlay components", () => {
       toJSON: () => ({}),
     });
 
-    const { getByRole } = render(Menu, {
+    const { getByRole, getByText } = render(Menu, {
       props: {
         open: true,
         x: 790,
@@ -68,12 +82,48 @@ describe("shared overlay components", () => {
       },
     });
 
-    const menu = getByRole("menu");
-    const enabled = getByRole("menuitem", { name: "Enabled" });
+    const menu = getByRole("menu", { hidden: true });
+    const enabled = getByText("Enabled").closest("button");
+    expect(enabled).not.toBeNull();
     await waitFor(() => {
       expect(menu.getAttribute("style")).toContain("left: 592px");
       expect(menu.getAttribute("style")).toContain("top: 492px");
       expect(document.activeElement).toBe(enabled);
+    });
+  });
+
+  it("right-aligns an end-anchored menu without leaving viewport coordinates", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 200,
+      bottom: 100,
+      left: 0,
+      width: 200,
+      height: 100,
+      toJSON: () => ({}),
+    });
+
+    const { getByRole } = render(Menu, {
+      props: {
+        open: true,
+        x: 300,
+        y: 120,
+        align: "end",
+        onClose: vi.fn(),
+        items: [{ id: "action", label: "Action" }],
+      },
+    });
+
+    const menu = getByRole("menu", { hidden: true });
+    await waitFor(() => {
+      expect(menu.getAttribute("popover")).toBe("auto");
+      expect(menu.getAttribute("style")).toContain("left: 100px");
+      expect(menu.getAttribute("style")).toContain("top: 120px");
+      expect(menu.getAttribute("style")).toContain("visibility: visible");
     });
   });
 });

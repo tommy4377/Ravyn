@@ -493,8 +493,12 @@ pub(super) async fn verify_component(
         s.component_manifest.clone(),
         tokio_util::sync::CancellationToken::new(),
     );
+    // Runtime verification must use the active engine configuration. Managed
+    // rqbit replaces the persisted default endpoint with its supervised
+    // ephemeral loopback URL during bootstrap; checking configured_config
+    // would incorrectly probe the inactive 127.0.0.1:3030 default.
     let health = manager
-        .health_check(component, &s.configured_config, &records)
+        .health_check(component, &s.manager.config, &records)
         .await;
     let now = chrono::Utc::now();
     let configured_path = component_config_path(component, &s.configured_config);

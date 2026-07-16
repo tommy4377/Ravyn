@@ -6,6 +6,7 @@ import type {
 import { normalizeUrl } from "../../shared/urls";
 import type { NativeClient } from "../native/client";
 import type { ResourceCache } from "../network/cache";
+import { openResourcePopup } from "../popup";
 import { MenuId } from "./register";
 
 export function registerMenuHandlers(
@@ -55,8 +56,7 @@ async function handle(
     case MenuId.imageChoose:
       if (tabId !== undefined) {
         await scanTab(tabId, cache);
-        await browser.storage.local.set({ "ravyn.sidebarType": "image" });
-        await browser.sidebarAction.open();
+        await openResourcePopup("image");
       }
       break;
     case MenuId.linkPaused:
@@ -132,7 +132,7 @@ async function handle(
           discoveredAt: Date.now(),
         }));
         cache.merge(tabId, resources);
-        await browser.sidebarAction.open();
+        await openResourcePopup();
       }
       break;
     case MenuId.pageScan:
@@ -142,7 +142,15 @@ async function handle(
     case MenuId.mediaPicker:
       if (tabId !== undefined) {
         await scanTab(tabId, cache);
-        await browser.sidebarAction.open();
+        const type =
+          info.menuItemId === MenuId.imageAll ||
+          info.menuItemId === MenuId.pageImages
+            ? "image"
+            : info.menuItemId === MenuId.pageMedia ||
+                info.menuItemId === MenuId.mediaPicker
+              ? "video"
+              : "all";
+        await openResourcePopup(type);
       }
       break;
     case MenuId.pageYtdlp:
@@ -159,11 +167,11 @@ async function handle(
         await browser.tabs
           .sendMessage(tabId, { type: "monitor-page", enabled: true })
           .catch(() => undefined);
-        await browser.sidebarAction.open();
+        await openResourcePopup();
       }
       break;
-    case MenuId.pageSidebar:
-      await browser.sidebarAction.open();
+    case MenuId.pagePopup:
+      await openResourcePopup();
       break;
     default:
       break;

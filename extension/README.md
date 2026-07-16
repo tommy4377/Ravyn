@@ -8,7 +8,7 @@ The Ravyn Firefox extension discovers downloadable page resources and delegates 
 - Pause-first handoff: Firefox downloads are cancelled only after Ravyn confirms that the job was persisted.
 - Context-menu actions for links, images, media, selections, and complete pages.
 - DOM, mutation, performance-entry, and optional network resource discovery.
-- Sidebar resource picker with type/domain/search filters, presets, tags, media options, subtitle options, and safe conversion presets.
+- Compact two-view toolbar popup with type/domain/search filters, previews, batch selection, presets, tags, media options, subtitle options, and safe conversion presets.
 - Optional per-site session-cookie forwarding. Cookie values are read only when a download is submitted and are never stored by the extension.
 - Media overlays for non-protected HTML media, using the Ravyn application icon with an accessible download label.
 - Toolbar status, recent job summary, global pause/resume, and desktop navigation.
@@ -62,8 +62,7 @@ manifests/       Shared and Firefox-specific manifests
 scripts/         Build, validation, and deterministic packaging
 src/background/  Privileged browser orchestration
 src/content/     Page scanning and media overlays
-src/popup/       Toolbar popup
-src/sidebar/     Resource picker
+src/popup/       Toolbar dashboard and resource picker
 src/options/     Extension preferences
 src/confirmation Interception confirmation window
 static/          HTML, CSS, icons, and locales

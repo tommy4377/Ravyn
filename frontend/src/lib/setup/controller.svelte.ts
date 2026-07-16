@@ -42,6 +42,21 @@ export type SetupStep =
 
 export type SetupMode = "install" | "update" | "repair" | "first-run";
 
+export function restoredSetupStep(
+  state: Pick<
+    SetupState,
+    | "features_selected"
+    | "library_prepared"
+    | "integration_consent"
+    | "installation"
+  >,
+): SetupStep | null {
+  if (!state.features_selected || !state.library_prepared) return null;
+  return state.integration_consent && state.installation
+    ? "install"
+    : "preferences";
+}
+
 export interface ComponentProgress {
   state: ComponentState;
   progressPct: number | null;
@@ -146,12 +161,16 @@ export class SetupController {
       this.applyDetection(setupState, installation);
       if (setupState.integration_consent) {
         const consent = setupState.integration_consent;
-        this.applicationMode = installation.development
-          ? "development"
-          : consent.installation_mode;
-        this.startMenuShortcut = consent.start_menu_shortcut;
-        this.desktopShortcut = consent.desktop_shortcut;
-        this.launchAtStartup = consent.launch_at_startup;
+        this.setApplicationMode(
+          installation.development
+            ? "development"
+            : consent.installation_mode,
+        );
+        if (this.applicationMode === "installed") {
+          this.startMenuShortcut = consent.start_menu_shortcut;
+          this.desktopShortcut = consent.desktop_shortcut;
+          this.launchAtStartup = consent.launch_at_startup;
+        }
         this.launchAfterSetup = consent.launch_after_setup;
       }
       this.installationReported = setupState.installation !== null;
@@ -167,8 +186,12 @@ export class SetupController {
         );
         this.features.add("standard_downloads");
       }
-      if (setupState.features_selected && setupState.library_prepared) {
-        this.step = "preferences";
+      const restoredStep = restoredSetupStep(setupState);
+      if (restoredStep) {
+        this.step = restoredStep;
+        if (restoredStep === "install" && !setupState.restart_required) {
+          await this.runInstallation();
+        }
       }
     } catch (error) {
       this.connectionError = describeError(error);
@@ -181,9 +204,11 @@ export class SetupController {
     state: SetupState,
     installation: InstallationInfo,
   ): void {
-    this.applicationMode = installation.development
-      ? "development"
-      : (state.installation?.installation_mode ?? "installed");
+    this.setApplicationMode(
+      installation.development
+        ? "development"
+        : (state.installation?.installation_mode ?? "installed"),
+    );
 
     if (!installation.installed && !state.completed) {
       this.mode = "first-run";
@@ -268,6 +293,9 @@ export class SetupController {
   setApplicationMode(mode: InstallationMode): void {
     if (this.installation?.development) {
       this.applicationMode = "development";
+      this.startMenuShortcut = false;
+      this.desktopShortcut = false;
+      this.launchAtStartup = false;
       return;
     }
     this.applicationMode = mode;

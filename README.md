@@ -32,7 +32,7 @@ The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `R
 
 ## Firefox extension
 
-The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. New installations intercept compatible downloads by default, with rule-based, confirmed, and disabled modes available in Options; it also supports link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, icon-only media overlays, and a batch resource sidebar.
+The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. New installations intercept compatible downloads by default, with rule-based, confirmed, and disabled modes available in Options; it also supports link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, icon-only media overlays, and a compact popup resource picker with batch submission.
 
 ```text
 cd extension

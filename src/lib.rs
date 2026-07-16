@@ -91,7 +91,7 @@ impl Ravyn {
         // engine activation replaces built-in command-name defaults.
         let configured_config = Arc::new(config.clone());
         apply_managed_engine_paths(&mut config).await?;
-        let rqbit_process = start_managed_rqbit_if_required(&mut config, &repository).await?;
+        let rqbit_process = start_managed_rqbit_if_available(&mut config).await?;
         let provisioning_cancellation = services::components::ProvisioningCancellation::new();
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);
@@ -141,19 +141,15 @@ impl Ravyn {
     }
 }
 
-/// Starts rqbit only when a verified Ravyn-managed binary is active and the
-/// persisted feature selection requires torrent support. Custom rqbit paths
-/// and remote endpoints remain operator-owned and are never spawned here.
-async fn start_managed_rqbit_if_required(
+/// Starts rqbit whenever a verified Ravyn-managed binary is active. A managed
+/// component can be installed after setup, so the original setup feature
+/// selection is not a reliable indication of whether torrent support is
+/// currently available. Custom rqbit paths and non-default API endpoints
+/// remain operator-owned and are never spawned here.
+async fn start_managed_rqbit_if_available(
     config: &mut Config,
-    repository: &Repository,
 ) -> Result<Option<services::rqbit_process::RqbitProcessManager>> {
-    use services::components::{FeatureId, effective_feature_set};
-
-    let Some((profile, selections)) = repository.load_feature_selections().await? else {
-        return Ok(None);
-    };
-    if !effective_feature_set(profile, &selections)?.contains(&FeatureId::TorrentSupport) {
+    if !uses_default_rqbit_endpoint(&config.rqbit_api) {
         return Ok(None);
     }
     let engines = services::engines::EngineManager::new(&config.data_dir);
@@ -167,6 +163,10 @@ async fn start_managed_rqbit_if_required(
     let process = services::rqbit_process::RqbitProcessManager::new(&config.data_dir);
     process.start(&managed, config).await?;
     Ok(Some(process))
+}
+
+fn uses_default_rqbit_endpoint(value: &str) -> bool {
+    value.trim().trim_end_matches('/') == "http://127.0.0.1:3030"
 }
 
 /// Prefer a verified managed binary only when the operator left the matching
@@ -655,5 +655,13 @@ mod managed_engine_tests {
 
         assert_eq!(config.ytdlp, installed);
         assert_eq!(config.ffmpeg, std::path::Path::new("custom-ffmpeg"));
+    }
+
+    #[test]
+    fn managed_rqbit_only_owns_the_builtin_endpoint() {
+        assert!(uses_default_rqbit_endpoint("http://127.0.0.1:3030"));
+        assert!(uses_default_rqbit_endpoint(" http://127.0.0.1:3030/ "));
+        assert!(!uses_default_rqbit_endpoint("https://torrent.example.test"));
+        assert!(!uses_default_rqbit_endpoint("http://127.0.0.1:4040"));
     }
 }

@@ -55,10 +55,14 @@
 
 <style>
   .setup {
+    position: relative;
+    z-index: 1;
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg-app);
+    background: var(--surface-content);
+    backdrop-filter: blur(24px) saturate(116%);
+    -webkit-backdrop-filter: blur(24px) saturate(116%);
   }
   .loading {
     flex: 1;

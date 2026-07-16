@@ -12,7 +12,7 @@ This checkpoint contains the current Ravyn desktop application and the Firefox-f
 - Download interception modes with pause-first handoff and loop prevention.
 - Link, image, media, selection, and page context-menu actions.
 - DOM, mutation, performance-entry, frame, and optional network resource discovery.
-- Sidebar resource picker with filtering and batch submission.
+- Compact toolbar resource picker with filtering, previews, monitoring, and batch submission.
 - Media overlay and yt-dlp fallback for compatible non-protected media.
 - Optional per-site cookie access without persistent cookie-value storage.
 - Popup, options, confirmation UI, local fixture pages, privacy documentation, threat model, and AMO submission notes.
@@ -41,7 +41,7 @@ The source implementation has no known unfinished Firefox phase. The following w
 
 1. Run `cargo fmt`, `cargo check`, `cargo clippy`, and `cargo test` with a real Rust toolchain.
 2. Run the Windows NSIS/MSI installation, repair, update, rollback, native-host registration, and uninstall smoke tests.
-3. Run a real Firefox end-to-end test against an installed Ravyn build, including interception, sidebar scanning, context menus, cookies, private windows, containers, HLS/DASH, and backend restart recovery.
+3. Run a real Firefox end-to-end test against an installed Ravyn build, including interception, popup resource scanning, context menus, cookies, private windows, containers, HLS/DASH, and backend restart recovery.
 4. Configure Mozilla AMO credentials, submit/sign the XPI, and complete any Mozilla review feedback.
 5. Approve final extension store icons, screenshots, listing copy, privacy URL, and support URL.
 6. Run the tagged release workflow and verify the signed desktop and extension artifacts on clean Windows 10 and Windows 11 machines.

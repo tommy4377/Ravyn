@@ -14,10 +14,10 @@ This report adapts `Ravyn-Firefox-Extension-Implementation-Plan` to the current 
 | Context menus | Complete | Links, images, media, selections, pages, paused/scheduled/probed variants |
 | Page resource scanner | Complete | DOM, srcset, picture, CSS backgrounds, objects, scripts, links, performance entries, mutations, frames |
 | Network discovery | Complete | Optional webRequest observer, bounded cache, manifest/media classification, segment suppression |
-| Resource picker/sidebar | Complete | Search, type/domain/new/size filters, batch selection, preset/tags/media/subtitle/conversion options |
+| Compact popup resource picker | Complete | Overview/resources views, search, type/domain/new/size filters, previews, monitoring, batch selection, preset/tags/media/subtitle/conversion options |
 | Media controls | Complete | Closed Shadow DOM overlay, source fallback, yt-dlp probe, protected-media refusal |
 | Cookies and containers | Complete | Explicit per-origin permission, container metadata, host matching, no extension persistence |
-| Popup and options | Complete | Connection state, summaries, global job actions, interception and discovery preferences |
+| Popup and options | Complete | Compact dashboard, integrated resource picker, connection state, summaries, global job actions, interception and discovery preferences |
 | Security hardening | Complete | Command allow-list, payload limits, URL/path validation, per-user descriptor, no remote code |
 | Tests and fixtures | Complete | Unit suites plus local direct/dynamic/frame/media fixture server |
 | CI and release | Complete | Cross-platform checks, deterministic XPI/source archive, AMO unlisted signing path, checksums and attestations |

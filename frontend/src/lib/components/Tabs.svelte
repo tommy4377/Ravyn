@@ -13,7 +13,7 @@
     selected: string;
   } = $props();
 
-  let tabEls: (HTMLButtonElement | null)[] = [];
+  let tabEls = $state<(HTMLButtonElement | null)[]>([]);
 
   function onKeydown(event: KeyboardEvent, index: number): void {
     let next = index;

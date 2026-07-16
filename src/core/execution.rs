@@ -402,6 +402,15 @@ impl JobManager {
                         registered.push((artifact.id, path));
                     }
                 }
+                if let Some(filename) = inferred_completed_filename(
+                    job.kind,
+                    job.filename.as_deref(),
+                    primary_path.as_deref(),
+                ) {
+                    self.repository
+                        .update_job_fields(job.id, None, None, None, Some(&filename), None)
+                        .await?;
+                }
                 if !registered.is_empty() && !job.options_json.post_actions.is_empty() {
                     let _ = self
                         .repository
@@ -746,6 +755,19 @@ fn path_with_numeric_suffix(path: &Path, suffix: u32) -> crate::error::Result<Pa
     Ok(path.with_file_name(filename))
 }
 
+fn inferred_completed_filename(
+    kind: JobKind,
+    existing: Option<&str>,
+    primary_path: Option<&Path>,
+) -> Option<String> {
+    if kind != JobKind::Media || existing.is_some() {
+        return None;
+    }
+    primary_path?
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 async fn move_regular_file_without_replacement(
     source: &Path,
     destination: &Path,
@@ -812,4 +834,34 @@ async fn move_regular_file_without_replacement(
         return Err(error.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_media_uses_the_real_output_name_when_no_name_was_requested() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                None,
+                Some(Path::new("C:/Videos/Me at the zoo [jNQXAC9IVRw].mkv")),
+            )
+            .as_deref(),
+            Some("Me at the zoo [jNQXAC9IVRw].mkv")
+        );
+    }
+
+    #[test]
+    fn completed_media_preserves_an_explicit_requested_name() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                Some("custom.mkv"),
+                Some(Path::new("C:/Videos/generated.mkv")),
+            ),
+            None
+        );
+    }
 }

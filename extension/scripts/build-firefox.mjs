@@ -1,5 +1,5 @@
 import { build, context } from "esbuild";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,11 +10,11 @@ const entries = {
   "background/index": path.join(root, "src/background/index.ts"),
   "content/index": path.join(root, "src/content/index.ts"),
   "popup/index": path.join(root, "src/popup/index.ts"),
-  "sidebar/index": path.join(root, "src/sidebar/index.ts"),
   "options/index": path.join(root, "src/options/index.ts"),
   "confirmation/index": path.join(root, "src/confirmation/index.ts"),
 };
 
+await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
 const base = JSON.parse(
   await readFile(path.join(root, "manifests/base.json"), "utf8"),

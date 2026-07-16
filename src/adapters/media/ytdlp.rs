@@ -15,6 +15,14 @@ pub(super) fn append_probe_network_options(command: &mut Command, request: &Medi
     }
 }
 
+pub(super) fn append_ffmpeg_location(command: &mut Command, ffmpeg: &Path) {
+    // yt-dlp only searches PATH by default. Managed engines live in Ravyn's
+    // private data directory, so pass their verified executable explicitly.
+    if ffmpeg != Path::new("ffmpeg") {
+        command.arg("--ffmpeg-location").arg(ffmpeg);
+    }
+}
+
 pub(super) fn append_download_options(
     command: &mut Command,
     job: &Job,
@@ -745,6 +753,32 @@ mod tests {
             ..MediaOptions::default()
         };
         assert!(format_selector(&options).contains("height<=1080"));
+    }
+
+    #[test]
+    fn passes_managed_ffmpeg_location_to_ytdlp() {
+        let mut command = Command::new("yt-dlp");
+        let ffmpeg = Path::new(r"C:\Ravyn\engines\ffmpeg\ffmpeg.exe");
+        append_ffmpeg_location(&mut command, ffmpeg);
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            vec![
+                "--ffmpeg-location".to_string(),
+                ffmpeg.to_string_lossy().into_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_path_discovery_to_ytdlp_for_default_ffmpeg_command() {
+        let mut command = Command::new("yt-dlp");
+        append_ffmpeg_location(&mut command, Path::new("ffmpeg"));
+        assert_eq!(command.as_std().get_args().count(), 0);
     }
 
     #[test]

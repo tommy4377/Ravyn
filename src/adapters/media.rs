@@ -415,6 +415,7 @@ impl DownloadAdapter for MediaAdapter {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        append_ffmpeg_location(&mut command, &self.config.ffmpeg);
         crate::services::security::validate_relative_template(
             template.to_string_lossy().as_ref(),
             "media output template",

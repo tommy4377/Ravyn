@@ -9,6 +9,7 @@
     "core:default",
     "dialog:default",
     "allow-backend-info",
+    "allow-desktop-appearance",
     "allow-setup-installation-info",
     "allow-apply-windows-integration",
     "allow-finish-setup-handoff",

@@ -335,11 +335,20 @@ pub(super) fn direct_f64(value: &Value, keys: &[&str]) -> Option<f64> {
 
 pub(super) fn probe_from_value(raw: Value) -> TorrentProbe {
     let files = collect_files(&raw);
+    let total_bytes = find_u64(&raw, &["total_bytes", "totalBytes", "size_bytes", "length"])
+        .or_else(|| {
+            if files.is_empty() {
+                return None;
+            }
+            files
+                .iter()
+                .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes?))
+        });
     TorrentProbe {
         torrent_id: extract_torrent_id(&raw),
         info_hash: find_string(&raw, &["info_hash", "infohash", "infoHash"]),
         name: find_string(&raw, &["name", "title"]),
-        total_bytes: find_u64(&raw, &["total_bytes", "totalBytes", "size_bytes", "length"]),
+        total_bytes,
         files,
         raw,
     }
@@ -801,6 +810,26 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[1].index, 1);
         assert_eq!(files[1].size_bytes, Some(20));
+    }
+
+    #[test]
+    fn derives_probe_total_from_rqbit_file_lengths() {
+        let value = json!({
+            "id": null,
+            "details": {
+                "info_hash": "c03bb709bd7efe79688775c4fc925141e41db287",
+                "name": "KNOPPIX_V9.1DVD-2021-01-25-EN",
+                "files": [
+                    {"name": "image.iso", "length": 4_694_753_280_u64},
+                    {"name": "image.iso.sha256", "length": 100}
+                ]
+            }
+        });
+
+        let probe = probe_from_value(value);
+
+        assert_eq!(probe.total_bytes, Some(4_694_753_380));
+        assert_eq!(probe.files.len(), 2);
     }
 
     #[test]

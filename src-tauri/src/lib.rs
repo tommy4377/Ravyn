@@ -362,7 +362,9 @@ async fn desktop_appearance(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<appearance::DesktopAppearance, String> {
-    require_window(&window, "main")?;
+    if !matches!(window.label(), "main" | "setup") {
+        return Err("command is not available from this window".into());
+    }
     appearance::read(app, window).await
 }
 

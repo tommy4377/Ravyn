@@ -30,6 +30,7 @@
   } = $props();
 
   let dialogEl = $state<HTMLDivElement | null>(null);
+  let backdropEl = $state<HTMLDivElement | null>(null);
   let returnFocusEl: HTMLElement | null = null;
   const titleId = nextDialogTitleId();
 
@@ -66,8 +67,16 @@
   }
 
   $effect(() => {
-    if (!open) return;
+    if (!open || !backdropEl) return;
     returnFocusEl = document.activeElement as HTMLElement | null;
+    if (typeof backdropEl.showPopover === "function") {
+      backdropEl.setAttribute("popover", "manual");
+      try {
+        backdropEl.showPopover();
+      } catch {
+        // A reactive update can run while the modal layer is already open.
+      }
+    }
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     void tick().then(() => {
@@ -85,7 +94,7 @@
 </script>
 
 {#if open}
-  <div class="backdrop" role="presentation" onpointerdown={() => !preventClose && onClose()}>
+  <div bind:this={backdropEl} class="backdrop" role="presentation" onpointerdown={() => !preventClose && onClose()}>
     <div
       bind:this={dialogEl}
       class="dialog {size}"
@@ -115,13 +124,17 @@
   .backdrop {
     position: fixed;
     inset: 0;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: var(--space-6);
+    border: 0;
     z-index: 300;
     display: grid;
     place-items: center;
     background: color-mix(in srgb, #000 38%, transparent);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
-    padding: var(--space-6);
   }
   .dialog {
     display: flex;

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { systemAppearance } from "../appearance/systemAppearance.svelte";
   import BasketView from "../basket/BasketView.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import Icon from "../components/Icon.svelte";
@@ -12,7 +11,6 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
-  import AppBackdrop from "./AppBackdrop.svelte";
   import ConnectionBoot from "./ConnectionBoot.svelte";
   import NavigationView from "./NavigationView.svelte";
   import NotificationHistoryDrawer from "./NotificationHistoryDrawer.svelte";
@@ -47,7 +45,6 @@
   }
 
   onMount(() => {
-    const disposeAppearance = systemAppearance.init();
     const readBrowserAction = (): void => {
       void takeBrowserAction().then(applyBrowserAction).catch(() => undefined);
     };
@@ -91,7 +88,6 @@
     return () => {
       window.removeEventListener("keydown", onKeydown);
       window.clearInterval(browserActionTimer);
-      disposeAppearance?.();
     };
   });
 
@@ -152,7 +148,6 @@
   <ConnectionBoot />
 {:else}
   <div class="shell" class:resizing>
-    <AppBackdrop />
     <div class="body">
       <NavigationView />
       <main class="content-surface" aria-live="polite">
@@ -222,7 +217,7 @@
               <Icon name="close" size={17} />
             </button>
           </header>
-          <div class="drawer-content"><BasketView /></div>
+          <div class="drawer-content"><BasketView embedded /></div>
         </aside>
       {:else if navigation.notificationDrawerOpen}
         <button class="drawer-scrim" type="button" aria-label="Close notifications" onclick={() => (navigation.notificationDrawerOpen = false)}></button>
@@ -252,7 +247,7 @@
   .shell.resizing, .shell.resizing * { cursor: col-resize !important; user-select: none !important; }
   .body { position: relative; z-index: 1; flex: 1; min-height: 0; display: flex; }
   .content-surface { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-content); }
-  .details-region { position: relative; flex: none; min-width: 320px; max-width: 520px; min-height: 0; overflow: hidden; border-left: 1px solid var(--stroke-divider); background: var(--surface-overlay); }
+  .details-region { position: relative; flex: none; min-width: 320px; max-width: 520px; min-height: 0; overflow: hidden; border-left: 1px solid var(--stroke-divider); background: var(--surface-overlay); backdrop-filter: blur(26px) saturate(118%); -webkit-backdrop-filter: blur(26px) saturate(118%); }
   .resize-handle { position: absolute; z-index: 10; inset: 0 auto 0 -5px; width: 10px; border: 0; background: transparent; cursor: col-resize; }
   .resize-handle::after { content: ""; position: absolute; left: 4px; top: 28px; bottom: 28px; width: 2px; border-radius: var(--radius-pill); background: transparent; transition: background var(--motion-fast) var(--motion-easing); }
   .resize-handle:hover::after, .resizing .resize-handle::after { background: var(--accent-default); }

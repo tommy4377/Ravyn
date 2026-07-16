@@ -1,5 +1,9 @@
 # Ravyn Firefox Extension — Complete Implementation Plan
 
+> Update (2026-07-16): the implemented resource picker now lives in the compact
+> toolbar popup. Historical sidebar sections below describe the original plan
+> and are superseded by `docs/FIREFOX_EXTENSION_IMPLEMENTATION_REPORT.md`.
+
 ## 1. Purpose
 
 The Ravyn Firefox extension will act as the browser-facing entry point for the Ravyn download manager. The extension will discover downloadable resources, intercept eligible Firefox downloads, expose context-menu actions, add download controls to media elements, and communicate securely with the Ravyn desktop backend.
