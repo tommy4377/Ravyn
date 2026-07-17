@@ -15,10 +15,13 @@ export function decideInterception(
   )
     return "ignore";
   if (ruleAction === "browser" || ruleAction === "ignore") return "ignore";
+  // An explicit "always intercept" domain is a stronger, more specific
+  // signal than the blanket "ask every time" mode — it should win rather
+  // than still prompting.
+  if (forcedByDomain) return "intercept";
   if (settings.interceptionMode === "ask" || ruleAction === "ask")
     return "confirm";
-  if (forcedByDomain || settings.interceptionMode === "all-compatible")
-    return "intercept";
+  if (settings.interceptionMode === "all-compatible") return "intercept";
   if (settings.interceptionMode === "rules-only" && ruleAction === "ravyn")
     return "intercept";
   return "ignore";

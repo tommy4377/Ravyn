@@ -4,6 +4,7 @@ import type {
   CreateBatchPayload,
   CreateDownloadPayload,
   DetectedResource,
+  DownloadPreset,
   DownloadSummary,
   SourceContext,
 } from "../shared/contracts";
@@ -18,6 +19,7 @@ import {
   validateBatchPayload,
   validateDownloadPayload,
 } from "../shared/validation";
+import { BypassRegistry } from "./downloads/bypass";
 import { DelegationRegistry } from "./downloads/delegation";
 import { DownloadInterceptor } from "./downloads/interceptor";
 import { registerMenuHandlers } from "./menus/handlers";
@@ -32,10 +34,12 @@ const native = new NativeClient();
 const resources = new ResourceCache();
 const rules = new RuleCache(native);
 const network = new NetworkObserver(resources);
+const bypass = new BypassRegistry();
 const interceptor = new DownloadInterceptor(
   native,
   rules,
   new DelegationRegistry(),
+  bypass,
 );
 
 void initialize();
@@ -46,13 +50,26 @@ async function initialize(): Promise<void> {
   registerMenuHandlers(native, resources);
   interceptor.register();
   await network.synchronize(settings);
-  native.subscribeStatus(() => clearBadge());
+  await browser.action
+    .setBadgeBackgroundColor({ color: "#0f6cbd" })
+    .catch(() => undefined);
   native.subscribeEvents((event) => {
-    if (event.event.startsWith("rule.")) rules.invalidate();
+    // The native host now proxies the backend's real SSE stream (rather
+    // than the old request-refresh stub), so this fires the moment a rule
+    // actually changes instead of waiting out the 10-minute cache TTL.
+    if (event.event === "rule_changed") rules.invalidate();
     void broadcast({ type: "ravyn-native-event", event });
   });
   void native.connect().catch(() => undefined);
   browser.tabs.onRemoved.addListener((tabId) => resources.clear(tabId));
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    // A top-level navigation invalidates the previous page's detected media
+    // — clear the count so the badge doesn't show stale results.
+    if (changeInfo.url) {
+      resources.clear(tabId);
+      void updateBadge(tabId);
+    }
+  });
   browser.commands.onCommand.addListener((command) => {
     if (command === "open-popup") void openResourcePopup();
     if (command === "download-current-page") void downloadCurrentPage();
@@ -113,16 +130,24 @@ async function handleMessage(
       const detected = (await browser.tabs
         .sendMessage(tabId, { type: "scan-page" })
         .catch(() => [])) as DetectedResource[];
-      return resources.merge(
+      const merged = resources.merge(
         tabId,
         detected,
         (await loadSettings()).maxResourcesPerTab,
       );
+      void updateBadge(tabId);
+      return merged;
     }
     case "get-tab-resources": {
       const tabId = request.tabId ?? sender.tab?.id ?? (await activeTab())?.id;
       return tabId === undefined ? [] : resources.list(tabId);
     }
+    case "get-stream-hint": {
+      const tabId = request.tabId ?? sender.tab?.id ?? (await activeTab())?.id;
+      return tabId !== undefined && resources.hasStreamHint(tabId);
+    }
+    case "get-presets":
+      return native.request<DownloadPreset[]>("list_presets");
     case "resources-detected": {
       const tabId = request.tabId ?? sender.tab?.id;
       if (tabId === undefined) return [];
@@ -131,6 +156,7 @@ async function handleMessage(
         request.resources,
         (await loadSettings()).maxResourcesPerTab,
       );
+      void updateBadge(tabId);
       await broadcast({ type: "ravyn-resources-updated", tabId });
       return merged;
     }
@@ -145,9 +171,11 @@ async function handleMessage(
     case "get-settings":
       return loadSettings();
     case "save-settings": {
+      // No push broadcast needed: browser.storage.local.set fires
+      // storage.onChanged for every context (content scripts included),
+      // which is what content/index.ts listens on directly.
       const next = await saveSettings(request.settings);
       await network.synchronize(next);
-      await broadcast({ type: "update-settings", settings: next });
       return next;
     }
     case "request-site-permissions":
@@ -163,6 +191,9 @@ async function handleMessage(
       return loadSettings();
     case "confirmation-result":
       interceptor.resolveConfirmation(request.requestId, request.accepted);
+      return null;
+    case "bypass-download":
+      await bypass.arm(request.url);
       return null;
     case "monitor-tab":
       resources.setMonitored(request.tabId, request.enabled);
@@ -344,11 +375,18 @@ async function downloadCurrentPage(): Promise<void> {
   });
 }
 
-function clearBadge(): void {
-  // The toolbar icon stays badge-free: transient reconnect windows made the
-  // "!" marker flash misleadingly while Ravyn was perfectly healthy. The
-  // popup itself reports the live connection state instead.
-  void browser.action.setBadgeText({ text: "" });
+async function updateBadge(tabId: number): Promise<void> {
+  const count = resources
+    .list(tabId)
+    .filter(
+      (resource) =>
+        resource.type === "video" ||
+        resource.type === "audio" ||
+        resource.type === "manifest",
+    ).length;
+  await browser.action
+    .setBadgeText({ tabId, text: count > 0 ? String(count) : "" })
+    .catch(() => undefined);
 }
 
 async function broadcast(message: unknown): Promise<void> {

@@ -43,6 +43,9 @@ export class NetworkObserver {
     browser.webRequest.onBeforeRequest.addListener(this.onBeforeRequest, {
       urls: ["<all_urls>"],
     });
+    browser.webRequest.onBeforeRedirect.addListener(this.onBeforeRedirect, {
+      urls: ["<all_urls>"],
+    });
     browser.webRequest.onHeadersReceived.addListener(
       this.onHeadersReceived,
       { urls: ["<all_urls>"] },
@@ -59,6 +62,7 @@ export class NetworkObserver {
 
   private unregister(): void {
     browser.webRequest.onBeforeRequest.removeListener(this.onBeforeRequest);
+    browser.webRequest.onBeforeRedirect.removeListener(this.onBeforeRedirect);
     browser.webRequest.onHeadersReceived.removeListener(this.onHeadersReceived);
     browser.webRequest.onCompleted.removeListener(this.onCompleted);
     browser.webRequest.onErrorOccurred.removeListener(this.onError);
@@ -81,6 +85,18 @@ export class NetworkObserver {
       requestType: details.type,
       startedAt: Date.now(),
     });
+  };
+
+  private readonly onBeforeRedirect = (
+    details: browser.webRequest._OnBeforeRedirectDetails,
+  ): void => {
+    const request = this.pending.get(details.requestId);
+    if (!request) return;
+    // Catalogue the resource under the URL it actually ended up at — the
+    // original request URL is often a short-lived CDN/signed-URL redirect
+    // that won't resolve to the same content later.
+    const redirected = normalizeUrl(details.redirectUrl);
+    if (redirected) request.url = redirected;
   };
 
   private readonly onHeadersReceived = (
@@ -109,7 +125,15 @@ export class NetworkObserver {
       request.mime,
       request.requestType,
     );
-    if (classification.ignore) return;
+    if (classification.ignore) {
+      // A segment with no manifest in sight (the player fetched the
+      // manifest through a path we can't observe, e.g. a blob: URL) still
+      // means there's a stream here — surface a hint instead of dropping it
+      // entirely, without cluttering the resource list with hundreds of
+      // individual .ts/.m4s entries.
+      if (classification.isSegment) this.cache.markStreamHint(request.tabId);
+      return;
+    }
     const resource: DetectedResource = {
       id: `network:${request.requestId}`,
       url: request.url,

@@ -14,6 +14,7 @@ export interface DownloadCandidate {
   incognito: boolean;
   byExtensionId?: string;
   method?: string;
+  totalBytes?: number;
 }
 
 export interface EligibilityResult {
@@ -48,9 +49,21 @@ export function evaluateEligibility(
     )
   )
     return { eligible: false, reason: "disabled-domain" };
+  const extension = extensionFromUrl(normalized);
+  if (
+    settings.interceptExtensions.length > 0 &&
+    !(extension && settings.interceptExtensions.includes(extension))
+  )
+    return { eligible: false, reason: "extension-not-allowed" };
+  if (settings.minInterceptSizeBytes > 0) {
+    const known =
+      candidate.totalBytes !== undefined && candidate.totalBytes >= 0;
+    if (!known || candidate.totalBytes! < settings.minInterceptSizeBytes)
+      return { eligible: false, reason: "below-minimum-size" };
+  }
   return {
     eligible: true,
-    extension: extensionFromUrl(normalized),
+    extension,
     host: parsed.hostname,
   };
 }

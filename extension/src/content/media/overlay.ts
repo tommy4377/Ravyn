@@ -46,7 +46,10 @@ export class MediaOverlayController {
   }
 
   private get enabled(): boolean {
-    return this.settings.mediaDetection && this.settings.videoOverlays;
+    return (
+      this.settings.mediaDetection &&
+      (this.settings.videoOverlays || this.settings.imageOverlays)
+    );
   }
 
   private ensureObserver(): void {
@@ -68,6 +71,9 @@ export class MediaOverlayController {
     for (const element of document.querySelectorAll<OverlayTarget>(
       "video, audio, img",
     )) {
+      const isImage = element instanceof HTMLImageElement;
+      if (isImage ? !this.settings.imageOverlays : !this.settings.videoOverlays)
+        continue;
       if (
         this.controls.has(element) ||
         element.hasAttribute(HOST_ATTRIBUTE) ||
@@ -139,6 +145,24 @@ export class MediaOverlayController {
       if (!button.matches(":focus-visible") && !close.matches(":focus-visible"))
         host.style.opacity = "0";
     };
+    // Clicking sends a fire-and-forget runtime message; without this the
+    // button gives no sign that anything happened, which reads as "broken".
+    const acknowledge = (ok: boolean): void => {
+      button.disabled = true;
+      button.replaceChildren(ok ? "✓" : "!");
+      button.style.background = ok ? "#107c10" : "#c42b1c";
+      button.setAttribute(
+        "aria-label",
+        ok ? "Sent to Ravyn" : "Ravyn could not start this download",
+      );
+      show();
+      window.setTimeout(() => {
+        button.disabled = false;
+        button.replaceChildren(icon);
+        button.style.background = "#0f6cbd";
+        button.setAttribute("aria-label", "Download this media with Ravyn");
+      }, 1600);
+    };
     const download = (event: Event): void => {
       event.preventDefault();
       event.stopPropagation();
@@ -149,22 +173,31 @@ export class MediaOverlayController {
         pageUrl: location.href,
         pageTitle: document.title,
       };
-      if (element instanceof HTMLImageElement) {
-        const url = element.currentSrc || element.src;
-        if (!url) return;
-        void browser.runtime.sendMessage({
-          type: "download-url",
-          payload: { url, referer: location.href, sourceContext },
-        });
-        return;
-      }
-      const resources = collectMediaSources(element);
-      void browser.runtime.sendMessage({
-        type: "download-media-element",
-        resources,
-        pageUrl: location.href,
-        sourceContext,
-      });
+      const request =
+        element instanceof HTMLImageElement
+          ? (() => {
+              const url = element.currentSrc || element.src;
+              return url
+                ? browser.runtime.sendMessage({
+                    type: "download-url",
+                    payload: { url, referer: location.href, sourceContext },
+                  })
+                : null;
+            })()
+          : browser.runtime.sendMessage({
+              type: "download-media-element",
+              resources: collectMediaSources(element),
+              pageUrl: location.href,
+              sourceContext,
+            });
+      if (!request) return;
+      void request.then(
+        (result) =>
+          acknowledge(
+            !(result && typeof result === "object" && "error" in result),
+          ),
+        () => acknowledge(false),
+      );
     };
     const dismiss = (event: Event): void => {
       event.preventDefault();

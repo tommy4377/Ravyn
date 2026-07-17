@@ -1,5 +1,6 @@
 import type { BackgroundRequest, ExtensionSettings } from "../shared/contracts";
-import { DEFAULT_SETTINGS } from "../shared/settings";
+import { DEFAULT_SETTINGS, SETTINGS_KEY } from "../shared/settings";
+import { normalizeUrl } from "../shared/urls";
 import { scanDocument } from "./scanner/dom-scanner";
 import { BoundedMutationScanner } from "./scanner/mutation-observer";
 import { MediaOverlayController } from "./media/overlay";
@@ -8,6 +9,7 @@ let settings: ExtensionSettings = DEFAULT_SETTINGS;
 let monitorEnabled = false;
 let lastScanAt = 0;
 let lastContextTarget: Element | null = null;
+let bypassModifierHeld = false;
 const overlay = new MediaOverlayController(settings);
 const mutationScanner = new BoundedMutationScanner(() => {
   if (monitorEnabled) void publishResources();
@@ -17,6 +19,30 @@ document.addEventListener(
   "contextmenu",
   (event) => {
     lastContextTarget = event.target instanceof Element ? event.target : null;
+  },
+  true,
+);
+
+// IDM-style escape hatch: holding the configured modifier while clicking a
+// download link tells the interceptor to leave that one download to
+// Firefox. Tracked here (not in the background) because keyboard state
+// isn't visible to the background page.
+document.addEventListener("keydown", (event) => trackModifier(event), true);
+document.addEventListener("keyup", (event) => trackModifier(event), true);
+window.addEventListener("blur", () => (bypassModifierHeld = false));
+document.addEventListener(
+  "click",
+  (event) => {
+    if (!bypassModifierHeld || settings.bypassModifierKey === "none") return;
+    const target = event.target instanceof Element ? event.target : null;
+    const href = target?.closest("a")?.href;
+    if (!href) return;
+    const normalized = normalizeUrl(href);
+    if (!normalized) return;
+    void browser.runtime.sendMessage({
+      type: "bypass-download",
+      url: normalized,
+    } satisfies BackgroundRequest);
   },
   true,
 );
@@ -36,6 +62,15 @@ async function initialize(): Promise<void> {
   overlay.start();
 }
 
+// storage.onChanged (not a runtime.sendMessage push) is the only channel
+// that reliably reaches every open tab's content script in Firefox —
+// runtime.sendMessage only delivers to extension pages (popup/options).
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[SETTINGS_KEY]) return;
+  settings = changes[SETTINGS_KEY].newValue as ExtensionSettings;
+  overlay.updateSettings(settings);
+});
+
 browser.runtime.onMessage.addListener((message: unknown) => {
   if (!message || typeof message !== "object") return undefined;
   const request = message as Record<string, unknown>;
@@ -49,19 +84,25 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     mutationScanner.stop();
     return Promise.resolve([]);
   }
-  if (request.type === "update-settings") {
-    settings = {
-      ...settings,
-      ...(request.settings as Partial<ExtensionSettings>),
-    };
-    overlay.updateSettings(settings);
-  }
   if (request.type === "collect-context")
     return Promise.resolve(
       collectContext(request.context as string | undefined),
     );
   return undefined;
 });
+
+function trackModifier(event: KeyboardEvent): void {
+  const key = settings.bypassModifierKey;
+  if (key === "none") {
+    bypassModifierHeld = false;
+    return;
+  }
+  const pressed =
+    (key === "alt" && event.altKey) ||
+    (key === "shift" && event.shiftKey) ||
+    (key === "ctrl" && event.ctrlKey);
+  bypassModifierHeld = pressed;
+}
 
 async function publishResources(
   force = false,
@@ -74,6 +115,14 @@ async function publishResources(
     resources,
   } satisfies BackgroundRequest);
   return resources;
+}
+
+function resolveUrl(value: string): string | undefined {
+  try {
+    return new URL(value, document.baseURI).href;
+  } catch {
+    return undefined;
+  }
 }
 
 function collectContext(context?: string): Record<string, unknown> {
@@ -89,11 +138,15 @@ function collectContext(context?: string): Record<string, unknown> {
       source.srcset
         .split(",")
         .map((entry) => entry.trim().split(/\s+/, 1)[0])
+        .filter((value): value is string => !!value)
+        .map(resolveUrl)
         .filter((value): value is string => !!value),
     );
     const srcsetSources = active.srcset
       .split(",")
       .map((entry) => entry.trim().split(/\s+/, 1)[0])
+      .filter((value): value is string => !!value)
+      .map(resolveUrl)
       .filter((value): value is string => !!value);
     return {
       currentSrc: active.currentSrc,
