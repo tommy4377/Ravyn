@@ -24,7 +24,8 @@ function Write-GeneratedHelper {
   $env:RAVYN_HELPER_FROM_VERSION = $FromVersion
   $env:RAVYN_HELPER_TO_VERSION = $ToVersion
   Remove-Item $helperPath -Force -ErrorAction SilentlyContinue
-  cargo test --locked -p ravyn-desktop dump_helper_script_for_parser_validation -- --ignored
+  # Keep cargo's console output out of the function's return value.
+  cargo test --locked -p ravyn-desktop dump_helper_script_for_parser_validation -- --ignored | Out-Host
   if ($LASTEXITCODE -ne 0) {
     throw "The updater helper generation test failed with exit code $LASTEXITCODE."
   }
@@ -47,7 +48,9 @@ function Assert-HelperGuards {
     'completed_at_unix_ms'
   )
   foreach ($marker in $requiredMarkers) {
-    if (-not $Script.Contains($marker, [System.StringComparison]::Ordinal)) {
+    # Single-argument String.Contains is an ordinal comparison and exists in
+    # both Windows PowerShell 5.1 and PowerShell 7.
+    if (-not $Script.Contains($marker)) {
       throw "The generated updater helper is missing the required marker: $marker"
     }
   }
@@ -58,7 +61,6 @@ function Invoke-LifecycleScenario {
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][string]$OldExecutable,
     [Parameter(Mandatory = $true)][string]$NewExecutable,
-    [Parameter(Mandatory = $true)][string]$InstallerExecutable,
     [Parameter(Mandatory = $true)][ValidateSet('success', 'failure')][string]$ReadinessMode,
     [Parameter(Mandatory = $true)][string]$FromVersion,
     [Parameter(Mandatory = $true)][string]$ToVersion,
@@ -71,15 +73,15 @@ function Invoke-LifecycleScenario {
   $installed = Join-Path $installDir 'Ravyn.exe'
   $installer = Join-Path $scenarioRoot 'update.exe'
   Copy-Item -LiteralPath $OldExecutable -Destination $installed -Force
-  Copy-Item -LiteralPath $InstallerExecutable -Destination $installer -Force
+  # The staged update artifact is the new application executable itself; the
+  # helper replaces the installed binary in place (no bundled installer).
+  Copy-Item -LiteralPath $NewExecutable -Destination $installer -Force
   Set-Content -LiteralPath (Join-Path $scenarioRoot 'pending.json') -Value '{}' -Encoding UTF8
   Set-Content -LiteralPath (Join-Path $scenarioRoot 'transaction.json') -Value '{}' -Encoding UTF8
 
   $script = Write-GeneratedHelper -ScenarioRoot $scenarioRoot -FromVersion $FromVersion -ToVersion $ToVersion
   Assert-HelperGuards -Script $script
 
-  $env:RAVYN_TEST_UPDATE_PAYLOAD = $NewExecutable
-  $env:RAVYN_TEST_INSTALLED = $installed
   $env:RAVYN_TEST_READY_MODE = $ReadinessMode
   $env:RAVYN_TEST_READY_FILE = Join-Path $scenarioRoot 'ready.marker'
 
@@ -120,7 +122,6 @@ try {
   New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
   $oldExecutable = Join-Path $testRoot 'old-ravyn.exe'
   $newExecutable = Join-Path $testRoot 'new-ravyn.exe'
-  $installerExecutable = Join-Path $testRoot 'mock-installer.exe'
 
   New-TestExecutable -Output $oldExecutable -Source @'
 using System;
@@ -146,23 +147,9 @@ public static class NewRavynProgram {
     }
 }
 '@
-  New-TestExecutable -Output $installerExecutable -Source @'
-using System;
-using System.IO;
-public static class MockInstallerProgram {
-    public static int Main(string[] args) {
-        string source = Environment.GetEnvironmentVariable("RAVYN_TEST_UPDATE_PAYLOAD");
-        string destination = Environment.GetEnvironmentVariable("RAVYN_TEST_INSTALLED");
-        if (String.IsNullOrEmpty(source) || String.IsNullOrEmpty(destination)) return 2;
-        File.Copy(source, destination, true);
-        return 0;
-    }
-}
-'@
-
-  Invoke-LifecycleScenario -Name 'upgrade-success' -OldExecutable $oldExecutable -NewExecutable $newExecutable -InstallerExecutable $installerExecutable -ReadinessMode success -FromVersion '0.2.0' -ToVersion '0.3.0' -ExpectedOutcome succeeded
-  Invoke-LifecycleScenario -Name 'upgrade-rollback' -OldExecutable $oldExecutable -NewExecutable $newExecutable -InstallerExecutable $installerExecutable -ReadinessMode failure -FromVersion '0.2.0' -ToVersion '0.3.0' -ExpectedOutcome rolled_back
-  Invoke-LifecycleScenario -Name 'same-version-repair' -OldExecutable $oldExecutable -NewExecutable $newExecutable -InstallerExecutable $installerExecutable -ReadinessMode success -FromVersion '0.3.0' -ToVersion '0.3.0' -ExpectedOutcome succeeded
+  Invoke-LifecycleScenario -Name 'upgrade-success' -OldExecutable $oldExecutable -NewExecutable $newExecutable -ReadinessMode success -FromVersion '0.2.0' -ToVersion '0.3.0' -ExpectedOutcome succeeded
+  Invoke-LifecycleScenario -Name 'upgrade-rollback' -OldExecutable $oldExecutable -NewExecutable $newExecutable -ReadinessMode failure -FromVersion '0.2.0' -ToVersion '0.3.0' -ExpectedOutcome rolled_back
+  Invoke-LifecycleScenario -Name 'same-version-repair' -OldExecutable $oldExecutable -NewExecutable $newExecutable -ReadinessMode success -FromVersion '0.3.0' -ToVersion '0.3.0' -ExpectedOutcome succeeded
 
   Write-Host 'Generated updater helper parsed successfully and passed upgrade, rollback, and repair lifecycle tests.'
 } finally {
@@ -170,8 +157,6 @@ public static class MockInstallerProgram {
     'RAVYN_HELPER_TEST_ROOT',
     'RAVYN_HELPER_FROM_VERSION',
     'RAVYN_HELPER_TO_VERSION',
-    'RAVYN_TEST_UPDATE_PAYLOAD',
-    'RAVYN_TEST_INSTALLED',
     'RAVYN_TEST_READY_MODE',
     'RAVYN_TEST_READY_FILE'
   )) {

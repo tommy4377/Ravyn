@@ -7,7 +7,6 @@
   ],
   "permissions": [
     "core:default",
-    "mcp-bridge:default",
     "core:window:allow-close",
     "core:window:allow-hide",
     "allow-backend-info",

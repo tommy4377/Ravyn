@@ -61,11 +61,17 @@ fn platform_open(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn platform_reveal(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let mut command = std::process::Command::new("explorer.exe");
     if path.is_dir() {
         command.arg(path);
     } else {
-        command.arg(format!("/select,{}", path.display()));
+        // std::process quotes any argument containing spaces, turning
+        // `/select,C:\dir\my file.bin` into `"/select,C:\dir\my file.bin"`.
+        // Explorer does not understand that fully quoted form and silently
+        // opens the default (Documents) folder instead, so pass the
+        // documented `/select,"<path>"` shape verbatim.
+        command.raw_arg(reveal_select_argument(path));
     }
     crate::silent_command::hide_console_window(&mut command);
     command.spawn().map(|_| ()).map_err(|error| {
@@ -74,6 +80,13 @@ fn platform_reveal(path: &Path) -> Result<(), String> {
             path.display()
         )
     })
+}
+
+/// Builds the exact `explorer.exe` argument for revealing a file. Only the
+/// path is quoted — quoting the whole `/select,...` argument (std's default
+/// for arguments containing spaces) makes Explorer fall back to Documents.
+fn reveal_select_argument(path: &Path) -> String {
+    format!("/select,\"{}\"", path.display())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -98,6 +111,14 @@ mod tests {
     #[test]
     fn rejects_empty_paths() {
         assert!(validate_existing_path("  ").is_err());
+    }
+
+    #[test]
+    fn quotes_only_the_path_in_the_select_argument() {
+        assert_eq!(
+            reveal_select_argument(Path::new(r"C:\Users\demo\Downloads\file (4).bin")),
+            r#"/select,"C:\Users\demo\Downloads\file (4).bin""#
+        );
     }
 
     #[test]

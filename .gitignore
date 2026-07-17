@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+src-tauri/capabilities/mcp-automation.gen.json
 /fuzz/target/
 /ravyn-data/
 **/*.rs.bk

@@ -1121,8 +1121,13 @@ mod tests {
 
     async fn fixture() -> (tempfile::TempDir, Config, Repository, PathBuf, PathBuf) {
         let temporary = tempfile::tempdir().unwrap();
-        let source = temporary.path().join("source");
-        let destination = temporary.path().join("destination");
+        // The library move canonicalizes every persisted path (expanding 8.3
+        // short names like C:\Users\ADMINI~1). Canonicalize the fixture base
+        // too, so path assertions hold on machines whose %TEMP% uses a short
+        // name.
+        let base = canonical_path(temporary.path()).unwrap();
+        let source = base.join("source");
+        let destination = base.join("destination");
         tokio::fs::create_dir_all(source.join("Documents"))
             .await
             .unwrap();

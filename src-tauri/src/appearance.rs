@@ -122,6 +122,9 @@ fn virtual_desktop_rect(monitors: &[PhysicalRect]) -> Option<PhysicalRect> {
 }
 
 #[cfg(target_os = "windows")]
+// Internal plumbing between the command handler and Win32 introspection; the
+// window geometry cannot be collapsed further without losing clarity.
+#[allow(clippy::too_many_arguments)]
 fn platform_appearance(
     cache_dir: &std::path::Path,
     monitor: PhysicalRect,
@@ -156,7 +159,7 @@ fn platform_appearance(
     let transparency_enabled = personalization
         .as_ref()
         .and_then(|key| key.get_value::<u32, _>("EnableTransparency").ok())
-        .map_or(true, |value| value != 0);
+        .is_none_or(|value| value != 0);
 
     let accent_color = current_user
         .open_subkey(r"Software\Microsoft\Windows\DWM")

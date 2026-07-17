@@ -1,8 +1,10 @@
 //! Silent, signed application updates for installed Windows builds.
 //!
-//! Ravyn downloads and verifies an installer in the background, then starts a
-//! detached helper when the main window closes. The helper waits for Ravyn to
-//! exit, runs the current-user NSIS installer silently, and relaunches the app.
+//! Ravyn downloads and verifies the new application executable in the
+//! background, then starts a detached helper when the main window closes. The
+//! helper waits for Ravyn to exit, replaces the installed binary in place
+//! (binaries-only, because the install directory doubles as the data
+//! directory), refreshes the Installed Apps version, and relaunches the app.
 
 use std::{
     io::{BufReader, Read},
@@ -1368,8 +1370,8 @@ fn build_installer_helper_script_with_timeout(
              $i++;\n\
            };\n\
            Write-Journal 'install';\n\
-           $setup=Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru;\n\
-           if ($setup.ExitCode -ne 0) { throw \"installer exited with code $($setup.ExitCode)\" };\n\
+           Copy-Item -LiteralPath $installer -Destination $installed -Force;\n\
+           if (Test-Path 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn') { Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn' -Name 'DisplayVersion' -Value $toVersion -ErrorAction SilentlyContinue };\n\
            Write-Journal 'verify';\n\
            $launched=Start-Process -FilePath $installed -PassThru;\n\
            $deadline=(Get-Date).AddSeconds($timeoutSeconds);\n\
@@ -1583,6 +1585,19 @@ mod tests {
             .rfind("Start-Process -FilePath $installed | Out-Null")
             .unwrap();
         assert!(result_write < rollback_relaunch);
+    }
+
+    #[test]
+    fn helper_script_replaces_the_binary_in_place_without_an_installer() {
+        let script = build_installer_helper_script(&sample_transaction(), 42);
+        assert!(
+            script.contains("Copy-Item -LiteralPath $installer -Destination $installed -Force")
+        );
+        assert!(script.contains("-Name 'DisplayVersion' -Value $toVersion"));
+        assert!(
+            !script.contains("-ArgumentList '/S'"),
+            "the update must not depend on a bundled NSIS installer"
+        );
     }
 
     #[test]

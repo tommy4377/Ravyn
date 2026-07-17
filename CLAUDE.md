@@ -70,7 +70,7 @@ Bootstrap is `Ravyn::bootstrap` in `src/lib.rs`: it validates `config::Config` (
 
 ### Desktop shell (`src-tauri/src/`)
 
-`lib.rs` spawns the backend (`backend.rs`) and exposes native commands. The webview obtains the backend base URL and per-run bearer token through the `backend_info` command; all setup-state decisions are re-read from the authenticated backend API (never trusted from the webview). Other modules: `installation.rs`/`integration.rs` (installed-app registration, shortcuts, startup — gated on recorded consent in the backend), `setup_guard.rs`, `app_updates.rs`, `uninstall.rs`, `appearance.rs`. A debug-only `tauri-plugin-mcp-bridge` enables the tauri-mcp tooling.
+`lib.rs` spawns the backend (`backend.rs`) and exposes native commands. The webview obtains the backend base URL and per-run bearer token through the `backend_info` command; all setup-state decisions are re-read from the authenticated backend API (never trusted from the webview). Other modules: `installation.rs`/`integration.rs` (installed-app registration, shortcuts, startup — gated on recorded consent in the backend), `setup_guard.rs`, `app_updates.rs`, `uninstall.rs`, `appearance.rs`. The tauri-mcp tooling requires an opt-in QA build: `TAURI_CONFIG='{"app":{"withGlobalTauri":true}}' cargo build -p ravyn-desktop --features mcp-automation` (the feature compiles `tauri-plugin-mcp-bridge` and `build.rs` generates its capability grant; default builds ship neither).
 
 ### Frontend (`frontend/src/`)
 

@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [],
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "security": {
       "capabilities": [
         "setup-capability",
@@ -39,29 +39,12 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": [
-      "nsis",
-      "msi"
-    ],
+    "active": false,
+    "targets": [],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser",
-        "installerHooks": "./windows/hooks.nsh"
-      },
-      "wix": {
-        "fragmentPaths": [
-          "./windows/firefox-native-host.wxs"
-        ],
-        "componentRefs": [
-          "RavynFirefoxNativeHostRegistration"
-        ]
-      }
-    }
+    ]
   },
   "mainBinaryName": "Ravyn"
 }

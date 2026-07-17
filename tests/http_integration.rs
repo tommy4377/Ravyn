@@ -861,6 +861,13 @@ async fn retrying_a_failed_job_resets_progress_and_creates_no_duplicates() {
         "{:?}",
         completed.error
     );
+    assert_eq!(
+        completed.downloaded_bytes as usize,
+        body.len(),
+        "completion must snap persisted progress to the final size so a \
+         reloaded UI never renders a stale sub-100% bar"
+    );
+    assert_eq!(completed.total_bytes.map(|b| b as usize), Some(body.len()));
     let jobs = app.repository.list_jobs().await.unwrap();
     assert_eq!(jobs.len(), 1, "retry must reuse the job, not duplicate it");
     let outputs = app.repository.list_job_outputs(job.id).await.unwrap();
