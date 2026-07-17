@@ -25,9 +25,11 @@ npm run package:verify --prefix extension
   scenarios to pass.
 - Run component validation with `--provision --target
   x86_64-pc-windows-msvc`.
-- Build the signed NSIS updater artifact and MSI distribution artifact.
-- Install silently as the current user and wait for the desktop readiness
-  marker and `/health/ready` response.
+- Build and Authenticode-sign the single self-installing `Ravyn.exe`
+  distribution artifact (no NSIS or MSI bundles).
+- Launch the shipped executable, wait for the desktop readiness marker and
+  `/health/ready` response, and verify on-demand Firefox native-host
+  registration/unregistration.
 - Verify setup, application launch, Installed Apps registration, repair-safe
   update state, and uninstall.
 - Verify light/dark/high-contrast UI at 100%, 125%, 150%, and 200% scaling.

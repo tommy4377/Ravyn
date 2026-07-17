@@ -16,6 +16,7 @@ mod silent_command;
 mod torrent_association;
 mod tray;
 mod uninstall;
+mod webview_runtime;
 
 use tauri::Manager;
 
@@ -457,8 +458,15 @@ async fn main_window_ready(
 
 /// Opens (or focuses) the compact download progress window. Called by the
 /// main window when a transfer starts while Ravyn is minimized or unfocused.
+///
+/// Must be async: creating a webview from a synchronous command deadlocks
+/// WebView2 initialization on Windows (wry#583), leaving a blank window and
+/// stalling IPC for every other webview.
 #[tauri::command]
-fn open_compact_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+async fn open_compact_window(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     require_window(&window, "main")?;
     if let Some(existing) = app.get_webview_window("compact") {
         existing.show().map_err(|error| error.to_string())?;
@@ -472,6 +480,7 @@ fn open_compact_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> R
         .minimizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
+        .decorations(false)
         .build()
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -542,6 +551,9 @@ pub fn run() {
         return;
     }
     if uninstall::try_handle_command_line() {
+        return;
+    }
+    if !webview_runtime::ensure_available() {
         return;
     }
     tracing_subscriber::fmt()

@@ -1,6 +1,5 @@
 import type {
   BackgroundRequest,
-  ConnectionStatus,
   CookieValue,
   CreateBatchPayload,
   CreateDownloadPayload,
@@ -47,7 +46,7 @@ async function initialize(): Promise<void> {
   registerMenuHandlers(native, resources);
   interceptor.register();
   await network.synchronize(settings);
-  native.subscribeStatus((status) => updateBadge(status));
+  native.subscribeStatus(() => clearBadge());
   native.subscribeEvents((event) => {
     if (event.event.startsWith("rule.")) rules.invalidate();
     void broadcast({ type: "ravyn-native-event", event });
@@ -345,7 +344,7 @@ async function downloadCurrentPage(): Promise<void> {
   });
 }
 
-function updateBadge(_status: ConnectionStatus): void {
+function clearBadge(): void {
   // The toolbar icon stays badge-free: transient reconnect windows made the
   // "!" marker flash misleadingly while Ravyn was perfectly healthy. The
   // popup itself reports the live connection state instead.

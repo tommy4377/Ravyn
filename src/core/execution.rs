@@ -648,6 +648,47 @@ impl JobManager {
                     status: final_status,
                     error: result_terminal_message.clone(),
                 });
+                if final_status == JobStatus::Completed {
+                    // Progress flushes are periodic, so the last persisted
+                    // byte counter usually lags the finished transfer and a
+                    // reloaded UI would render a forever-94% bar. Snap the
+                    // stored counters (and live listeners) to the final size.
+                    let final_total = match self.repository.get_job(job.id).await {
+                        Ok(latest) => latest
+                            .total_bytes
+                            .and_then(|bytes| u64::try_from(bytes).ok()),
+                        Err(_) => None,
+                    };
+                    let final_total = match final_total {
+                        Some(total) => Some(total),
+                        None => self
+                            .repository
+                            .list_job_outputs(job.id)
+                            .await
+                            .ok()
+                            .and_then(|outputs| {
+                                outputs
+                                    .iter()
+                                    .find(|output| output.output_type == OutputType::Primary)
+                                    .or_else(|| outputs.first())
+                                    .and_then(|output| output.size_bytes)
+                            }),
+                    };
+                    if let Some(total) = final_total {
+                        let _ = self
+                            .repository
+                            .update_progress(job.id, total, Some(total))
+                            .await;
+                        self.events.publish(Event::Progress(
+                            crate::core::models::ProgressSnapshot {
+                                job_id: job.id,
+                                downloaded_bytes: total,
+                                total_bytes: Some(total),
+                                bytes_per_second: 0,
+                            },
+                        ));
+                    }
+                }
                 let (severity, code, message) = if final_status == JobStatus::Partial {
                     (
                         "warning",

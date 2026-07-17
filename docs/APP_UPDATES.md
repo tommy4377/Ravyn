@@ -10,18 +10,20 @@ manifest passes Ed25519 verification with the public key compiled into Ravyn.
    interrupted update transaction after the embedded backend starts.
 2. Ravyn checks the configured HTTPS endpoint immediately and then every six
    hours. Transient failures retry after 15, 30, 60, and at most 120 minutes.
-3. A newer signed NSIS release is streamed silently to the private application
-   cache with a strict signed-size limit and incremental SHA-256 verification.
+3. A newer signed application executable is streamed silently to the private
+   application cache with a strict signed-size limit and incremental SHA-256
+   verification.
 4. Settings shows passive check, download, cancellation, readiness, and result
-   state. The user can stop an active transfer or discard a staged installer.
-5. By default, a verified installer waits until Ravyn closes normally. The user
+   state. The user can stop an active transfer or discard a staged update.
+5. By default, a verified update waits until Ravyn closes normally. The user
    may instead choose **Restart and install** to begin the same transaction
    immediately.
-6. Ravyn verifies the staged installer again and writes a durable update
+6. Ravyn verifies the staged executable again and writes a durable update
    transaction before a detached Windows helper is started.
 7. The helper waits for the old process to exit, retains the previous
-   installation binaries, registry entries, and shortcuts, runs the current-user
-   NSIS installer with `/S`, and launches the installed executable.
+   installation binaries, registry entries, and shortcuts, replaces the
+   installed executable in place, refreshes the Installed Apps version, and
+   launches the installed executable.
 8. The new process confirms readiness only after both the embedded backend and
    the main webview are operational.
 9. If readiness is not confirmed within 180 seconds, or the new process exits,
@@ -56,7 +58,7 @@ will stage that version again.
 
 Update state lives below the Tauri application cache in `updates/`:
 
-- `ravyn-pending-update.exe` — verified staged NSIS installer;
+- `ravyn-pending-update.exe` — verified staged application executable;
 - `ravyn-pending-update.json` — signed manifest and staging metadata;
 - `ravyn-update-transaction.json` — bounded transaction contract shared with
   the detached helper;
@@ -109,18 +111,18 @@ sign-app-update`. The signed payload contains:
 - schema and stable channel;
 - release version and publication timestamp;
 - target (`windows-x86_64`);
-- exact NSIS filename and HTTPS URL;
-- installer size and SHA-256;
+- exact application-executable filename and HTTPS URL;
+- artifact size and SHA-256;
 - optional release notes.
 
-The workflow verifies the produced signature and installer before uploading
+The workflow verifies the produced signature and executable before uploading
 both to the immutable GitHub Release.
 
 ## CI validation
 
 Windows CI regenerates the exact detached PowerShell helper from the Rust
 source and parses it with the real PowerShell parser. It then builds disposable
-mock old/new application binaries and a mock silent installer and executes three
+mock old/new application binaries and executes three
 complete transactions: an N-to-N+1 success, a forced readiness failure with
 binary rollback, and a same-version repair. Each scenario verifies the installed
 binary, transaction cleanup, and persisted result metadata.
@@ -139,8 +141,9 @@ is removed by the workflow after validation.
 - `Cargo.toml`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and
   `frontend/package.json` must have the same version.
 - The release tag must be exactly `v<version>`.
-- The NSIS installer must use `currentUser` mode so silent installation does
-  not require elevation.
+- The release artifact is the single self-installing `Ravyn.exe`; there is no
+  MSI or NSIS installer. Installation stays per-user (`%LOCALAPPDATA%\Ravyn`)
+  and never requires elevation.
 - The update private/public key pair must match.
 - Windows CI must pass the N-to-N+1, forced-readiness rollback, and same-version
   repair lifecycle harness, plus the installed application readiness smoke test.

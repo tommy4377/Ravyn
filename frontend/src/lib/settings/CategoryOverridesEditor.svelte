@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from "../components/Button.svelte";
+  import Dropdown, { type DropdownOption } from "../components/Dropdown.svelte";
   import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import TextField from "../components/TextField.svelte";
@@ -8,7 +9,7 @@
 
   let { controller }: { controller: SettingsController } = $props();
 
-  const categories: { value: LibraryCategory; label: string }[] = [
+  const categories: DropdownOption[] = [
     { value: "downloads", label: "Downloads" },
     { value: "videos", label: "Videos" },
     { value: "music", label: "Music" },
@@ -43,14 +44,15 @@
       {#each controller.categoryOverrides as override, index (index)}
         <div class="override-row">
           <TextField bind:value={override.extension} label="Extension" placeholder="mkv" />
-          <label class="category-field">
+          <div class="category-field">
             <span>Category</span>
-            <select bind:value={override.category}>
-              {#each categories as category}
-                <option value={category.value}>{category.label}</option>
-              {/each}
-            </select>
-          </label>
+            <Dropdown
+              options={categories}
+              value={override.category}
+              label={`Category for extension override ${index + 1}`}
+              onchange={(value) => (override.category = value as LibraryCategory)}
+            />
+          </div>
           <IconButton icon="trash" label={`Remove extension override ${index + 1}`} variant="subtle" onclick={() => controller.removeCategoryOverride(index)} />
         </div>
       {/each}
@@ -66,8 +68,7 @@
   .override-list { display: flex; flex-direction: column; gap: var(--space-3); }
   .override-row { display: grid; grid-template-columns: minmax(140px, .65fr) minmax(180px, 1fr) auto; align-items: end; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--stroke-divider); border-radius: var(--radius-medium); background: var(--bg-subtle); }
   .category-field { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-body); }
-  select { height: var(--control-default); min-width: 0; padding: 0 var(--space-3); border: 1px solid var(--stroke-control); border-bottom-color: var(--stroke-control-strong); border-radius: var(--radius-control); color: var(--text-primary); background: var(--bg-control); font: inherit; }
-  select:focus { border-bottom: 2px solid var(--accent-default); outline: none; }
+  .category-field :global(.dropdown) { min-width: 0; }
   .empty-overrides { min-height: 54px; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); border: 1px dashed var(--stroke-control); border-radius: var(--radius-medium); }
   @media (max-width: 680px) { .override-header { align-items: stretch; flex-direction: column; } .override-row { grid-template-columns: 1fr auto; } .override-row :global(.field:first-child) { grid-column: 1 / -1; } }
 </style>
