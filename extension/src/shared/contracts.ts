@@ -7,6 +7,7 @@ export const RESOURCE_MAX_AGE_MS = 30 * 60 * 1_000;
 
 export type InterceptionMode =
   "disabled" | "rules-only" | "ask" | "all-compatible";
+export type BypassModifierKey = "alt" | "shift" | "ctrl" | "none";
 export type ResourceKind =
   "image" | "video" | "audio" | "manifest" | "document" | "archive" | "other";
 export type ResourceSource =
@@ -25,6 +26,7 @@ export type NativeCommand =
   | "pause_all"
   | "resume_all"
   | "get_rules"
+  | "list_presets"
   | "evaluate_url"
   | "open_ravyn"
   | "subscribe_events"
@@ -158,6 +160,32 @@ export interface RuleSnapshot {
   rules: BrowserRule[];
 }
 
+export interface DownloadPreset {
+  id: string;
+  name: string;
+}
+
+export interface MediaFormat {
+  formatId: string;
+  extension?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  bitrateKbps?: number;
+  audioBitrateKbps?: number;
+  filesize?: number;
+  protocol?: string;
+  note?: string;
+}
+
+export interface MediaProbeResult {
+  title?: string;
+  duration?: number;
+  formats: MediaFormat[];
+}
+
 export interface DownloadSummary {
   active: number;
   queued: number;
@@ -182,8 +210,10 @@ export type BackgroundRequest =
       pageUrl: string;
       sourceContext: SourceContext;
     }
-  | { type: "scan-tab"; tabId?: number; fresh?: boolean }
+  | { type: "scan-tab"; tabId?: number }
   | { type: "get-tab-resources"; tabId?: number }
+  | { type: "get-stream-hint"; tabId?: number }
+  | { type: "get-presets" }
   | {
       type: "resources-detected";
       tabId?: number;
@@ -203,14 +233,19 @@ export type BackgroundRequest =
     }
   | { type: "clear-extension-data" }
   | { type: "confirmation-result"; requestId: string; accepted: boolean }
-  | { type: "monitor-tab"; tabId: number; enabled: boolean };
+  | { type: "monitor-tab"; tabId: number; enabled: boolean }
+  | { type: "bypass-download"; url: string };
 
 export interface ExtensionSettings {
   interceptionMode: InterceptionMode;
   automaticInterception: boolean;
+  bypassModifierKey: BypassModifierKey;
+  interceptExtensions: string[];
+  minInterceptSizeBytes: number;
   mediaDetection: boolean;
   networkObservation: boolean;
   videoOverlays: boolean;
+  imageOverlays: boolean;
   overlayMinimumWidth: number;
   overlayMinimumHeight: number;
   includePrivateWindows: boolean;

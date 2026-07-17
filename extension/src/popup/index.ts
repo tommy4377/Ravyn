@@ -3,13 +3,24 @@ import type {
   ConnectionStatus,
   CreateDownloadPayload,
   DetectedResource,
+  DownloadPreset,
   DownloadSummary,
   ExtensionSettings,
+  MediaFormat,
+  MediaProbeResult,
   ResourceKind,
   SourceContext,
 } from "../shared/contracts";
 
 type PopupView = "overview" | "resources";
+
+const FILTERS_KEY = "ravyn.popupFilters";
+interface PersistedFilters {
+  search: string;
+  newOnly: boolean;
+  minimumSize: string;
+  maximumSize: string;
+}
 
 const connection = element("connection");
 const message = element("message");
@@ -48,17 +59,36 @@ async function initialize(): Promise<void> {
   const stored = await browser.storage.local.get([
     "ravyn.popupView",
     "ravyn.popupType",
+    FILTERS_KEY,
   ]);
   const type: unknown = stored["ravyn.popupType"];
   if (typeof type === "string" && isResourceType(type))
     element<HTMLSelectElement>("resource-type").value = type;
+  // Remembering the last filter set (DownThemAll-style) saves re-entering
+  // the same size bounds/search every time the popup reopens.
+  const filters = stored[FILTERS_KEY] as Partial<PersistedFilters> | undefined;
+  if (filters) {
+    element<HTMLInputElement>("resource-search").value = filters.search ?? "";
+    element<HTMLInputElement>("new-only").checked = filters.newOnly ?? false;
+    element<HTMLInputElement>("minimum-size").value = filters.minimumSize ?? "";
+    element<HTMLInputElement>("maximum-size").value = filters.maximumSize ?? "";
+  }
   bind();
   const initialView =
     stored["ravyn.popupView"] === "resources" ? "resources" : "overview";
   switchView(initialView, false);
-  await Promise.all([refreshConnection(), refreshSummary()]);
+  await Promise.all([
+    refreshConnection(),
+    refreshSummary(),
+    refreshStreamHint(),
+    loadPresets(),
+  ]);
   if (initialView === "resources") await refreshResources(true);
-  summaryRefreshTimer = window.setInterval(() => void refreshSummary(), 2_000);
+  // Real push events (native-messaging now proxies the backend's SSE
+  // stream) cover the common case immediately; this interval is only a
+  // slow fallback for whatever push might miss (e.g. progress ticks that
+  // don't cross a full percent, or the native host still reconnecting).
+  summaryRefreshTimer = window.setInterval(() => void refreshSummary(), 20_000);
   window.addEventListener(
     "unload",
     () => {
@@ -121,6 +151,13 @@ function bind(): void {
     "maximum-size",
   ])
     element(id).addEventListener("input", renderResources);
+  for (const id of [
+    "resource-search",
+    "new-only",
+    "minimum-size",
+    "maximum-size",
+  ])
+    element(id).addEventListener("input", () => void persistFilters());
   element<HTMLSelectElement>("resource-type").addEventListener(
     "change",
     (event) => {
@@ -173,8 +210,22 @@ function bind(): void {
     if (
       record?.type === "ravyn-resources-updated" &&
       record.tabId === currentTab?.id
-    )
+    ) {
       void refreshResources(false);
+      void refreshStreamHint();
+    }
+    // The native host now proxies real backend events, so a job/queue
+    // change refreshes the summary immediately instead of waiting for the
+    // next poll tick.
+    if (record?.type === "ravyn-native-event") {
+      const event = record.event as { event?: string } | undefined;
+      if (
+        event?.event === "job_status" ||
+        event?.event === "queue_changed" ||
+        event?.event === "progress"
+      )
+        void refreshSummary();
+    }
   });
 }
 
@@ -249,6 +300,26 @@ async function refreshConnection(): Promise<void> {
   }
 }
 
+async function loadPresets(): Promise<void> {
+  const response = await send({ type: "get-presets" });
+  if (!Array.isArray(response)) return;
+  const presets = response as DownloadPreset[];
+  const select = element<HTMLSelectElement>("preset");
+  const current = select.value;
+  select.replaceChildren(
+    new Option("No preset", ""),
+    ...presets.map((preset) => new Option(preset.name, preset.id)),
+  );
+  if (presets.some((preset) => preset.id === current)) select.value = current;
+}
+
+async function refreshStreamHint(): Promise<void> {
+  const detected =
+    currentTab?.id !== undefined &&
+    (await send({ type: "get-stream-hint", tabId: currentTab.id })) === true;
+  element("stream-hint").classList.toggle("hidden", !detected);
+}
+
 async function refreshSummary(): Promise<void> {
   const response = await send({ type: "get-summary" });
   if (hasError(response)) {
@@ -274,8 +345,83 @@ async function analyzePage(): Promise<void> {
   });
   setBusy(false);
   if (hasError(response)) return show(response.error.message);
-  show("Media analysis completed. Opening format details in Ravyn.");
-  await send({ type: "open-ravyn", section: "media" });
+  const probe = response as MediaProbeResult;
+  renderFormats(probe.formats ?? []);
+  show(
+    probe.formats?.length
+      ? `${probe.formats.length} format${probe.formats.length === 1 ? "" : "s"} found — choose one below.`
+      : "No downloadable formats found on this page.",
+  );
+}
+
+function renderFormats(formats: MediaFormat[]): void {
+  const container = element("formats");
+  if (!formats.length) {
+    container.classList.add("hidden");
+    container.replaceChildren();
+    return;
+  }
+  const sorted = [...formats].sort(
+    (left, right) =>
+      (right.height ?? 0) - (left.height ?? 0) ||
+      (right.bitrateKbps ?? 0) - (left.bitrateKbps ?? 0),
+  );
+  container.replaceChildren(...sorted.map(formatRow));
+  container.classList.remove("hidden");
+}
+
+function formatRow(format: MediaFormat): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "format-row";
+  const copy = document.createElement("div");
+  copy.className = "format-copy";
+  const label = document.createElement("div");
+  label.className = "format-label";
+  label.textContent = formatQualityLabel(format);
+  const meta = document.createElement("div");
+  meta.className = "format-meta";
+  meta.textContent = formatQualityMeta(format);
+  copy.append(label, meta);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Download";
+  button.addEventListener("click", () => void downloadFormat(format));
+  row.append(copy, button);
+  return row;
+}
+
+function formatQualityLabel(format: MediaFormat): string {
+  if (format.height)
+    return `${format.height}p${format.fps && format.fps > 30 ? ` ${Math.round(format.fps)}fps` : ""}`;
+  if (format.audioCodec && !format.videoCodec) return "Audio only";
+  return format.note ?? format.formatId;
+}
+
+function formatQualityMeta(format: MediaFormat): string {
+  const parts: string[] = [];
+  if (format.extension) parts.push(format.extension.toUpperCase());
+  if (format.videoCodec) parts.push(format.videoCodec);
+  if (format.audioCodec && format.height) parts.push(format.audioCodec);
+  if (format.filesize) parts.push(formatSize(format.filesize));
+  return parts.join(" · ") || format.formatId;
+}
+
+async function downloadFormat(format: MediaFormat): Promise<void> {
+  if (!currentTab?.url) return;
+  setBusy(true);
+  const response = await send({
+    type: "download-url",
+    payload: {
+      url: currentTab.url,
+      kind: "media",
+      media: { format: format.formatId },
+      sourceContext: sourceContext(currentTab),
+    },
+  });
+  setBusy(false);
+  if (hasError(response)) return show(response.error.message);
+  show(`Sent to Ravyn: ${formatQualityLabel(format)}.`);
+  await refreshSummary();
 }
 
 async function monitorPage(): Promise<void> {
@@ -297,7 +443,7 @@ async function refreshResources(scan: boolean): Promise<void> {
     return;
   }
   show(scan ? "Scanning page…" : "Updating resources…");
-  if (scan) await send({ type: "scan-tab", tabId: currentTab.id, fresh: true });
+  if (scan) await send({ type: "scan-tab", tabId: currentTab.id });
   const response = await send({
     type: "get-tab-resources",
     tabId: currentTab.id,
@@ -328,6 +474,16 @@ function renderResources(): void {
   const hasSelection = selected.size > 0;
   element<HTMLButtonElement>("download-selected").disabled = !hasSelection;
   element<HTMLButtonElement>("add-selected-paused").disabled = !hasSelection;
+}
+
+async function persistFilters(): Promise<void> {
+  const filters: PersistedFilters = {
+    search: element<HTMLInputElement>("resource-search").value,
+    newOnly: element<HTMLInputElement>("new-only").checked,
+    minimumSize: element<HTMLInputElement>("minimum-size").value,
+    maximumSize: element<HTMLInputElement>("maximum-size").value,
+  };
+  await browser.storage.local.set({ [FILTERS_KEY]: filters });
 }
 
 function filteredResources(): DetectedResource[] {
@@ -396,17 +552,38 @@ function resourceRow(resource: DetectedResource): HTMLElement {
   return row;
 }
 
+// Deferring the actual network request until each preview scrolls into
+// view — instead of setting `src` for every row up front — keeps opening
+// the Resources tab from firing potentially hundreds of live GET requests
+// (cookies included) to third-party origins in one burst.
+const previewObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const target = entry.target as HTMLImageElement;
+      const src = target.dataset.previewSrc;
+      if (src) {
+        target.src = src;
+        delete target.dataset.previewSrc;
+      }
+      previewObserver.unobserve(target);
+    }
+  },
+  { rootMargin: "200px" },
+);
+
 function previewFor(resource: DetectedResource): HTMLElement {
   if (resource.type === "image") {
     const image = document.createElement("img");
     image.className = "preview";
     image.loading = "lazy";
     image.referrerPolicy = "no-referrer";
-    image.src = resource.url;
+    image.dataset.previewSrc = resource.url;
     image.alt = "";
     image.addEventListener("error", () =>
       image.replaceWith(genericPreview(resource.type)),
     );
+    previewObserver.observe(image);
     return image;
   }
   return genericPreview(resource.type);
@@ -422,8 +599,7 @@ function genericPreview(type: string): HTMLElement {
 async function submitResources(paused: boolean): Promise<void> {
   const chosen = allResources.filter((resource) => selected.has(resource.id));
   if (!chosen.length) return show("Select at least one resource.");
-  const presetId =
-    element<HTMLInputElement>("preset").value.trim() || undefined;
+  const presetId = element<HTMLSelectElement>("preset").value || undefined;
   const tags = element<HTMLInputElement>("tags")
     .value.split(",")
     .map((tag) => tag.trim())

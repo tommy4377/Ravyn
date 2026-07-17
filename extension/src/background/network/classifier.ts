@@ -7,13 +7,13 @@ export function classifyObservedRequest(
   url: string,
   mime?: string,
   requestType?: string,
-): { kind: ResourceKind; ignore: boolean } {
+): { kind: ResourceKind; ignore: boolean; isSegment: boolean } {
   const extension = extensionFromUrl(url);
   if (extension && SEGMENT_EXTENSIONS.has(extension))
-    return { kind: "other", ignore: true };
+    return { kind: "other", ignore: true, isSegment: true };
   const elementHint = requestType === "media" ? "video" : undefined;
   const kind = classifyResource(url, mime, elementHint);
   const interesting =
     kind !== "other" || requestType === "media" || requestType === "object";
-  return { kind, ignore: !interesting };
+  return { kind, ignore: !interesting, isSegment: false };
 }

@@ -160,6 +160,7 @@ pub(super) async fn create_rule(
 ) -> Result<(StatusCode, Json<crate::services::rules::Rule>)> {
     let result = s.manager.create_rule(input).await;
     let rule = audited(&s.repository, "rule.create", "rule", None, result).await?;
+    s.manager.events().publish(Event::RuleChanged);
     Ok((StatusCode::CREATED, Json(rule)))
 }
 
@@ -169,16 +170,16 @@ pub(super) async fn update_rule(
     Json(input): Json<RuleInput>,
 ) -> Result<Json<crate::services::rules::Rule>> {
     let result = s.manager.update_rule(id, input).await;
-    Ok(Json(
-        audited(
-            &s.repository,
-            "rule.update",
-            "rule",
-            Some(&id.to_string()),
-            result,
-        )
-        .await?,
-    ))
+    let rule = audited(
+        &s.repository,
+        "rule.update",
+        "rule",
+        Some(&id.to_string()),
+        result,
+    )
+    .await?;
+    s.manager.events().publish(Event::RuleChanged);
+    Ok(Json(rule))
 }
 
 pub(super) async fn delete_rule(
@@ -194,6 +195,7 @@ pub(super) async fn delete_rule(
         result,
     )
     .await?;
+    s.manager.events().publish(Event::RuleChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -64,8 +64,28 @@
             id="always-domains"
             rows="3"
             placeholder="github.com"
-          ></textarea>
-        </label>
+          ></textarea></label
+        ><label
+          >Bypass key (hold while clicking a link to let Firefox handle that
+          download)<select id="bypass-key">
+            <option value="alt">Alt</option>
+            <option value="shift">Shift</option>
+            <option value="ctrl">Ctrl</option>
+            <option value="none">Disabled</option>
+          </select></label
+        ><label
+          >Only intercept these extensions (blank = no restriction)<textarea
+            id="intercept-extensions"
+            rows="2"
+            placeholder="zip, mp4, mkv, pdf"
+          ></textarea></label
+        ><label
+          >Minimum size to intercept (MB, 0 = no minimum)<input
+            id="min-size"
+            type="number"
+            min="0"
+            max="1024"
+        /></label>
       </section>
       <section class="card stack">
         <h2>Page and media detection</h2>
@@ -84,6 +104,15 @@
               players.</small
             ></span
           ><input id="overlays" type="checkbox"
+        /></label>
+        <label class="switch"
+          ><span
+            ><strong>Image download buttons</strong
+            ><small
+              >Off by default — shows the same control over large images, which
+              can feel intrusive on image-heavy pages.</small
+            ></span
+          ><input id="image-overlays" type="checkbox"
         /></label>
         <div class="row">
           <label

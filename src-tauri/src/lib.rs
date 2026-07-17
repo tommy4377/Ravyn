@@ -474,8 +474,9 @@ async fn open_compact_window(
     }
     tauri::WebviewWindowBuilder::new(&app, "compact", tauri::WebviewUrl::App("index.html".into()))
         .title("Ravyn downloads")
-        .inner_size(380.0, 190.0)
-        .min_inner_size(320.0, 150.0)
+        .inner_size(400.0, 130.0)
+        .min_inner_size(340.0, 110.0)
+        .max_inner_size(400.0, 360.0)
         .maximizable(false)
         .minimizable(false)
         .always_on_top(true)

@@ -53,6 +53,11 @@ export class NativeClient {
   async connect(): Promise<void> {
     if (this.port) return;
     if (this.connecting) return this.connecting;
+    // A retry is already scheduled after a prior failure — let the backoff
+    // run its course instead of hammering the host every time something
+    // (popup polling, the heartbeat) happens to call connect()/request() in
+    // between. request() surfaces NATIVE_HOST_UNAVAILABLE while this holds.
+    if (this.reconnectTimer !== null) return;
     this.connecting = this.openPort().finally(() => {
       this.connecting = null;
     });

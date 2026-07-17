@@ -6,23 +6,26 @@ describe("classifyObservedRequest", () => {
     expect(classifyObservedRequest("https://cdn.example/master.m3u8")).toEqual({
       kind: "manifest",
       ignore: false,
+      isSegment: false,
     });
     expect(classifyObservedRequest("https://cdn.example/chunk.m4s")).toEqual({
       kind: "other",
       ignore: true,
+      isSegment: true,
     });
     expect(classifyObservedRequest("https://cdn.example/chunk.ts")).toEqual({
       kind: "other",
       ignore: true,
+      isSegment: true,
     });
   });
 
   it("uses response MIME and request type", () => {
     expect(
       classifyObservedRequest("https://cdn.example/id", "audio/ogg"),
-    ).toEqual({ kind: "audio", ignore: false });
+    ).toEqual({ kind: "audio", ignore: false, isSegment: false });
     expect(
       classifyObservedRequest("https://cdn.example/id", undefined, "media"),
-    ).toEqual({ kind: "video", ignore: false });
+    ).toEqual({ kind: "video", ignore: false, isSegment: false });
   });
 });

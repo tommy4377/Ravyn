@@ -35,6 +35,12 @@
   ],
   "optional_permissions": ["cookies", "webRequest"],
   "optional_host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/ravyn-16.png", "icons/ravyn-32.png"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],

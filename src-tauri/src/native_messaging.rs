@@ -7,8 +7,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -226,7 +228,10 @@ fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) ->
         "ping" => Ok(json!({ "pong": true, "hostVersion": env!("CARGO_PKG_VERSION") })),
         "get_capabilities" => get_capabilities(client),
         "open_ravyn" => open_ravyn(client, &request.payload),
-        "subscribe_events" => Ok(json!({ "subscribed": true, "transport": "request-refresh" })),
+        "subscribe_events" => {
+            start_event_stream(client);
+            Ok(json!({ "subscribed": true, "transport": "sse" }))
+        }
         "unsubscribe_events" => Ok(json!({ "subscribed": false })),
         command @ ("create_download"
         | "create_batch"
@@ -239,6 +244,7 @@ fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) ->
         | "pause_all"
         | "resume_all"
         | "get_rules"
+        | "list_presets"
         | "evaluate_url") => with_backend(client, |descriptor| {
             dispatch_backend(client, descriptor, command, &request.payload)
         }),
@@ -318,6 +324,7 @@ fn dispatch_backend(
         "pause_all" => bulk_action(client, descriptor, "pause"),
         "resume_all" => bulk_action(client, descriptor, "resume"),
         "get_rules" => get_rules(client, descriptor),
+        "list_presets" => list_presets(client, descriptor),
         "evaluate_url" => evaluate_url(client, descriptor, payload),
         _ => Err(HostError::new(
             "UNKNOWN_COMMAND",
@@ -529,7 +536,7 @@ fn probe_media(
         HostError::new("INVALID_MEDIA_PROBE", "media probe requires a URL", false)
     })?;
     let url = validate_network_url(url)?;
-    api_request(
+    let probe = api_request(
         client,
         descriptor,
         reqwest::Method::POST,
@@ -541,7 +548,33 @@ fn probe_media(
             "proxy": null
         })),
         None,
-    )
+    )?;
+    let formats = probe
+        .get("formats")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "title": probe.get("title").cloned().unwrap_or(Value::Null),
+        "duration": probe.get("duration").cloned().unwrap_or(Value::Null),
+        "formats": formats.into_iter().map(|format| json!({
+            "formatId": format.get("format_id").and_then(Value::as_str).unwrap_or_default(),
+            "extension": format.get("extension").cloned().unwrap_or(Value::Null),
+            "width": format.get("width").cloned().unwrap_or(Value::Null),
+            "height": format.get("height").cloned().unwrap_or(Value::Null),
+            "fps": format.get("fps").cloned().unwrap_or(Value::Null),
+            "videoCodec": format.get("video_codec").cloned().unwrap_or(Value::Null),
+            "audioCodec": format.get("audio_codec").cloned().unwrap_or(Value::Null),
+            "bitrateKbps": format.get("bitrate_kbps").cloned().unwrap_or(Value::Null),
+            "audioBitrateKbps": format.get("audio_bitrate_kbps").cloned().unwrap_or(Value::Null),
+            "filesize": format.get("filesize").cloned()
+                .filter(|value| !value.is_null())
+                .or_else(|| format.get("filesize_approx").cloned())
+                .unwrap_or(Value::Null),
+            "protocol": format.get("protocol").cloned().unwrap_or(Value::Null),
+            "note": format.get("note").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>()
+    }))
 }
 
 fn download_summary(
@@ -706,6 +739,32 @@ fn evaluate_url(
     )
 }
 
+fn list_presets(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+) -> Result<Value, HostError> {
+    let presets = api_request(
+        client,
+        descriptor,
+        reqwest::Method::GET,
+        "/v1/presets",
+        None,
+        None,
+    )?;
+    let presets = presets.as_array().cloned().unwrap_or_default();
+    Ok(Value::Array(
+        presets
+            .into_iter()
+            .map(|preset| {
+                json!({
+                    "id": preset.get("id").and_then(Value::as_str).unwrap_or_default(),
+                    "name": preset.get("name").and_then(Value::as_str).unwrap_or("Preset"),
+                })
+            })
+            .collect(),
+    ))
+}
+
 fn open_ravyn(client: &reqwest::blocking::Client, payload: &Value) -> Result<Value, HostError> {
     let section = sanitize_section(
         payload
@@ -803,6 +862,85 @@ fn configure_detached_process(command: &mut std::process::Command) {
 
 #[cfg(not(windows))]
 fn configure_detached_process(_command: &mut std::process::Command) {}
+
+static EVENT_STREAM_STARTED: AtomicBool = AtomicBool::new(false);
+static STDOUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Proxies the backend's `/v1/events` SSE stream onto stdout as native
+/// "event" messages, so the extension's rule cache and connection status
+/// react immediately instead of waiting on the heartbeat/TTL. Spawned once
+/// per native-messaging connection (one short-lived host process); the
+/// thread dies with the process when Firefox closes the port.
+fn start_event_stream(client: &reqwest::blocking::Client) {
+    if EVENT_STREAM_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let client = client.clone();
+    std::thread::spawn(move || run_event_stream(&client));
+}
+
+fn run_event_stream(client: &reqwest::blocking::Client) {
+    loop {
+        if let Ok(descriptor) = load_live_descriptor(client) {
+            let _ = stream_events_once(client, &descriptor);
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+}
+
+fn stream_events_once(
+    client: &reqwest::blocking::Client,
+    descriptor: &BackendDescriptor,
+) -> Result<(), String> {
+    let response = client
+        .get(format!("{}/v1/events", descriptor.base_url))
+        .bearer_auth(&descriptor.api_token)
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("event stream returned HTTP {}", response.status()));
+    }
+    let mut reader = std::io::BufReader::new(response);
+    let mut data_lines: Vec<String> = Vec::new();
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if bytes_read == 0 {
+            return Ok(()); // stream closed by the backend; the caller reconnects.
+        }
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.is_empty() {
+            if !data_lines.is_empty() {
+                forward_event(&data_lines.join("\n"));
+                data_lines.clear();
+            }
+            continue;
+        }
+        // The event's own `type` field (job_status/progress/rule_changed/…)
+        // is what the extension keys off of, so `event:`/`id:` SSE fields
+        // don't need parsing — only the `data:` payload matters.
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start().to_owned());
+        }
+    }
+}
+
+fn forward_event(payload: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return;
+    };
+    let Some(event_type) = value.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let _ = write_message(&json!({
+        "type": "event",
+        "protocolVersion": PROTOCOL_VERSION,
+        "event": event_type,
+        "payload": value,
+    }));
+}
 
 fn wait_for_backend(client: &reqwest::blocking::Client) -> Result<BackendDescriptor, HostError> {
     let deadline = std::time::Instant::now() + BACKEND_START_TIMEOUT;
@@ -1210,6 +1348,13 @@ fn write_message(value: &impl Serialize) -> Result<(), String> {
     if bytes.len() > MAX_MESSAGE_BYTES {
         return Err("native response exceeds the protocol size limit".into());
     }
+    // The event-stream thread and the main request/response loop both write
+    // framed messages to the same stdout — without this lock their two-part
+    // writes (length prefix, then body) could interleave and corrupt the
+    // framing that the extension's length-prefixed reader depends on.
+    let _guard = STDOUT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(&(bytes.len() as u32).to_le_bytes())

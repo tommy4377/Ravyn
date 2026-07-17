@@ -78,12 +78,17 @@
             <strong>Current page</strong>
             <span id="page-host" class="muted truncate"></span>
           </div>
+          <div id="stream-hint" class="hint hidden">
+            Stream detected on this page, but its manifest is hidden from the
+            page scan — try Analyze media.
+          </div>
           <div class="action-grid">
             <button id="analyze" type="button">Analyze media</button>
             <button id="scan" type="button">Scan resources</button>
             <button id="images" type="button">Find images</button>
             <button id="monitor" type="button">Monitor page</button>
           </div>
+          <div id="formats" class="format-list hidden"></div>
         </section>
 
         <section class="card compact-card jobs-card">
@@ -169,11 +174,11 @@
             </div>
             <div class="option-grid">
               <label
-                >Preset ID<input
-                  id="preset"
-                  type="text"
-                  placeholder="Optional UUID"
-              /></label>
+                >Preset
+                <select id="preset">
+                  <option value="">No preset</option>
+                </select></label
+              >
               <label
                 >Tags<input
                   id="tags"

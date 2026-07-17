@@ -1,4 +1,4 @@
-import { urlHashInput } from "../../shared/urls";
+import { hashUrl } from "../../shared/hashUrl";
 
 interface DelegatedDownload {
   normalizedUrlHash: string;
@@ -31,12 +31,4 @@ export class DelegationRegistry {
     for (const [key, entry] of this.entries)
       if (entry.createdAt < cutoff) this.entries.delete(key);
   }
-}
-
-async function hashUrl(url: string): Promise<string> {
-  const bytes = new TextEncoder().encode(urlHashInput(url));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("");
 }

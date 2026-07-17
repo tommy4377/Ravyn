@@ -3,7 +3,11 @@ import type {
   DetectedResource,
   SourceContext,
 } from "../../shared/contracts";
+import { toExtensionError } from "../../shared/errors";
+import { logger } from "../../shared/logger";
+import { loadSettings } from "../../shared/settings";
 import { normalizeUrl } from "../../shared/urls";
+import { notify } from "../notifications";
 import type { NativeClient } from "../native/client";
 import type { ResourceCache } from "../network/cache";
 import { openResourcePopup } from "../popup";
@@ -14,7 +18,15 @@ export function registerMenuHandlers(
   cache: ResourceCache,
 ): void {
   browser.menus.onClicked.addListener((info, tab) => {
-    void handle(info, tab, native, cache);
+    void handle(info, tab, native, cache).catch(async (error) => {
+      logger.error("Ravyn menu action failed", error);
+      const settings = await loadSettings().catch(() => undefined);
+      if (settings?.notifications)
+        await notify(
+          "Ravyn action failed",
+          toExtensionError(error).message,
+        ).catch(() => undefined);
+    });
   });
 }
 
@@ -26,7 +38,11 @@ async function handle(
 ): Promise<void> {
   const tabId = tab?.id;
   const sourceContext = contextFor(tab, info.frameId);
-  const directUrl = info.linkUrl ?? info.srcUrl;
+  // Prefer the media/image source over an enclosing link's href — image and
+  // video menu items only ever fire in an "image"/"video"/"audio" context,
+  // but Firefox still populates linkUrl when the element sits inside an
+  // <a> (e.g. a gallery thumbnail), which previously downloaded the page.
+  const directUrl = info.srcUrl ?? info.linkUrl;
   switch (info.menuItemId) {
     case MenuId.linkDownload:
     case MenuId.imageDownload:
@@ -40,7 +56,9 @@ async function handle(
       break;
     case MenuId.imageOriginal: {
       const context =
-        tabId === undefined ? null : await collectContext(tabId, "image");
+        tabId === undefined
+          ? null
+          : await collectContext(tabId, "image", info.frameId);
       const original =
         stringArray(context?.sources)[0] ??
         stringValue(context?.currentSrc) ??
@@ -92,14 +110,17 @@ async function handle(
           sourceContext,
         });
       break;
-    case MenuId.mediaSubtitles:
-      await create(native, {
-        url: info.pageUrl ?? directUrl ?? "",
-        kind: "media",
-        media: { writeSubtitles: true, subtitleLanguages: ["all"] },
-        sourceContext,
-      });
+    case MenuId.mediaSubtitles: {
+      const subtitleUrl = info.pageUrl ?? directUrl;
+      if (subtitleUrl)
+        await create(native, {
+          url: subtitleUrl,
+          kind: "media",
+          media: { writeSubtitles: true, subtitleLanguages: ["all"] },
+          sourceContext,
+        });
       break;
+    }
     case MenuId.linkSchedule:
       await native.request("open_ravyn", {
         section: "automation",
@@ -120,7 +141,7 @@ async function handle(
       break;
     case MenuId.selectionScan:
       if (tabId !== undefined) {
-        const context = await collectContext(tabId, "selection");
+        const context = await collectContext(tabId, "selection", info.frameId);
         const selection =
           stringValue(context?.selectionText) ?? info.selectionText ?? "";
         const resources = urlsFromText(selection).map((url) => ({
@@ -229,9 +250,17 @@ function contextFor(
 async function collectContext(
   tabId: number,
   context: "image" | "selection",
+  frameId?: number,
 ): Promise<Record<string, unknown> | null> {
+  // Target the exact frame the user right-clicked in — the content script
+  // runs in every frame (all_frames: true), and without this the message
+  // can be answered by an unrelated frame (usually the top one).
   const response: unknown = await browser.tabs
-    .sendMessage(tabId, { type: "collect-context", context })
+    .sendMessage(
+      tabId,
+      { type: "collect-context", context },
+      frameId === undefined ? undefined : { frameId },
+    )
     .catch(() => null);
   return response && typeof response === "object"
     ? (response as Record<string, unknown>)

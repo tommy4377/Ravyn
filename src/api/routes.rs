@@ -9,6 +9,7 @@ use crate::{
     },
     config::{PersistentSettings, PersistentSettingsPatch},
     core::{
+        events::Event,
         manager::JobManager,
         models::{
             CreateJob, DownloadOptions, DuplicatePolicy, Job, JobKind, JobOutput, JobStatus,

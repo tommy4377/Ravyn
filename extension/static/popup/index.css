@@ -261,6 +261,50 @@ button.quiet {
   font-size: 9px;
 }
 
+.format-list {
+  margin-top: 8px;
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  scrollbar-width: thin;
+}
+
+.format-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-top: 1px solid var(--border);
+}
+
+.format-row:first-child {
+  border-top: 0;
+}
+
+.format-row .format-copy {
+  min-width: 0;
+  display: grid;
+}
+
+.format-row .format-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.format-row .format-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.format-row button {
+  flex: none;
+  min-height: 26px;
+  padding-inline: 9px;
+}
+
 .advanced {
   padding: 0;
 }
