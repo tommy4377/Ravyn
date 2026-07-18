@@ -88,7 +88,7 @@ Bootstrap is `Ravyn::bootstrap` in `src/lib.rs`: it validates `config::Config` (
 - Current scope: Rust backend, Tauri/Svelte frontend, and the custom Ravyn setup. Do not work on the browser extension unless explicitly requested.
 - Build every frontend feature as a complete vertical slice: inspect the backend contract, implement the UI, wire the real API/Tauri command and events immediately, handle loading/empty/error/recovery states, add tests, and update documentation. Never leave production mock data, placeholder actions, or visual-only screens.
 - Preserve security defaults: loopback binding, output-root confinement, private-network blocking, bounded inputs, verified managed components, atomic replacement, least privilege, and no silent installation of disabled features.
-- Keep OpenAPI, migrations, event contracts, setup documentation (`docs/SETUP_CAPABILITY_MATRIX.md`, `docs/COMPONENT_MANIFESTS.md`, `docs/APP_UPDATES.md`), and the README synchronized with every completed change.
+- Keep OpenAPI, migrations, event contracts, and the README synchronized with every completed change.
 - The install directory equals the data directory, so updater rollback must remain binaries-only.
 - Write code comments in English and only where they improve maintainability; follow existing architecture and style.
 

@@ -13,11 +13,7 @@
     "windows": [],
     "withGlobalTauri": false,
     "security": {
-      "capabilities": [
-        "setup-capability",
-        "main-capability",
-        "compact-capability"
-      ],
+      "capabilities": [],
       "csp": {
         "default-src": "'self' customprotocol: asset:",
         "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:*",

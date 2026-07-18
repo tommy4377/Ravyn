@@ -28,7 +28,7 @@ cargo build -p ravyn-desktop
 target/debug/ravyn-desktop.exe
 ```
 
-Windows distribution is a single self-installing `Ravyn.exe`: running the downloaded executable opens the custom Ravyn setup, which can copy the application into the per-user location (`%LOCALAPPDATA%\Ravyn`, no elevation), register it in Installed Apps, and create the requested shortcuts — or run fully portable. There is no separate MSI/NSIS installer. The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`); after setup completes it opens the main window. Setup documentation lives in `docs/SETUP_CAPABILITY_MATRIX.md`.
+Windows distribution is a single self-installing `Ravyn.exe`: running the downloaded executable opens the custom Ravyn setup, which can copy the application into the per-user location (`%LOCALAPPDATA%\Ravyn`, no elevation), register it in Installed Apps, and create the requested shortcuts — or run fully portable. There is no separate MSI/NSIS installer. The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`); after setup completes it opens the main window.
 
 ## Firefox extension
 
@@ -41,7 +41,7 @@ npm run check
 npm run package:verify
 ```
 
-The generated unsigned XPI and human-readable source archive are written to `extension/artifacts/`. Normal Firefox installation requires Mozilla signing; tagged CI releases support unlisted AMO signing with repository credentials. See `docs/FIREFOX_EXTENSION.md`, `extension/PRIVACY.md`, and `extension/THREAT_MODEL.md`.
+The generated unsigned XPI and human-readable source archive are written to `extension/artifacts/`. Normal Firefox installation requires Mozilla signing; tagged CI releases support unlisted AMO signing with repository credentials.
 
 ## Current capabilities
 
@@ -144,4 +144,4 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 ```
 
-The repository also contains migration, HTTP integration, fuzz-target, and release-build workflows. See `AGENTS.md`, `COMPATIBILITY.md`, and `LIBRARY_IMPLEMENTATION_REPORT.md` for the full verification contract and the latest implementation evidence.
+The repository also contains migration, HTTP integration, fuzz-target, and release-build workflows. See `AGENTS.md` for the full verification contract.

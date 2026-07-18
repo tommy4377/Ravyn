@@ -433,7 +433,8 @@
               {@const detailSpeed = liveProgress?.bytesPerSecond ?? snapshot?.download_speed_bps ?? selected.download_speed_bps}
               {@const detailState = liveJob ? presentStatus(liveJob.status).label : (snapshot?.state ?? selected.state)}
               {@const detailUploaded = snapshot?.uploaded_bytes ?? selected.uploaded_bytes}
-              {@const detailProgressPct = detailTotal ? Math.max(0, Math.min(100, (detailDownloaded / detailTotal) * 100)) : torrentProgress(selected)}
+              {@const detailDisplay = { ...selected, downloaded_bytes: detailDownloaded, total_bytes: detailTotal, download_speed_bps: detailSpeed, state: detailState }}
+              {@const detailProgressPct = torrentProgress(detailDisplay)}
               <div class="detail-stack">
                 <div class="overview-progress">
                   <span class="progress-track large"><span style={`width:${detailProgressPct}%`}></span></span>
@@ -444,7 +445,7 @@
                   <dt>State</dt><dd>{detailState}</dd>
                   <dt>Download speed</dt><dd>{formatSpeed(detailSpeed)}</dd>
                   <dt>Upload speed</dt><dd>{formatSpeed(snapshot?.upload_speed_bps ?? selected.upload_speed_bps)}</dd>
-                  <dt>ETA</dt><dd>{formatTorrentEta(detailTotal && detailSpeed > 0 ? Math.max(0, detailTotal - detailDownloaded) / detailSpeed : null)}</dd>
+                  <dt>ETA</dt><dd>{formatTorrentEta(torrentEtaSeconds(detailDisplay))}</dd>
                   <dt>Uploaded</dt><dd>{formatBytes(detailUploaded)}</dd>
                   <dt>Ratio</dt><dd>{torrentRatio(detailUploaded, detailDownloaded)?.toFixed(2) ?? "∞"}</dd>
                   <dt>Peers</dt><dd>{snapshot?.peers_connected ?? selected.peers_connected}</dd>

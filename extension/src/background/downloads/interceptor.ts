@@ -27,22 +27,34 @@ interface ConfirmationRequest {
 // ours through the plain `browser.downloads` state alone.
 const PENDING_PAUSE_KEY = "ravyn.pendingPausedDownloadIds";
 
+// Serializes every read-modify-write of the persisted pending set. Two
+// concurrent handoffs (a page dropping several downloads at once) would
+// otherwise interleave get/set on the same key and silently drop an id —
+// the exact record the startup orphan-sweep needs to resume that download.
+let pendingIdsQueue: Promise<unknown> = Promise.resolve();
+
+function withPendingIds<T>(
+  mutate: (ids: Set<number>) => T | Promise<T>,
+): Promise<T> {
+  const run = pendingIdsQueue.then(async () => {
+    const stored = await browser.storage.local.get(PENDING_PAUSE_KEY);
+    const ids = new Set<number>(
+      (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
+    );
+    const result = await mutate(ids);
+    await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [...ids] });
+    return result;
+  });
+  pendingIdsQueue = run.catch(() => undefined);
+  return run;
+}
+
 async function markPending(id: number): Promise<void> {
-  const stored = await browser.storage.local.get(PENDING_PAUSE_KEY);
-  const ids = new Set<number>(
-    (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
-  );
-  ids.add(id);
-  await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [...ids] });
+  await withPendingIds((ids) => ids.add(id));
 }
 
 async function clearPending(id: number): Promise<void> {
-  const stored = await browser.storage.local.get(PENDING_PAUSE_KEY);
-  const ids = new Set<number>(
-    (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
-  );
-  if (!ids.delete(id)) return;
-  await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [...ids] });
+  await withPendingIds((ids) => ids.delete(id));
 }
 
 export class DownloadInterceptor {
@@ -77,25 +89,21 @@ export class DownloadInterceptor {
     // `{paused:true}` search can't distinguish an interrupted handoff or
     // orphaned confirmation from a download the user paused manually for
     // their own reasons, and force-resuming the latter would be wrong.
-    const stored: Record<string, unknown> = await browser.storage.local
-      .get(PENDING_PAUSE_KEY)
-      .catch(() => ({}));
-    const pendingIds = new Set<number>(
-      (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
-    );
-    if (pendingIds.size === 0) return;
-    const paused = await browser.downloads
-      .search({ paused: true, state: "in_progress" })
-      .catch(() => []);
-    const stillPaused = new Set(paused.map((item) => item.id));
-    for (const id of pendingIds) {
-      if (stillPaused.has(id))
-        await browser.downloads.resume(id).catch(() => undefined);
-    }
-    // Every tracked id is now resolved (resumed here, or no longer paused —
-    // completed/cancelled/removed since it was recorded) — drop them all so
-    // the persisted set doesn't grow across restarts.
-    await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [] });
+    await withPendingIds(async (ids) => {
+      if (ids.size === 0) return;
+      const paused = await browser.downloads
+        .search({ paused: true, state: "in_progress" })
+        .catch(() => []);
+      const stillPaused = new Set(paused.map((item) => item.id));
+      for (const id of ids) {
+        if (stillPaused.has(id))
+          await browser.downloads.resume(id).catch(() => undefined);
+      }
+      // Every tracked id is now resolved (resumed here, or no longer paused —
+      // completed/cancelled/removed since it was recorded) — drop them all so
+      // the persisted set doesn't grow across restarts.
+      ids.clear();
+    }).catch(() => undefined);
   }
 
   resolveConfirmation(requestId: string, accepted: boolean): void {
