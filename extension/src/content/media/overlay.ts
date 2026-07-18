@@ -13,8 +13,11 @@ interface AttachedControl {
   dispose(): void;
 }
 
+const SCAN_DEBOUNCE_MS = 200;
+
 export class MediaOverlayController {
   private observer: MutationObserver | null = null;
+  private scanTimer: number | null = null;
   private controls = new Map<OverlayTarget, AttachedControl>();
   /** Elements whose overlay the user closed; never re-attached this session. */
   private dismissed = new WeakSet<OverlayTarget>();
@@ -42,6 +45,8 @@ export class MediaOverlayController {
   stop(): void {
     this.observer?.disconnect();
     this.observer = null;
+    if (this.scanTimer !== null) window.clearTimeout(this.scanTimer);
+    this.scanTimer = null;
     this.clear();
   }
 
@@ -54,7 +59,19 @@ export class MediaOverlayController {
 
   private ensureObserver(): void {
     if (this.observer) return;
-    this.observer = new MutationObserver(() => this.scan());
+    // Debounced: an unthrottled scan-per-mutation-batch is expensive on
+    // DOM-churny pages (infinite scroll, chat apps), and attach() below adds
+    // a control host element into the document itself — a childList
+    // mutation that would otherwise re-trigger this same observer, turning
+    // attaching N controls into a self-inflicted cascade of full-document
+    // querySelectorAll scans.
+    this.observer = new MutationObserver(() => {
+      if (this.scanTimer !== null) window.clearTimeout(this.scanTimer);
+      this.scanTimer = window.setTimeout(() => {
+        this.scanTimer = null;
+        this.scan();
+      }, SCAN_DEBOUNCE_MS);
+    });
     this.observer.observe(document.documentElement, {
       childList: true,
       subtree: true,

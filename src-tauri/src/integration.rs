@@ -175,6 +175,7 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
             ("desktop_shortcut", request.desktop_shortcut),
             ("launch_at_startup", request.launch_at_startup),
             ("register_firefox_native_host", true),
+            ("register_torrent_association", true),
         ] {
             steps.push(skipped(
                 step,
@@ -265,6 +266,22 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         None => steps.push(failed(
             "register_firefox_native_host",
             "no executable to register as the native host".into(),
+        )),
+    }
+
+    // 7. Torrent/magnet association. Registers Ravyn as an available choice
+    // for `.torrent` files and `magnet:` links (a per-user, no-admin registry
+    // write) so it works as a torrent client out of the box; it never forces
+    // itself as the default, matching how register_installed_app never opens
+    // Default Apps here either — Windows still owns that final choice.
+    match &effective_exe {
+        Some(exe) => match crate::torrent_association::register(exe) {
+            Ok(()) => steps.push(ok("register_torrent_association")),
+            Err(error) => steps.push(failed("register_torrent_association", error)),
+        },
+        None => steps.push(failed(
+            "register_torrent_association",
+            "no executable to register for torrent/magnet handling".into(),
         )),
     }
 

@@ -127,6 +127,31 @@ impl Repository {
         job_id: Uuid,
         snapshot: &TorrentSnapshot,
     ) -> Result<()> {
+        match self.try_upsert_torrent_record(job_id, snapshot).await {
+            Err(sqlx::Error::Database(db_error)) if db_error.is_unique_violation() => {
+                // The torrent_id belongs to a row left over from a previous
+                // rqbit process (ids are reissued from zero on every launch,
+                // see clear_torrent_records) that the startup sweep or the
+                // 5s reconciliation loop hasn't caught yet. That row is dead
+                // weight regardless of which job it used to belong to, so
+                // drop it and retry once.
+                sqlx::query("DELETE FROM torrent_jobs WHERE torrent_id=?")
+                    .bind(&snapshot.torrent_id)
+                    .execute(self.pool())
+                    .await?;
+                self.try_upsert_torrent_record(job_id, snapshot)
+                    .await
+                    .map_err(RavynError::from)
+            }
+            other => other.map_err(RavynError::from),
+        }
+    }
+
+    async fn try_upsert_torrent_record(
+        &self,
+        job_id: Uuid,
+        snapshot: &TorrentSnapshot,
+    ) -> std::result::Result<(), sqlx::Error> {
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO torrent_jobs(job_id,torrent_id,info_hash,name,state,downloaded_bytes,uploaded_bytes,total_bytes,download_speed_bps,upload_speed_bps,peers_connected,seeders,leechers,raw_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET torrent_id=excluded.torrent_id,info_hash=excluded.info_hash,name=excluded.name,state=excluded.state,downloaded_bytes=excluded.downloaded_bytes,uploaded_bytes=excluded.uploaded_bytes,total_bytes=excluded.total_bytes,download_speed_bps=excluded.download_speed_bps,upload_speed_bps=excluded.upload_speed_bps,peers_connected=excluded.peers_connected,seeders=excluded.seeders,leechers=excluded.leechers,raw_json=excluded.raw_json,updated_at=excluded.updated_at",
@@ -144,7 +169,9 @@ impl Repository {
         .bind(snapshot.peers_connected.min(i64::MAX as u64) as i64)
         .bind(snapshot.seeders.min(i64::MAX as u64) as i64)
         .bind(snapshot.leechers.min(i64::MAX as u64) as i64)
-        .bind(serde_json::to_string(&snapshot.raw)?)
+        .bind(serde_json::to_string(&snapshot.raw).map_err(|error| {
+            sqlx::Error::Encode(Box::new(error))
+        })?)
         .bind(now)
         .bind(now)
         .execute(self.pool())
@@ -173,6 +200,20 @@ impl Repository {
     pub async fn delete_torrent_record(&self, job_id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM torrent_jobs WHERE job_id=?")
             .bind(job_id.to_string())
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Drops every persisted torrent record. rqbit keeps no session state of
+    /// its own (no `--session-persistence`), so its in-memory torrent ids
+    /// restart from zero on every process launch — any row surviving from a
+    /// previous run is guaranteed to collide with a freshly issued id on the
+    /// `torrent_jobs.torrent_id` unique index. Call this once, right after a
+    /// new rqbit process is adopted, so `add_or_resume` re-adds still-active
+    /// jobs from scratch instead of racing the periodic reconciliation loop.
+    pub async fn clear_torrent_records(&self) -> Result<()> {
+        sqlx::query("DELETE FROM torrent_jobs")
             .execute(self.pool())
             .await?;
         Ok(())

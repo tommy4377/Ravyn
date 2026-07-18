@@ -397,6 +397,14 @@ impl TorrentAdapter {
                 .clone()
                 .zip(config.rqbit_password.clone())
         };
+        // rqbit assigns torrent ids from a fresh in-memory counter on every
+        // launch (no session persistence), so any torrent_jobs rows left
+        // over from a previous process are guaranteed to collide with ids
+        // this new process reissues. Clear them before anything can race an
+        // add against a stale row (see clear_torrent_records for detail).
+        if let Err(error) = repository.clear_torrent_records().await {
+            tracing::warn!(%error, "failed to clear stale torrent records");
+        }
         Ok(Self {
             client,
             stats_client,
@@ -1131,6 +1139,10 @@ mod restart_tests {
                 "upload_speed": { "mbps": 0.0 },
             })
             .to_string()
+        } else if path.starts_with("/torrents?") {
+            // Add-torrent call: hand back the id every later request in this
+            // test (stats, details, pause) addresses as "t-restart".
+            serde_json::json!({ "id": "t-restart" }).to_string()
         } else if path.ends_with("/t-restart") {
             // Torrent details.
             serde_json::json!({ "files": [] }).to_string()
@@ -1182,28 +1194,11 @@ mod restart_tests {
             )
             .await
             .unwrap();
-        let snapshot = TorrentSnapshot {
-            torrent_id: "t-restart".into(),
-            info_hash: None,
-            name: None,
-            state: "live".into(),
-            downloaded_bytes: 0,
-            uploaded_bytes: 0,
-            total_bytes: Some(1024),
-            download_speed_bps: 0,
-            upload_speed_bps: 0,
-            peers_connected: 0,
-            seeders: 0,
-            leechers: 0,
-            finished: false,
-            progress: Some(0.0),
-            raw: serde_json::json!({}),
-        };
-        repository
-            .upsert_torrent_record(job.id, &snapshot)
-            .await
-            .unwrap();
-
+        // No torrent_jobs row is seeded here: TorrentAdapter::new clears any
+        // stale records on construction (rqbit reissues ids from zero on
+        // every process launch, see clear_torrent_records), so the job is
+        // expected to go through the normal add path below, not resume from
+        // a pre-existing record.
         use clap::Parser as _;
         let mut config = crate::config::Config::try_parse_from([
             "ravyn",

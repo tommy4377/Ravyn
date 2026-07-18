@@ -20,6 +20,7 @@
   import Tabs from "../components/Tabs.svelte";
   import { openNativePath, revealNativePath } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
+  import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes, jobDisplayName } from "../util/format";
@@ -51,16 +52,33 @@
   let archiveBusy = $state(false);
   let archiveError = $state<string | null>(null);
 
-  const selectedJob = $derived(jobs.find((job) => job.id === selectedJobId) ?? null);
+  // jobs holds the fetch identity/order; displayJobs merges in live
+  // status+progress from jobsStore (kept current by AppShell's global SSE
+  // subscription — see load() below) so status badges and progress bars
+  // don't freeze at whatever they were when the page loaded or a job was
+  // last selected.
+  const displayJobs = $derived(
+    jobs.map((job) => {
+      const live = jobsStore.byId.get(job.id);
+      if (!live) return job;
+      const liveProgress = jobsStore.liveProgress.get(job.id);
+      return {
+        ...live,
+        downloaded_bytes: liveProgress?.downloadedBytes ?? live.downloaded_bytes,
+        total_bytes: liveProgress?.totalBytes ?? live.total_bytes,
+      };
+    }),
+  );
+  const selectedJob = $derived(displayJobs.find((job) => job.id === selectedJobId) ?? null);
   const visibleJobs = $derived(search.trim()
-    ? jobs.filter((job) => `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase().includes(search.toLowerCase()))
-    : jobs);
+    ? displayJobs.filter((job) => `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase().includes(search.toLowerCase()))
+    : displayJobs);
   const visibleArchive = $derived(search.trim()
     ? archive.filter((entry) => `${entry.extractor} ${entry.media_id} ${entry.webpage_url ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     : archive);
-  const completedJobs = $derived(jobs.filter((job) => job.status === "completed").length);
-  const activeJobs = $derived(jobs.filter((job) => ["queued", "probing", "downloading", "post_processing"].includes(job.status)).length);
-  const failedJobs = $derived(jobs.filter((job) => job.status === "failed").length);
+  const completedJobs = $derived(displayJobs.filter((job) => job.status === "completed").length);
+  const activeJobs = $derived(displayJobs.filter((job) => ["queued", "probing", "downloading", "post_processing"].includes(job.status)).length);
+  const failedJobs = $derived(displayJobs.filter((job) => job.status === "failed").length);
   const failedItems = $derived(items.filter((item) => item.state === "failed").length);
   const activity = $derived(mediaActivity(items));
   const summaryItems = $derived<SummaryItem[]>([
@@ -100,6 +118,7 @@
         connection.client.listMediaArchive({ limit: 250 }),
       ]);
       jobs = jobPage.items;
+      for (const job of jobPage.items) jobsStore.upsert(job);
       archive = archivePage.items;
       if (selectedJobId && !jobs.some((job) => job.id === selectedJobId)) selectedJobId = null;
     } catch (cause) {
@@ -152,7 +171,26 @@
     }
   }
 
-  $effect(() => { void load(); });
+  $effect(() => {
+    void load();
+    // Top-level job status/progress comes live via jobsStore (see load()
+    // above), but the per-item playlist detail (`items`, fetched once by
+    // loadDetails on selection) has no SSE channel and would otherwise
+    // freeze mid-playlist-download. Poll while a job is selected.
+    const timer = window.setInterval(() => void load(), 5_000);
+    return () => window.clearInterval(timer);
+  });
+
+  $effect(() => {
+    const jobId = selectedJobId;
+    if (!jobId) return;
+    const active = ["queued", "probing", "downloading", "post_processing"].includes(
+      selectedJob?.status ?? "",
+    );
+    if (!active) return;
+    const timer = window.setInterval(() => void loadDetails(jobId), 5_000);
+    return () => window.clearInterval(timer);
+  });
 
   $effect(() => {
     producedFiles = [];

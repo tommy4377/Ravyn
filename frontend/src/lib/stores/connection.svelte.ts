@@ -22,6 +22,11 @@ class ConnectionStore {
   async connect(): Promise<void> {
     this.status = "connecting";
     this.errorMessage = "";
+    // A retry after a previous successful-but-then-failed connect (e.g.
+    // mainWindowReady() rejecting after events.connect() already opened a
+    // live EventSource) must not leak that earlier connection — nothing
+    // else holds a reference to it once this.events is reassigned below.
+    this.events?.close();
     try {
       const backend = await backendInfo();
       const client = new RavynClient(backend.base_url, backend.api_token);

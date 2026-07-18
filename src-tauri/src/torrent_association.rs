@@ -8,15 +8,29 @@ const DEFAULT_APPS_URI: &str = "ms-settings:defaultapps?registeredAppUser=Ravyn"
 
 #[cfg(windows)]
 pub fn register_and_prompt() -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    if !crate::installation::current_executable_is_installed() {
+        return Err("install Ravyn before registering it for torrent files".into());
+    }
+    register(&executable)?;
+    open_default_apps_settings()
+}
+
+/// Registers Ravyn as a candidate handler for `.torrent` files and `magnet:`
+/// links without prompting the user. Called unconditionally as part of setup
+/// (see `integration::apply`'s `register_installed_app` step) so a fresh
+/// install is immediately usable as a torrent client, not just after the
+/// user separately finds the manual toggle in Settings.
+#[cfg(windows)]
+pub fn register(executable: &std::path::Path) -> Result<(), String> {
     use windows_sys::Win32::UI::Shell::{
         SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST, SHChangeNotify,
     };
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    if !crate::installation::current_executable_is_installed() {
-        return Err("install Ravyn before registering it for torrent files".into());
+    if !executable.is_file() {
+        return Err("the torrent-association executable does not exist".into());
     }
     let command = format!("\"{}\" \"%1\"", executable.display());
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -93,8 +107,9 @@ pub fn register_and_prompt() -> Result<(), String> {
         .set_value("Ravyn", &r"Software\Ravyn\Capabilities")
         .map_err(|error| error.to_string())?;
 
-    // The Shell caches registered handlers. Flush the association change
-    // before opening Settings so Ravyn appears immediately in the choices.
+    // The Shell caches registered handlers. Flush the association change so
+    // Ravyn appears immediately in Default Apps and as a chooser candidate,
+    // without waiting for the next Explorer restart.
     // SAFETY: this event requires null item pointers and performs no memory access.
     unsafe {
         SHChangeNotify(
@@ -104,7 +119,11 @@ pub fn register_and_prompt() -> Result<(), String> {
             std::ptr::null(),
         );
     }
+    Ok(())
+}
 
+#[cfg(windows)]
+fn open_default_apps_settings() -> Result<(), String> {
     std::process::Command::new("explorer.exe")
         .arg(DEFAULT_APPS_URI)
         .spawn()
@@ -114,6 +133,11 @@ pub fn register_and_prompt() -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn register_and_prompt() -> Result<(), String> {
+    Err("torrent file association is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn register(_executable: &std::path::Path) -> Result<(), String> {
     Err("torrent file association is only supported on Windows".into())
 }
 

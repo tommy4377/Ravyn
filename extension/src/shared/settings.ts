@@ -19,7 +19,10 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   overlayMinimumWidth: 320,
   overlayMinimumHeight: 180,
   includePrivateWindows: false,
-  eraseDelegatedBrowserEntries: false,
+  // A delegated download becomes a "Cancelled" entry in Firefox's downloads
+  // panel unless erased — from the user's perspective the download looked
+  // like it started then died, when it actually just moved to Ravyn.
+  eraseDelegatedBrowserEntries: true,
   notifications: true,
   sameDomainOnly: false,
   disabledDomains: [],

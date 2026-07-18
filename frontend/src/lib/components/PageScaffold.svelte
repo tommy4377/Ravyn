@@ -44,6 +44,13 @@
   h1 { margin: 0; font-family: var(--font-family-display); font-size: var(--text-title); font-weight: 620; line-height: 1.15; letter-spacing: -.012em; }
   p { margin: 5px 0 0; color: var(--text-tertiary); font-size: var(--text-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .page-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+  /* A container query, not a viewport media query: the command bar's actual
+     available width depends on the nav sidebar's state (expanded/collapsed/
+     overlay) and whether a details pane is open, not on the window's overall
+     size. At the app's default window width the sidebar alone already eats
+     enough space that a viewport breakpoint never fires, leaving the search
+     box and view tabs squeezed into a row that doesn't fit them. */
+  .command-region { container-type: inline-size; }
   .command-region, .status-region { flex: none; }
   .page-content { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
   .page-content.scroll { overflow: auto; }

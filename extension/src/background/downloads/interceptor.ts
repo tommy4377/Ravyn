@@ -20,6 +20,31 @@ interface ConfirmationRequest {
   timer: number;
 }
 
+// Persisted (survives MV3 event-page suspension/restart) record of download
+// ids Ravyn itself paused pending a handoff decision. Used to scope the
+// startup orphan-sweep to downloads WE paused — not ones the user paused
+// manually for their own reasons, which happen to be indistinguishable from
+// ours through the plain `browser.downloads` state alone.
+const PENDING_PAUSE_KEY = "ravyn.pendingPausedDownloadIds";
+
+async function markPending(id: number): Promise<void> {
+  const stored = await browser.storage.local.get(PENDING_PAUSE_KEY);
+  const ids = new Set<number>(
+    (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
+  );
+  ids.add(id);
+  await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [...ids] });
+}
+
+async function clearPending(id: number): Promise<void> {
+  const stored = await browser.storage.local.get(PENDING_PAUSE_KEY);
+  const ids = new Set<number>(
+    (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
+  );
+  if (!ids.delete(id)) return;
+  await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [...ids] });
+}
+
 export class DownloadInterceptor {
   private confirmations = new Map<string, ConfirmationRequest>();
   // Serializes confirmation popups so a page dropping several downloads at
@@ -47,14 +72,30 @@ export class DownloadInterceptor {
 
   private async resumeOrphanedPausedDownloads(): Promise<void> {
     // Any in-memory confirmation state is necessarily gone the moment this
-    // runs (we just started), so every download still paused-in-progress at
-    // startup is either an interrupted handoff or an orphaned confirmation —
-    // resume it rather than leave it stuck forever.
+    // runs (we just started). Only resume downloads WE paused (tracked in
+    // persisted storage, see markPending/clearPending) — a plain
+    // `{paused:true}` search can't distinguish an interrupted handoff or
+    // orphaned confirmation from a download the user paused manually for
+    // their own reasons, and force-resuming the latter would be wrong.
+    const stored: Record<string, unknown> = await browser.storage.local
+      .get(PENDING_PAUSE_KEY)
+      .catch(() => ({}));
+    const pendingIds = new Set<number>(
+      (stored[PENDING_PAUSE_KEY] as number[] | undefined) ?? [],
+    );
+    if (pendingIds.size === 0) return;
     const paused = await browser.downloads
       .search({ paused: true, state: "in_progress" })
       .catch(() => []);
-    for (const item of paused)
-      await browser.downloads.resume(item.id).catch(() => undefined);
+    const stillPaused = new Set(paused.map((item) => item.id));
+    for (const id of pendingIds) {
+      if (stillPaused.has(id))
+        await browser.downloads.resume(id).catch(() => undefined);
+    }
+    // Every tracked id is now resolved (resumed here, or no longer paused —
+    // completed/cancelled/removed since it was recorded) — drop them all so
+    // the persisted set doesn't grow across restarts.
+    await browser.storage.local.set({ [PENDING_PAUSE_KEY]: [] });
   }
 
   resolveConfirmation(requestId: string, accepted: boolean): void {
@@ -75,7 +116,9 @@ export class DownloadInterceptor {
     // before we ever get around to pausing it, so the shelf visibly shows
     // the download start and then vanish once we hand it off and cancel it.
     await browser.downloads.pause(item.id).catch(() => undefined);
+    await markPending(item.id);
     let handedOff = false;
+    let claimed = false;
     let settings: ExtensionSettings | undefined;
     try {
       settings = await loadSettings();
@@ -100,6 +143,13 @@ export class DownloadInterceptor {
       const decision = decideInterception(settings, rule?.action, forced);
       if (decision === "ignore") return;
       if (decision === "confirm" && !(await this.confirm(item))) return;
+      // A second `onCreated` for the same URL (double-click, or a page
+      // firing near-simultaneous requests for one resource) racing this one
+      // through the async checks above would otherwise both pass `contains`
+      // (neither has recorded a delegation yet) and both hand off — claim
+      // the URL now, right before the point of no return.
+      claimed = await this.delegated.claim(item.url);
+      if (!claimed) return;
 
       const payload: CreateDownloadPayload = {
         url: item.url,
@@ -140,8 +190,10 @@ export class DownloadInterceptor {
           "Firefox is continuing the download.",
         );
     } finally {
+      if (claimed) await this.delegated.release(item.url);
       if (!handedOff)
         await browser.downloads.resume(item.id).catch(() => undefined);
+      await clearPending(item.id);
     }
   }
 

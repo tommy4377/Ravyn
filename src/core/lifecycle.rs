@@ -648,15 +648,62 @@ impl JobManager {
 }
 
 fn validate_filename(filename: Option<&str>) -> Result<()> {
-    if let Some(filename) = filename
-        && (filename.trim().is_empty()
+    if let Some(filename) = filename {
+        // `components().count() != 1` alone does not reject ".." or "." —
+        // both parse to exactly one component (ParentDir / CurDir
+        // respectively), so a filename of ".." previously passed this check
+        // unmodified. Require that single component to be `Normal`.
+        let mut components = std::path::Path::new(filename).components();
+        let single_normal_component = matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        );
+        if filename.trim().is_empty()
             || filename.len() > 255
             || filename.chars().any(|value| value.is_control())
-            || std::path::Path::new(filename).components().count() != 1)
-    {
-        return Err(RavynError::Invalid(
-            "filename must be a single safe path component".into(),
-        ));
+            || !single_normal_component
+        {
+            return Err(RavynError::Invalid(
+                "filename must be a single safe path component".into(),
+            ));
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod validate_filename_tests {
+    use super::validate_filename;
+
+    #[test]
+    fn accepts_a_normal_filename() {
+        assert!(validate_filename(Some("report.pdf")).is_ok());
+    }
+
+    #[test]
+    fn accepts_none() {
+        assert!(validate_filename(None).is_ok());
+    }
+
+    #[test]
+    fn rejects_parent_dir_traversal() {
+        assert!(validate_filename(Some("..")).is_err());
+    }
+
+    #[test]
+    fn rejects_current_dir() {
+        assert!(validate_filename(Some(".")).is_err());
+    }
+
+    #[test]
+    fn rejects_multi_component_paths() {
+        assert!(validate_filename(Some("a/b")).is_err());
+        assert!(validate_filename(Some("../secret")).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_control_characters() {
+        assert!(validate_filename(Some("  ")).is_err());
+        assert!(validate_filename(Some("a\0b")).is_err());
+    }
 }

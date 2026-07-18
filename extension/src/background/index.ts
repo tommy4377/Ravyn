@@ -249,9 +249,24 @@ async function downloadMediaElement(
       ),
     );
   }
+  // No direct media URL was found on the element — the common case is a
+  // JS-driven player (YouTube and effectively every site with custom
+  // controls) whose <video> src is a blob: URL that collectMediaSources()
+  // already excludes as unusable. Hand the *page* itself to yt-dlp, exactly
+  // like the "Download page with yt-dlp" context-menu item does. This used
+  // to call probe_media instead — which only returns format metadata and
+  // never creates a job — so the overlay button showed a success checkmark
+  // on every such click while nothing was ever actually queued.
   return native.request(
-    "probe_media",
-    await enrichProbe(pageUrl, sourceContext, tab),
+    "create_download",
+    await enrichDownload(
+      {
+        url: pageUrl,
+        kind: "media",
+        sourceContext,
+      },
+      tab,
+    ),
   );
 }
 

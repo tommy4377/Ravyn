@@ -475,8 +475,7 @@ async fn open_compact_window(
     tauri::WebviewWindowBuilder::new(&app, "compact", tauri::WebviewUrl::App("index.html".into()))
         .title("Ravyn downloads")
         .inner_size(400.0, 130.0)
-        .min_inner_size(340.0, 110.0)
-        .max_inner_size(400.0, 360.0)
+        .resizable(false)
         .maximizable(false)
         .minimizable(false)
         .always_on_top(true)
@@ -500,6 +499,31 @@ fn focus_main_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Res
     main.unminimize().map_err(|error| error.to_string())?;
     main.set_focus().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Parses a browser-launch or torrent/magnet-association action out of a
+/// process argument list, checking both forms since either can arrive on the
+/// command line (a Firefox-launched relaunch vs. a Windows file/URL
+/// association double-click).
+fn parse_launch_action(arguments: &[String]) -> Option<browser_integration::BrowserAction> {
+    browser_integration::parse_browser_action(arguments)
+        .or_else(|| browser_integration::parse_torrent_association_action(arguments))
+}
+
+/// Brings whichever top-level window currently exists (main or setup) to the
+/// foreground. Used when a second process launch is redirected here by the
+/// single-instance plugin, so the OS focuses the running app instead of
+/// leaving the user staring at nothing.
+fn focus_main_window_or_setup(app: &tauri::AppHandle) {
+    let window = app
+        .get_webview_window("main")
+        .or_else(|| app.get_webview_window("setup"));
+    let Some(window) = window else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
 }
 
 /// Show a native desktop notification for a download event. The message
@@ -565,8 +589,7 @@ pub fn run() {
         .init();
 
     let initial_arguments = std::env::args().collect::<Vec<_>>();
-    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments)
-        .or_else(|| browser_integration::parse_torrent_association_action(&initial_arguments));
+    let initial_browser_action = parse_launch_action(&initial_arguments);
     let browser_action_state = browser_integration::BrowserActionState::default();
     if let Some(action) = initial_browser_action {
         browser_action_state.replace(action);
@@ -576,6 +599,21 @@ pub fn run() {
 
     #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
     let mut builder = tauri::Builder::default()
+        // Must be the first plugin registered: a magnet link or .torrent file
+        // opened while Ravyn is already running launches a second OS process
+        // (the registered "%1" handler in torrent_association.rs), which
+        // would otherwise boot a fully redundant backend, rqbit child, and
+        // window against the same database. This plugin detects that a
+        // primary instance already owns the app and forwards the new
+        // process's argv here instead, so the second process exits
+        // immediately without ever starting Tauri.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(action) = parse_launch_action(&argv) {
+                app.state::<browser_integration::BrowserActionState>()
+                    .replace(action);
+            }
+            focus_main_window_or_setup(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
     // MCP automation bridge for explicitly enabled development-time testing only.
