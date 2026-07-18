@@ -41,54 +41,63 @@ export async function httpRequest<T>(
     () => controller.abort(),
     options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
-  options?.signal?.addEventListener("abort", () => controller.abort(), {
-    once: true,
-  });
+  // Named handler so it can be detached once the request settles — with a
+  // long-lived caller signal (a view-level controller reused across polls),
+  // `{once:true}` alone would let one listener per request pile up on the
+  // signal until it finally aborts.
+  const onAbort = () => controller.abort();
+  options?.signal?.addEventListener("abort", onAbort, { once: true });
 
-  let response: Response;
   try {
-    response = await fetch(buildUrl(baseUrl, path, options?.query), {
-      method,
-      headers: {
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        authorization: `Bearer ${apiToken}`,
-        ...options?.headers,
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    throw new ApiError(0, {
-      code: "NETWORK_UNAVAILABLE",
-      message:
-        error instanceof Error ? error.message : "the backend is unreachable",
-      retryable: true,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const accepted = response.ok || options?.acceptedStatuses?.includes(response.status) === true;
-  if (!accepted) {
-    let parsed: ApiErrorBody;
+    let response: Response;
     try {
-      parsed = (await response.json()) as ApiErrorBody;
-    } catch {
-      parsed = {
-        code: `HTTP_${response.status}`,
-        message: response.statusText || "request failed",
-        retryable: response.status >= 500,
-      };
+      response = await fetch(buildUrl(baseUrl, path, options?.query), {
+        method,
+        headers: {
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+          authorization: `Bearer ${apiToken}`,
+          ...options?.headers,
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new ApiError(0, {
+        code: "NETWORK_UNAVAILABLE",
+        message:
+          error instanceof Error ? error.message : "the backend is unreachable",
+        retryable: true,
+      });
     }
-    throw new ApiError(response.status, parsed);
-  }
 
-  if (response.status === 204) {
-    return undefined as T;
+    const accepted = response.ok || options?.acceptedStatuses?.includes(response.status) === true;
+    if (!accepted) {
+      let parsed: ApiErrorBody;
+      try {
+        parsed = (await response.json()) as ApiErrorBody;
+      } catch {
+        parsed = {
+          code: `HTTP_${response.status}`,
+          message: response.statusText || "request failed",
+          retryable: response.status >= 500,
+        };
+      }
+      throw new ApiError(response.status, parsed);
+    }
+
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      return (await response.text()) as T;
+    }
+    return (await response.json()) as T;
+  } finally {
+    // Cleared only after the body is consumed, so the timeout bounds the
+    // whole request — previously it stopped guarding once headers arrived,
+    // leaving a stalled body stream hanging forever.
+    clearTimeout(timeout);
+    options?.signal?.removeEventListener("abort", onAbort);
   }
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    return (await response.text()) as T;
-  }
-  return (await response.json()) as T;
 }
