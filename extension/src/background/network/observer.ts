@@ -23,9 +23,17 @@ interface PendingRequest {
   filename?: string;
 }
 
+// A request that never fires onCompleted/onErrorOccurred (a long-lived
+// SSE/EventSource connection kept open for a page's lifetime, or any request
+// Firefox doesn't cleanly terminate) would otherwise sit in `pending`
+// forever for as long as observation stays enabled.
+const PENDING_TTL_MS = 5 * 60 * 1_000;
+const PENDING_SWEEP_INTERVAL_MS = 60 * 1_000;
+
 export class NetworkObserver {
   private pending = new Map<string, PendingRequest>();
   private registered = false;
+  private sweepTimer: number | null = null;
 
   constructor(private readonly cache: ResourceCache) {}
 
@@ -57,6 +65,10 @@ export class NetworkObserver {
     browser.webRequest.onErrorOccurred.addListener(this.onError, {
       urls: ["<all_urls>"],
     });
+    this.sweepTimer = window.setInterval(
+      () => this.sweepPending(),
+      PENDING_SWEEP_INTERVAL_MS,
+    );
     this.registered = true;
   }
 
@@ -66,8 +78,16 @@ export class NetworkObserver {
     browser.webRequest.onHeadersReceived.removeListener(this.onHeadersReceived);
     browser.webRequest.onCompleted.removeListener(this.onCompleted);
     browser.webRequest.onErrorOccurred.removeListener(this.onError);
+    if (this.sweepTimer !== null) window.clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     this.pending.clear();
     this.registered = false;
+  }
+
+  private sweepPending(): void {
+    const cutoff = Date.now() - PENDING_TTL_MS;
+    for (const [requestId, request] of this.pending)
+      if (request.startedAt < cutoff) this.pending.delete(requestId);
   }
 
   private readonly onBeforeRequest = (

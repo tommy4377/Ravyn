@@ -81,6 +81,12 @@ export class JobsStore {
   private flushProgress(): void {
     if (this.pendingProgress.size === 0) return;
     for (const [jobId, snapshot] of this.pendingProgress) {
+      // A progress event for a job removed moments earlier (removeLocal
+      // clears liveProgress, but a packet already in flight lands on the
+      // next flush tick regardless) would otherwise resurrect an entry for
+      // a job that no longer exists in byId, left until the next removal or
+      // full reload.
+      if (!this.byId.has(jobId)) continue;
       this.liveProgress.set(jobId, {
         downloadedBytes: snapshot.downloaded_bytes,
         totalBytes: snapshot.total_bytes,

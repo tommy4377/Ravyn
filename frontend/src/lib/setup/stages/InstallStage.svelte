@@ -153,6 +153,7 @@
     start_menu_shortcut: "Creating Start Menu shortcut",
     desktop_shortcut: "Creating desktop shortcut",
     launch_at_startup: "Registering startup with Windows",
+    register_torrent_association: "Registering as a torrent/magnet handler",
     restore_persisted_integration: "Restoring the verified installation",
   };
 

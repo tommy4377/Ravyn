@@ -47,12 +47,12 @@
   }
   .selection-content { width: 100%; justify-content: space-between; }
   .actions { justify-content: flex-end; }
-  @media (max-width: 980px) {
+  @container (max-width: 980px) {
     .command-bar:not(.selection-mode) { align-items: stretch; flex-direction: column; }
     .actions { width: 100%; }
     .actions :global(.search-box) { flex: 1; }
   }
-  @media (max-width: 680px) {
+  @container (max-width: 680px) {
     .actions { overflow-x: auto; padding-bottom: 1px; }
     .selection-content { align-items: flex-start; flex-direction: column; }
   }

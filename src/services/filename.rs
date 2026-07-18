@@ -29,6 +29,16 @@ pub fn sanitize(input: &str) -> String {
         return "download.bin".into();
     }
     let mut name: String = name.chars().take(240).collect();
+    // Truncating to the character limit can land exactly on a character that
+    // was previously interior to the string but is now trailing — e.g. the
+    // dot in "a".repeat(239) + "." + "b".repeat(20) sits right at the cut —
+    // reintroducing the trailing dot/space Windows silently drops from the
+    // path it actually creates on disk. Re-trim after truncating, not just
+    // before.
+    name = name.trim_end_matches(['.', ' ']).to_string();
+    if name.is_empty() {
+        return "download.bin".into();
+    }
     let stem = name
         .split('.')
         .next()
@@ -72,6 +82,15 @@ mod tests {
     #[test]
     fn removes_unsafe_characters() {
         assert_eq!(sanitize("a:b?.zip"), "a_b_.zip");
+    }
+
+    #[test]
+    fn truncation_does_not_reintroduce_a_trailing_dot_or_space() {
+        let input = format!("{}.{}", "a".repeat(239), "b".repeat(20));
+        let sanitized = sanitize(&input);
+        assert!(sanitized.len() <= 240);
+        assert!(!sanitized.ends_with('.'));
+        assert!(!sanitized.ends_with(' '));
     }
 
     #[test]

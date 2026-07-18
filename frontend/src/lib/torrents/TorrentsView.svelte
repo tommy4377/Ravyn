@@ -12,6 +12,7 @@
   import Button from "../components/Button.svelte";
   import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
+  import ContextMenu from "../components/ContextMenu.svelte";
   import DetailsPane from "../components/DetailsPane.svelte";
   import Dialog from "../components/Dialog.svelte";
   import EmptyState from "../components/EmptyState.svelte";
@@ -27,8 +28,11 @@
   import Surface from "../components/Surface.svelte";
   import TextArea from "../components/TextArea.svelte";
   import TextField from "../components/TextField.svelte";
+  import { buildJobMenuItems, type JobRowActions } from "../downloads/jobActions";
+  import { permittedActions, presentStatus } from "../downloads/jobPresentation";
   import { promptTorrentDefaultApp } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
+  import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes, formatSpeed } from "../util/format";
@@ -134,12 +138,18 @@
     loading = true;
     error = null;
     try {
-      const [page, engine] = await Promise.all([
+      const [page, engine, jobsPage] = await Promise.all([
         connection.client.listTorrents({ limit: 250 }),
         connection.client.getTorrentEngineStats().catch(() => null),
+        connection.client.listJobs({ kind: "torrent", limit: 250 }).catch(() => null),
       ]);
       torrents = page.items;
       engineStats = engine;
+      // Seed the shared jobsStore (already kept live by AppShell's global SSE
+      // subscription, see mem:frontend/downloads) so job status/progress for
+      // torrents stays current without a dedicated torrent-progress channel
+      // — upsert() doesn't disturb the store's own pagination/order state.
+      if (jobsPage) for (const job of jobsPage.items) jobsStore.upsert(job);
       if (selectedId && !torrents.some((torrent) => torrent.job_id === selectedId)) selectedId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -172,7 +182,18 @@
     }
   }
 
-  $effect(() => { void load(); });
+  $effect(() => {
+    void load();
+    // Download progress/speed/status for the visible rows come live from
+    // jobsStore (fed by AppShell's global SSE subscription — see load()
+    // above), but upload speed/peers/seeders/ratio have no SSE channel
+    // (backend only reports those into internal metrics, not events) and
+    // otherwise stay frozen at whatever they were when the page loaded or a
+    // row was last selected. Poll on the same ~5s cadence the backend
+    // itself uses to reconcile torrent state (adapters::torrent::monitor_managed).
+    const timer = window.setInterval(() => void load(), 5_000);
+    return () => window.clearInterval(timer);
+  });
 
   $effect(() => {
     fileSearch = "";
@@ -269,6 +290,48 @@
       { id: "refresh", label: "Refresh", icon: "refresh", separatorBefore: true, onSelect: () => void load() },
     ];
   }
+
+  async function performJobAction(id: string, action: (id: string) => Promise<void>): Promise<void> {
+    if (!connection.client) return;
+    try {
+      await action(id);
+      await load();
+    } catch (cause) {
+      notifications.error("Couldn't update torrent", describeError(cause));
+    }
+  }
+
+  // Mirrors the Downloads row menu exactly (same permittedActions/buildJobMenuItems
+  // as JobRow.svelte) so a torrent job offers the same pause/resume/retry/cancel
+  // options here as it does in the general Downloads list, plus the
+  // torrent-specific "delete files" removal variant.
+  const rowActions: JobRowActions = {
+    onOpenDetails: (job) => (selectedId = job.id),
+    onPause: (job) => void performJobAction(job.id, (id) => connection.client!.pauseJob(id)),
+    onResume: (job) => void performJobAction(job.id, (id) => connection.client!.resumeJob(id)),
+    onRetry: (job) => void performJobAction(job.id, (id) => connection.client!.retryJob(id)),
+    onCancel: (job) => void performJobAction(job.id, (id) => connection.client!.cancelJob(id)),
+    onRemove: (job) => {
+      const record = torrents.find((torrent) => torrent.job_id === job.id);
+      if (record) requestRemove(record, "keep");
+    },
+  };
+
+  function torrentMenuItems(torrent: TorrentRecord): MenuItem[] {
+    const job = jobsStore.byId.get(torrent.job_id);
+    const items = job
+      ? buildJobMenuItems(job, permittedActions(job.status, job.kind), rowActions)
+      : [{ id: "details", label: "View details", icon: "external-link", onSelect: () => (selectedId = torrent.job_id) } satisfies MenuItem];
+    items.push({
+      id: "remove-delete",
+      label: "Remove and delete files",
+      icon: "trash",
+      danger: true,
+      separatorBefore: true,
+      onSelect: () => requestRemove(torrent, "delete"),
+    });
+    return items;
+  }
 </script>
 
 <PageScaffold title="Torrents" summary="Managed torrent downloads, selected files, peers, trackers, and seeding.">
@@ -306,19 +369,42 @@
               {#if !search}<Button variant="accent" onclick={() => navigation.requestAdd("torrent")}>Add torrent</Button>{/if}
             </EmptyState>
           {:else}
-            <div class="header-row" aria-hidden="true"><span>Name</span><span>Progress</span><span>Down</span><span>Up</span><span>ETA / Ratio</span><span>State</span></div>
+            <div class="header-row" aria-hidden="true"><span>Name</span><span>Progress</span><span>Down</span><span>Up</span><span>ETA / Ratio</span><span>State</span><span></span></div>
             <div class="rows" role="listbox" aria-label="Managed torrents">
               {#each visible as torrent (torrent.job_id)}
-                {@const progress = torrentProgress(torrent)}
-                {@const ratio = torrentRatio(torrent.uploaded_bytes, torrent.downloaded_bytes)}
-                <button type="button" class="torrent-row" class:selected={selectedId === torrent.job_id} role="option" aria-selected={selectedId === torrent.job_id} onclick={() => (selectedId = torrent.job_id)}>
-                  <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={18} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? "Unnamed torrent"}</strong><small>{torrent.info_hash ?? torrent.torrent_id}</small></span></span>
-                  <span class="progress-cell"><span class="progress-track"><span style={`width:${progress}%`}></span></span><small>{progress.toFixed(0)}% · {formatBytes(torrent.downloaded_bytes)} / {formatBytes(torrent.total_bytes)}</small></span>
-                  <span>{formatSpeed(torrent.download_speed_bps)}</span>
-                  <span>{formatSpeed(torrent.upload_speed_bps)}</span>
-                  <span class="eta-cell"><strong>{formatTorrentEta(torrentEtaSeconds(torrent))}</strong><small>Ratio {ratio === null ? "∞" : ratio.toFixed(2)}</small></span>
-                  <span><StatusBadge label={torrent.state} severity={severity(torrent.state)} /></span>
-                </button>
+                {@const liveJob = jobsStore.byId.get(torrent.job_id)}
+                {@const liveProgress = jobsStore.liveProgress.get(torrent.job_id)}
+                {@const display = {
+                  ...torrent,
+                  downloaded_bytes: liveProgress?.downloadedBytes ?? torrent.downloaded_bytes,
+                  total_bytes: liveProgress?.totalBytes ?? torrent.total_bytes,
+                  download_speed_bps: liveProgress?.bytesPerSecond ?? torrent.download_speed_bps,
+                  state: liveJob ? presentStatus(liveJob.status).label : torrent.state,
+                }}
+                {@const progress = torrentProgress(display)}
+                {@const ratio = torrentRatio(torrent.uploaded_bytes, display.downloaded_bytes)}
+                {@const menuItems = torrentMenuItems(torrent)}
+                <ContextMenu items={menuItems}>
+                  <div
+                    class="torrent-row"
+                    class:selected={selectedId === torrent.job_id}
+                    role="option"
+                    aria-selected={selectedId === torrent.job_id}
+                    tabindex="-1"
+                    onclick={() => (selectedId = torrent.job_id)}
+                    onkeydown={(event) => { if (event.key === "Enter") selectedId = torrent.job_id; }}
+                  >
+                    <span class="torrent-name"><span class="torrent-icon"><Icon name="torrent" size={18} /></span><span><strong>{torrent.name ?? torrent.info_hash ?? "Unnamed torrent"}</strong><small>{torrent.info_hash ?? torrent.torrent_id}</small></span></span>
+                    <span class="progress-cell"><span class="progress-track"><span style={`width:${progress}%`}></span></span><small>{progress.toFixed(0)}% · {formatBytes(display.downloaded_bytes)} / {formatBytes(display.total_bytes)}</small></span>
+                    <span>{formatSpeed(display.download_speed_bps)}</span>
+                    <span>{formatSpeed(torrent.upload_speed_bps)}</span>
+                    <span class="eta-cell"><strong>{formatTorrentEta(torrentEtaSeconds(display))}</strong><small>Ratio {ratio === null ? "∞" : ratio.toFixed(2)}</small></span>
+                    <span><StatusBadge label={display.state} severity={severity(display.state)} /></span>
+                    <span class="row-menu">
+                      <MenuButton label={`More actions for ${torrent.name ?? "torrent"}`} icon="more" items={menuItems} variant="subtle" iconOnly />
+                    </span>
+                  </div>
+                </ContextMenu>
               {/each}
             </div>
           {/if}
@@ -340,19 +426,27 @@
             {:else if detailLoading}
               <p class="muted">Loading torrent details…</p>
             {:else if detailTab === "overview"}
+              {@const liveJob = jobsStore.byId.get(selected.job_id)}
+              {@const liveProgress = jobsStore.liveProgress.get(selected.job_id)}
+              {@const detailDownloaded = liveProgress?.downloadedBytes ?? snapshot?.downloaded_bytes ?? selected.downloaded_bytes}
+              {@const detailTotal = liveProgress?.totalBytes ?? snapshot?.total_bytes ?? selected.total_bytes}
+              {@const detailSpeed = liveProgress?.bytesPerSecond ?? snapshot?.download_speed_bps ?? selected.download_speed_bps}
+              {@const detailState = liveJob ? presentStatus(liveJob.status).label : (snapshot?.state ?? selected.state)}
+              {@const detailUploaded = snapshot?.uploaded_bytes ?? selected.uploaded_bytes}
+              {@const detailProgressPct = detailTotal ? Math.max(0, Math.min(100, (detailDownloaded / detailTotal) * 100)) : torrentProgress(selected)}
               <div class="detail-stack">
                 <div class="overview-progress">
-                  <span class="progress-track large"><span style={`width:${torrentProgress(selected)}%`}></span></span>
-                  <strong>{torrentProgress(selected).toFixed(0)}%</strong>
-                  <small>{formatBytes(snapshot?.downloaded_bytes ?? selected.downloaded_bytes)} of {formatBytes(snapshot?.total_bytes ?? selected.total_bytes)}</small>
+                  <span class="progress-track large"><span style={`width:${detailProgressPct}%`}></span></span>
+                  <strong>{detailProgressPct.toFixed(0)}%</strong>
+                  <small>{formatBytes(detailDownloaded)} of {formatBytes(detailTotal)}</small>
                 </div>
                 <dl>
-                  <dt>State</dt><dd>{snapshot?.state ?? selected.state}</dd>
-                  <dt>Download speed</dt><dd>{formatSpeed(snapshot?.download_speed_bps ?? selected.download_speed_bps)}</dd>
+                  <dt>State</dt><dd>{detailState}</dd>
+                  <dt>Download speed</dt><dd>{formatSpeed(detailSpeed)}</dd>
                   <dt>Upload speed</dt><dd>{formatSpeed(snapshot?.upload_speed_bps ?? selected.upload_speed_bps)}</dd>
-                  <dt>ETA</dt><dd>{formatTorrentEta(torrentEtaSeconds(selected))}</dd>
-                  <dt>Uploaded</dt><dd>{formatBytes(snapshot?.uploaded_bytes ?? selected.uploaded_bytes)}</dd>
-                  <dt>Ratio</dt><dd>{torrentRatio(snapshot?.uploaded_bytes ?? selected.uploaded_bytes, snapshot?.downloaded_bytes ?? selected.downloaded_bytes)?.toFixed(2) ?? "∞"}</dd>
+                  <dt>ETA</dt><dd>{formatTorrentEta(detailTotal && detailSpeed > 0 ? Math.max(0, detailTotal - detailDownloaded) / detailSpeed : null)}</dd>
+                  <dt>Uploaded</dt><dd>{formatBytes(detailUploaded)}</dd>
+                  <dt>Ratio</dt><dd>{torrentRatio(detailUploaded, detailDownloaded)?.toFixed(2) ?? "∞"}</dd>
                   <dt>Peers</dt><dd>{snapshot?.peers_connected ?? selected.peers_connected}</dd>
                   <dt>Seeders / leechers</dt><dd>{snapshot?.seeders ?? selected.seeders} / {snapshot?.leechers ?? selected.leechers}</dd>
                 </dl>
@@ -446,7 +540,10 @@
   :global(.torrent-list) { height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: 0; border-color: var(--stroke-divider); background: var(--surface-content); }
   .state { padding: var(--space-6); }
   .muted { color: var(--text-secondary); }
-  .header-row, .torrent-row { display: grid; grid-template-columns: minmax(250px, 1.8fr) minmax(180px, 1fr) 90px 90px 110px 120px; gap: var(--space-3); align-items: center; }
+  .header-row, .torrent-row { display: grid; grid-template-columns: minmax(250px, 1.8fr) minmax(180px, 1fr) 90px 90px 110px 120px 32px; gap: var(--space-3); align-items: center; }
+  .row-menu { opacity: 0; transition: opacity var(--motion-fast) var(--motion-easing); }
+  .torrent-row:hover .row-menu, .torrent-row.selected .row-menu, .row-menu:focus-within { opacity: 1; }
+  .row-menu :global(.menu-trigger) { width: 28px; height: 28px; min-height: 28px; }
   .header-row { min-height: 36px; padding: 0 var(--space-3); border-bottom: 1px solid var(--stroke-divider); color: var(--text-tertiary); font-size: var(--text-caption); font-weight: 600; }
   .rows { flex: 1; min-height: 0; overflow: auto; }
   .torrent-row { width: 100%; min-height: var(--row-height); padding: var(--row-padding-v) var(--space-3); border: 0; border-bottom: 1px solid var(--stroke-divider); background: transparent; color: var(--text-primary); text-align: left; cursor: default; }
@@ -486,13 +583,14 @@
   .raw-json { max-height: 360px; margin: 0; padding: var(--space-3); overflow: auto; border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); font-size: var(--text-caption); }
   .dialog-error { margin-top: var(--space-4); }
   @media (max-width: 1240px) {
-    .header-row, .torrent-row { grid-template-columns: minmax(230px, 1.7fr) minmax(170px, 1fr) 90px 110px 110px; }
+    .header-row, .torrent-row { grid-template-columns: minmax(230px, 1.7fr) minmax(170px, 1fr) 90px 110px 110px 32px; }
     .header-row span:nth-child(4), .torrent-row > span:nth-child(4) { display: none; }
   }
   @media (max-width: 820px) {
     .header-row { display: none; }
-    .torrent-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .torrent-row { grid-template-columns: minmax(0, 1fr) auto auto; }
     .torrent-row > span:nth-child(2), .torrent-row > span:nth-child(3), .torrent-row > span:nth-child(4), .torrent-row > span:nth-child(5) { display: none; }
+    .row-menu { opacity: 1; }
     .file-selection-summary { align-items: flex-start; flex-direction: column; }
   }
 </style>

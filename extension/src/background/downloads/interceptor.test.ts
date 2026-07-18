@@ -27,7 +27,11 @@ function makeInterceptor(
     downloads: { pause, resume, cancel, removeFile, erase, search },
     storage: {
       local: {
-        get: vi.fn().mockResolvedValue(stored),
+        get: vi.fn().mockImplementation(() => Promise.resolve(stored)),
+        set: vi.fn().mockImplementation((patch: Record<string, unknown>) => {
+          Object.assign(stored, patch);
+          return Promise.resolve();
+        }),
       },
     },
     runtime: {
@@ -171,6 +175,31 @@ describe("DownloadInterceptor.handle", () => {
     expect(removeFile).toHaveBeenCalledWith(42);
     // Handed off — must not also resume the (now cancelled) browser item.
     expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("hands off only once when two downloads for the same URL race concurrently", async () => {
+    // A double-click, or a page firing near-simultaneous requests for one
+    // resource, can produce two browser.downloads.onCreated events for the
+    // same URL before either has finished its async eligibility checks.
+    const { interceptor, cancel, resume, request } = makeInterceptor();
+    let releaseRequest!: () => void;
+    request.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRequest = () => resolve({ id: "job-1" });
+        }),
+    );
+    const first = handle(interceptor, downloadItem({ id: 42 }));
+    const second = handle(interceptor, downloadItem({ id: 43 }));
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    // The second download must not also be mid-handoff waiting on its own
+    // native request — it should already have bailed out and resumed.
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(43));
+    releaseRequest();
+    await Promise.all([first, second]);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(42);
+    expect(cancel).not.toHaveBeenCalledWith(43);
   });
 
   it("resumes the browser download and notifies when the native handoff fails", async () => {
