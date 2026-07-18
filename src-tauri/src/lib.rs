@@ -545,27 +545,47 @@ fn notify_native(
 }
 
 fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
-    tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html".into()))
-        .title("Ravyn Setup")
-        .inner_size(760.0, 580.0)
-        .min_inner_size(640.0, 500.0)
-        .resizable(true)
-        .maximizable(false)
-        .center()
-        .build()
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html".into()))
+            .title("Ravyn Setup")
+            .inner_size(760.0, 580.0)
+            .min_inner_size(640.0, 500.0)
+            .resizable(true)
+            .maximizable(false)
+            .center();
+    #[cfg(target_os = "windows")]
+    let builder = builder.transparent(true).effects(
+        tauri::window::EffectsBuilder::new()
+            .effect(tauri::window::Effect::Acrylic)
+            // The web layer owns the theme tint. A nearly transparent native
+            // color keeps Windows 10 acrylic active without double-tinting it.
+            .color(tauri::window::Color(0, 0, 0, 1))
+            .build(),
+    );
+    builder.build()
 }
 
 fn create_main_window(
     app: &tauri::AppHandle,
     visible: bool,
 ) -> tauri::Result<tauri::WebviewWindow> {
-    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
-        .title("Ravyn")
-        .inner_size(1100.0, 720.0)
-        .min_inner_size(800.0, 560.0)
-        .visible(visible)
-        .center()
-        .build()
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("Ravyn")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(800.0, 560.0)
+            .visible(visible)
+            .center();
+    #[cfg(target_os = "windows")]
+    let builder = builder.transparent(true).effects(
+        tauri::window::EffectsBuilder::new()
+            .effect(tauri::window::Effect::Acrylic)
+            // The web layer owns the theme tint. A nearly transparent native
+            // color keeps Windows 10 acrylic active without double-tinting it.
+            .color(tauri::window::Color(0, 0, 0, 1))
+            .build(),
+    );
+    builder.build()
 }
 
 pub fn run() {

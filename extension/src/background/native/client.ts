@@ -151,8 +151,14 @@ export class NativeClient {
         this.handleMessage(message),
       );
       port.onDisconnect.addListener(() => this.handleDisconnect());
-      this.reconnectAttempt = 0;
       await this.refreshStatus();
+      // Only a confirmed-healthy connection resets the backoff. Firefox's
+      // connectNative doesn't throw for a missing/crashing host — the port
+      // opens and onDisconnect fires moments later — so resetting right
+      // after connectNative would pin every retry at the shortest delay,
+      // re-spawning the host process 4x/second forever instead of backing
+      // off toward the 30s ceiling.
+      if (this.statusValue.hostAvailable) this.reconnectAttempt = 0;
       void this.request("subscribe_events").catch((error) =>
         logger.warn("Backend event subscription is unavailable", error),
       );

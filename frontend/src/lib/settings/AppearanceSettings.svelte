@@ -9,16 +9,28 @@
 
   let backdropDraft = $state(navigation.backdropImage);
   let intensityDraft = $state(String(navigation.materialIntensity));
+  let backdropStatus = $derived.by(() => {
+    if (!systemAppearance.supported) return "Available in the installed Windows application.";
+    if (navigation.material === "solid") return "Solid material is selected; compositor blur is off.";
+    if (navigation.backdropImage) return "A custom image is replacing the compositor backdrop.";
+    if (systemAppearance.transparencyEnabled) {
+      return "Active — Windows is blurring the composed content behind Ravyn.";
+    }
+    if (systemAppearance.wallpaperAvailable) {
+      return `Transparency is disabled; using the Windows wallpaper fallback (${systemAppearance.wallpaperPosition}).`;
+    }
+    return "Transparency is disabled and Windows did not expose a usable fallback wallpaper.";
+  });
 </script>
 
 <SettingsCategoryHeader title="Appearance" description="Appearance changes apply immediately and are stored on this device." />
 <Surface padding="none">
   <div class="row"><div><strong>App theme</strong><span>System follows the current Windows light or dark preference.</span></div><div class="choice-group" aria-label="App theme"><button class:active={navigation.theme === "system"} onclick={() => navigation.setTheme("system")}>System</button><button class:active={navigation.theme === "light"} onclick={() => navigation.setTheme("light")}><Icon name="sun" size={14} /> Light</button><button class:active={navigation.theme === "dark"} onclick={() => navigation.setTheme("dark")}><Icon name="moon" size={14} /> Dark</button></div></div>
-  <div class="row"><div><strong>Window material</strong><span>Synthetic material is rendered consistently on Windows 10 and Windows 11.</span></div><div class="choice-group"><button class:active={navigation.material === "synthetic"} onclick={() => navigation.setMaterial("synthetic")}>Synthetic</button><button class:active={navigation.material === "solid"} onclick={() => navigation.setMaterial("solid")}>Solid</button></div></div>
-  <div class="row"><div><strong>Windows desktop backdrop</strong><span>{systemAppearance.wallpaperAvailable ? `Using the Windows wallpaper (${systemAppearance.wallpaperPosition}).` : systemAppearance.supported ? "Windows did not expose a usable wallpaper." : "Available in the installed Windows application."}</span>{#if systemAppearance.lastError}<small class="warning">{systemAppearance.lastError}</small>{/if}</div><Button disabled={systemAppearance.refreshing} onclick={() => void systemAppearance.refresh()}>{systemAppearance.refreshing ? "Refreshing…" : "Refresh"}</Button></div>
-  <div class="row align-start"><div><strong>Material intensity</strong><span>Controls wallpaper, tint, glow, and texture strength.</span></div><div class="range-control"><input type="range" min="0" max="100" bind:value={intensityDraft} oninput={() => navigation.setMaterialIntensity(Number(intensityDraft))} /><output>{intensityDraft}%</output></div></div>
+  <div class="row"><div><strong>Window material</strong><span>Acrylic blurs the composed content beneath Ravyn on Windows 10 and Windows 11.</span></div><div class="choice-group"><button class:active={navigation.material === "synthetic"} onclick={() => navigation.setMaterial("synthetic")}>Acrylic</button><button class:active={navigation.material === "solid"} onclick={() => navigation.setMaterial("solid")}>Solid</button></div></div>
+  <div class="row"><div><strong>Windows compositor backdrop</strong><span>{backdropStatus}</span>{#if systemAppearance.lastError}<small class="warning">{systemAppearance.lastError}</small>{/if}</div><Button disabled={systemAppearance.refreshing} onclick={() => void systemAppearance.refresh()}>{systemAppearance.refreshing ? "Refreshing…" : "Refresh"}</Button></div>
+  <div class="row align-start"><div><strong>Material intensity</strong><span>Controls the compositor tint, fallback wallpaper, glow, and texture strength.</span></div><div class="range-control"><input type="range" min="0" max="100" bind:value={intensityDraft} oninput={() => navigation.setMaterialIntensity(Number(intensityDraft))} /><output>{intensityDraft}%</output></div></div>
   <div class="row"><div><strong>Content density</strong><span>Compact fits more rows; comfortable provides larger targets.</span></div><div class="choice-group"><button class:active={navigation.density === "comfortable"} onclick={() => navigation.setDensity("comfortable")}>Comfortable</button><button class:active={navigation.density === "compact"} onclick={() => navigation.setDensity("compact")}><Icon name="compact" size={14} /> Compact</button></div></div>
-  <AdvancedDisclosure title="Custom backdrop" description="Override the Windows wallpaper with an image URL or asset URI.">
+  <AdvancedDisclosure title="Custom backdrop" description="Replace the compositor backdrop with an image URL or asset URI.">
     <div class="backdrop-field"><input type="text" bind:value={backdropDraft} placeholder="https://… or asset URI" /><Button onclick={() => navigation.setBackdropImage(backdropDraft)}>Apply</Button></div>
   </AdvancedDisclosure>
 </Surface>

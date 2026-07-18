@@ -65,7 +65,7 @@ Bootstrap is `Ravyn::bootstrap` in `src/lib.rs`: it validates `config::Config` (
 - `src/download/` — direct HTTP engine: `probe.rs`, `planner.rs`, `segmented.rs` (segmented transfers with safe fallback and persistent resume).
 - `src/adapters/` — external engines: `media` (yt-dlp) and `torrent` (rqbit), driven as child processes via `services/process.rs` / `services/rqbit_process.rs`.
 - `src/services/` — cross-cutting services: `components.rs` (managed component provisioning/verification), `library/` (organized library: categories, templates, trash, scan, root moves), `scheduler.rs`/`cron.rs`, `rules.rs`, `trust.rs` (Ed25519 verification), `secrets.rs` (keyring), `sniffer.rs` (MIME/magic-byte classification).
-- `src/storage/` — one module per aggregate over sqlx/SQLite; migrations live in `migrations/` (sqlx migrate, `0001`–`0026`) and must stay in sync with code changes.
+- `src/storage/` — one module per aggregate over sqlx/SQLite; migrations live in `migrations/` (sqlx migrate, `0001`–`0027`) and must stay in sync with code changes.
 - `src/postprocess/` — FFmpeg conversion, 7-Zip extraction, move/retention pipeline.
 
 ### Desktop shell (`src-tauri/src/`)

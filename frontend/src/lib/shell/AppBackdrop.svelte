@@ -19,6 +19,13 @@
     pointer-events: none;
     background: var(--backdrop-base);
   }
+  :global(:root[data-native-backdrop="true"]:not([data-material="solid"]):not([data-has-backdrop-image])) .backdrop {
+    background: transparent;
+  }
+  :global(:root[data-native-backdrop="true"]:not([data-material="solid"]):not([data-has-backdrop-image])) .wallpaper,
+  :global(:root[data-native-backdrop="true"]:not([data-material="solid"]):not([data-has-backdrop-image])) .glow {
+    display: none;
+  }
   .wallpaper {
     position: absolute;
     inset: -48px;

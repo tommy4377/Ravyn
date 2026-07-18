@@ -28,6 +28,11 @@ cargo build -p ravyn-desktop
 target/debug/ravyn-desktop.exe
 ```
 
+On Windows 10 and 11, the main and setup windows use a real compositor acrylic
+backdrop, with the wallpaper-based material retained as a fallback. See
+[`docs/WINDOWS_BACKDROP.md`](docs/WINDOWS_BACKDROP.md) for the rendering and
+compatibility details.
+
 Windows distribution is a single self-installing `Ravyn.exe`: running the downloaded executable opens the custom Ravyn setup, which can copy the application into the per-user location (`%LOCALAPPDATA%\Ravyn`, no elevation), register it in Installed Apps, and create the requested shortcuts — or run fully portable. There is no separate MSI/NSIS installer. The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`); after setup completes it opens the main window.
 
 ## Firefox extension
