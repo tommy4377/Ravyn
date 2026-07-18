@@ -4,6 +4,8 @@
  * module-level instance is shared by the whole app shell.
  */
 
+import { untrack } from "svelte";
+
 import { RavynClient } from "../api/client";
 import { describeError } from "../api/errors";
 import { RavynEventClient } from "../api/events.svelte";
@@ -26,7 +28,11 @@ class ConnectionStore {
     // mainWindowReady() rejecting after events.connect() already opened a
     // live EventSource) must not leak that earlier connection — nothing
     // else holds a reference to it once this.events is reassigned below.
-    this.events?.close();
+    // Untracked: connect() runs inside AppShell's $effect, and a tracked
+    // read of this.events here would make that effect re-run on the
+    // `this.events = events` assignment below — an infinite connect loop
+    // that pins the main window on the "Connecting…" boot screen.
+    untrack(() => this.events)?.close();
     try {
       const backend = await backendInfo();
       const client = new RavynClient(backend.base_url, backend.api_token);

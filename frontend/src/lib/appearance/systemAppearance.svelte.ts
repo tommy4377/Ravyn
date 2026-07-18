@@ -93,6 +93,8 @@ class SystemAppearanceStore {
     this.frameOffsetY = appearance.frame_offset_y;
 
     const root = document.documentElement;
+    const useNativeBackdrop = appearance.supported && appearance.transparency_enabled;
+    root.dataset.nativeBackdrop = useNativeBackdrop ? "true" : "false";
     root.dataset.wallpaperPosition = appearance.wallpaper_position;
     root.dataset.systemBackdrop = appearance.wallpaper_path ? "true" : "false";
     root.dataset.systemTransparency = appearance.transparency_enabled ? "enabled" : "disabled";

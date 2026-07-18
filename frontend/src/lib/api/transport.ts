@@ -46,7 +46,11 @@ export async function httpRequest<T>(
   // `{once:true}` alone would let one listener per request pile up on the
   // signal until it finally aborts.
   const onAbort = () => controller.abort();
-  options?.signal?.addEventListener("abort", onAbort, { once: true });
+  // An already-aborted signal never fires "abort" listeners — without this
+  // check a request issued after its owner aborted (a poll racing view
+  // teardown) would run to completion or the full timeout instead.
+  if (options?.signal?.aborted) controller.abort();
+  else options?.signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     let response: Response;
