@@ -1,7 +1,10 @@
 /**
  * Raises in-app and native Windows notifications for terminal download
- * transitions observed on the live event stream. Must run before the jobs
- * store applies the event so the previous status is still available.
+ * transitions observed on the live event stream. Deduplication is keyed on
+ * the (job, status) pair instead of comparing against the jobs store, so a
+ * replayed event after an SSE reconnect stays silent, jobs outside the
+ * currently loaded page still notify, and the result no longer depends on
+ * subscriber ordering.
  */
 
 import { isTauri } from "@tauri-apps/api/core";
@@ -10,6 +13,19 @@ import { notifyNative } from "../native/tauri";
 import { jobsStore } from "../stores/jobs.svelte";
 import { notifications } from "../stores/notifications.svelte";
 import { jobDisplayName } from "../util/format";
+
+const MAX_NOTIFIED = 500;
+const notified = new Set<string>();
+
+function markNotified(key: string): boolean {
+  if (notified.has(key)) return false;
+  notified.add(key);
+  if (notified.size > MAX_NOTIFIED) {
+    const oldest = notified.values().next().value;
+    if (oldest !== undefined) notified.delete(oldest);
+  }
+  return true;
+}
 
 export function notifyDownloadEvent(event: RavynEvent): void {
   if (event.type !== "job_status") return;
@@ -21,11 +37,13 @@ export function notifyDownloadEvent(event: RavynEvent): void {
   ) {
     return;
   }
-  const job = jobsStore.byId.get(statusEvent.job_id);
-  // Unknown jobs (not loaded yet) and repeated terminal events stay silent.
-  if (!job || job.status === statusEvent.status) return;
+  if (!markNotified(`${statusEvent.job_id}:${statusEvent.status}`)) return;
 
-  const name = jobDisplayName(job.source, job.filename);
+  // A job outside the loaded page has no display name yet — the store
+  // refetches it right after this event, but the notification should not
+  // wait on that round trip.
+  const job = jobsStore.byId.get(statusEvent.job_id);
+  const name = job ? jobDisplayName(job.source, job.filename) : undefined;
   let title: string;
   if (statusEvent.status === "completed") {
     title = "Download complete";
@@ -35,7 +53,11 @@ export function notifyDownloadEvent(event: RavynEvent): void {
     notifications.warning(title, name);
   } else {
     title = "Download failed";
-    notifications.error(title, statusEvent.error ? `${name} — ${statusEvent.error}` : name);
+    const detail =
+      name && statusEvent.error
+        ? `${name} — ${statusEvent.error}`
+        : (name ?? statusEvent.error ?? undefined);
+    notifications.error(title, detail);
   }
 
   const windowFocused = typeof document !== "undefined" && document.hasFocus();

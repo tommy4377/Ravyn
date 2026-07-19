@@ -7,6 +7,7 @@
    */
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize } from "@tauri-apps/api/dpi";
+  import ravynMark from "../../assets/ravyn-mark.svg";
   import { RavynClient } from "../api/client";
   import { RavynEventClient } from "../api/events.svelte";
   import type { Job, ProgressEvent, RavynEvent } from "../api/types";
@@ -135,7 +136,7 @@
 <div class="compact" role="main">
   <div class="titlebar" data-tauri-drag-region>
     <div class="brand">
-      <span class="mark"><Icon name="download" size={12} /></span>
+      <img class="mark" src={ravynMark} alt="" aria-hidden="true" />
       <span class="title">
         {#if activeJobs.length > 1}
           {activeJobs.length} downloads · {formatSpeed(totalSpeed)}
@@ -240,14 +241,14 @@
     min-width: 0;
   }
   .mark {
-    display: grid;
-    place-items: center;
+    /* Same brand asset as the main window's navigation chrome — the compact
+       window has no native title bar or taskbar presence, so this is its
+       only app-icon surface. */
     width: 18px;
     height: 18px;
     flex: none;
     border-radius: 5px;
-    background: var(--accent-default, #4cc2ff);
-    color: #08111a;
+    object-fit: contain;
   }
   .title {
     overflow: hidden;

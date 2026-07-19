@@ -1,6 +1,8 @@
 import {
   NATIVE_HOST_NAME,
+  NATIVE_PROTOCOL_MIN,
   NATIVE_PROTOCOL_VERSION,
+  protocolCompatible,
   type ConnectionStatus,
   type NativeCapabilities,
   type NativeCommand,
@@ -125,6 +127,22 @@ export class NativeClient {
     try {
       const capabilities =
         await this.request<NativeCapabilities>("get_capabilities");
+      // A host outside our protocol window must fail loudly here — its
+      // events would otherwise be dropped silently by isNativeEvent and the
+      // extension would just look broken.
+      if (!protocolCompatible(capabilities)) {
+        this.setStatus({
+          hostAvailable: true,
+          backendConnected: false,
+          capabilities,
+          error: {
+            code: "PROTOCOL_MISMATCH",
+            message: `Ravyn speaks native protocol ${capabilities.protocolVersion} but this extension supports ${NATIVE_PROTOCOL_MIN}–${NATIVE_PROTOCOL_VERSION}. Update Ravyn or the extension.`,
+            retryable: false,
+          },
+        });
+        return this.statusValue;
+      }
       this.setStatus({
         hostAvailable: true,
         backendConnected: capabilities.backendConnected,
@@ -276,9 +294,15 @@ function isNativeResponse(value: unknown): value is NativeResponse {
 function isNativeEvent(value: unknown): value is NativeEvent {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  const version = record.protocolVersion;
+  // Accept the negotiated window rather than one exact version; an
+  // out-of-window host is surfaced as PROTOCOL_MISMATCH by refreshStatus,
+  // so dropping its events here is a backstop, not the user-facing signal.
   return (
     record.type === "event" &&
     typeof record.event === "string" &&
-    record.protocolVersion === NATIVE_PROTOCOL_VERSION
+    typeof version === "number" &&
+    version >= NATIVE_PROTOCOL_MIN &&
+    version <= NATIVE_PROTOCOL_VERSION
   );
 }

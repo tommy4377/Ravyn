@@ -17,6 +17,12 @@ const ACTION_FILE: &str = "browser-action.json";
 pub struct BrowserIntegrationStatus {
     pub supported: bool,
     pub registered: bool,
+    /// A registration exists but Firefox would spawn a missing executable
+    /// (or, in installed mode, a different one than the running app) — the
+    /// stale-after-update state that silently breaks the extension.
+    pub stale: bool,
+    /// Executable path the registered manifest currently points at.
+    pub registered_executable: Option<String>,
     pub host_name: String,
     pub extension_id: String,
     pub manifest_path: Option<String>,
@@ -195,12 +201,27 @@ pub fn status() -> BrowserIntegrationStatus {
     let executable = std::env::current_exe().ok();
     let manifest = manifest_path();
     let installed_mode = crate::installation::current_executable_is_installed();
+    let registered_target = registered_manifest_target();
+    // A registration whose target executable no longer exists is broken for
+    // every Ravyn; a target that differs from the running executable is only
+    // wrong when the running executable is the installed one (a portable
+    // copy running next to a healthy installed registration is fine).
+    let stale = registered_target.as_ref().is_some_and(|target| {
+        !target.is_file()
+            || (installed_mode
+                && executable
+                    .as_ref()
+                    .is_some_and(|exe| !same_path(target, exe)))
+    });
+    let registered_executable = registered_target.map(|path| path.display().to_string());
     match (&manifest, &executable) {
         (Some(manifest), Some(executable)) => {
             let registered = registration_matches(manifest, executable).unwrap_or(false);
             BrowserIntegrationStatus {
                 supported: true,
                 registered,
+                stale,
+                registered_executable,
                 host_name: HOST_NAME.into(),
                 extension_id: EXTENSION_ID.into(),
                 manifest_path: Some(manifest.display().to_string()),
@@ -212,6 +233,8 @@ pub fn status() -> BrowserIntegrationStatus {
         _ => BrowserIntegrationStatus {
             supported: false,
             registered: false,
+            stale,
+            registered_executable,
             host_name: HOST_NAME.into(),
             extension_id: EXTENSION_ID.into(),
             manifest_path: manifest.map(|path| path.display().to_string()),
@@ -222,6 +245,37 @@ pub fn status() -> BrowserIntegrationStatus {
             ),
         },
     }
+}
+
+/// The executable path Firefox would actually spawn: resolved through the
+/// registered manifest location (the registry on Windows), not the path this
+/// build would register — after an update or a moved install the two differ.
+fn registered_manifest_target() -> Option<PathBuf> {
+    let manifest = registered_manifest_path()?;
+    let bytes = std::fs::read(manifest).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn registered_manifest_path() -> Option<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(format!(
+            r"Software\Mozilla\NativeMessagingHosts\{HOST_NAME}"
+        ))
+        .ok()?;
+    let value: String = key.get_value("").ok()?;
+    Some(PathBuf::from(value))
+}
+
+#[cfg(not(windows))]
+fn registered_manifest_path() -> Option<PathBuf> {
+    manifest_path().filter(|path| path.is_file())
 }
 
 pub fn repair_for_current_executable() -> Result<BrowserIntegrationStatus, String> {
@@ -336,7 +390,7 @@ fn registration_matches(manifest: &Path, executable: &Path) -> Result<bool, Stri
     Ok(body_matches && registration_location_matches(manifest)?)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => left

@@ -7,6 +7,11 @@ import { toExtensionError } from "../../shared/errors";
 import { logger } from "../../shared/logger";
 import { loadSettings } from "../../shared/settings";
 import { normalizeUrl } from "../../shared/urls";
+import {
+  downloadLabel,
+  trackBatchResult,
+  trackDownload,
+} from "../downloads/completion";
 import { notify } from "../notifications";
 import type { NativeClient } from "../native/client";
 import type { ResourceCache } from "../network/cache";
@@ -207,7 +212,14 @@ async function create(
 ): Promise<void> {
   const normalized = normalizeUrl(payload.url);
   if (!normalized) return;
-  await native.request("create_download", { ...payload, url: normalized });
+  const job = await native.request<{ id?: string }>("create_download", {
+    ...payload,
+    url: normalized,
+  });
+  void trackDownload(
+    job?.id,
+    downloadLabel({ url: normalized, filename: payload.filename }),
+  );
 }
 
 async function sendSelectionUrls(
@@ -219,7 +231,9 @@ async function sendSelectionUrls(
     url,
     sourceContext,
   }));
-  if (downloads.length) await native.request("create_batch", { downloads });
+  if (!downloads.length) return;
+  const result = await native.request("create_batch", { downloads });
+  trackBatchResult(result, downloads);
 }
 
 async function scanTab(

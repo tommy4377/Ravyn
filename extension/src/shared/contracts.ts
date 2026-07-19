@@ -1,6 +1,23 @@
 export const NATIVE_HOST_NAME = "com.ravyn.download_manager";
 export const EXTENSION_ID = "firefox-extension@ravyn.app";
 export const NATIVE_PROTOCOL_VERSION = 1 as const;
+/** Oldest host protocol this extension still understands. */
+export const NATIVE_PROTOCOL_MIN = 1 as const;
+
+/**
+ * Whether the host's advertised protocol window overlaps ours. The extension
+ * and the desktop application update on independent cadences, so an
+ * out-of-window host must surface an explicit "update required" state
+ * instead of silently dropping traffic.
+ */
+export function protocolCompatible(capabilities: {
+  protocolVersion: number;
+  minProtocolVersion?: number;
+}): boolean {
+  const hostMax = capabilities.protocolVersion;
+  const hostMin = capabilities.minProtocolVersion ?? hostMax;
+  return hostMin <= NATIVE_PROTOCOL_VERSION && NATIVE_PROTOCOL_MIN <= hostMax;
+}
 export const MAX_RESOURCE_BATCH = 1_000;
 export const MAX_RESOURCES_PER_TAB = 2_000;
 export const RESOURCE_MAX_AGE_MS = 30 * 60 * 1_000;
@@ -54,13 +71,16 @@ export interface NativeResponse<T = unknown> {
 
 export interface NativeEvent {
   type: "event";
-  protocolVersion: typeof NATIVE_PROTOCOL_VERSION;
+  /** Host protocol version; any value inside the negotiated window is accepted. */
+  protocolVersion: number;
   event: string;
   payload: unknown;
 }
 
 export interface NativeCapabilities {
   protocolVersion: number;
+  /** Oldest protocol the host accepts; absent on hosts predating negotiation. */
+  minProtocolVersion?: number;
   hostVersion: string;
   backendConnected: boolean;
   features: string[];
