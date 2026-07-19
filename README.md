@@ -28,8 +28,10 @@ cargo build -p ravyn-desktop
 target/debug/ravyn-desktop.exe
 ```
 
-On Windows 10 and 11, the main and setup windows use a real compositor acrylic
-backdrop, with the wallpaper-based material retained as a fallback. See
+On Windows 11 22H2 and later, the main and setup windows use the real
+compositor acrylic backdrop. Windows 10 and earlier Windows 11 builds have no
+stable compositor backdrop, so the windows stay opaque there and Ravyn renders
+an equivalent wallpaper-based material itself. See
 [`docs/WINDOWS_BACKDROP.md`](docs/WINDOWS_BACKDROP.md) for the rendering and
 compatibility details.
 

@@ -9,12 +9,18 @@ const WALLPAPER_POLL_INTERVAL = 20_000;
 
 class SystemAppearanceStore {
   supported = $state(false);
+  nativeBackdrop = $state(false);
   wallpaperAvailable = $state(false);
   wallpaperPosition = $state<DesktopAppearance["wallpaper_position"]>("fill");
   accentColor = $state<string | null>(null);
   transparencyEnabled = $state(true);
   lastError = $state<string | null>(null);
   refreshing = $state(false);
+  /**
+   * Set when the rendered page does not cover the native client area — the
+   * WebView2 DPI/bounds handshake failed and the layout will look offset.
+   */
+  viewportMismatch = $state<string | null>(null);
 
   private initialized = false;
   private moveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -39,7 +45,10 @@ class SystemAppearanceStore {
         this.scheduleGeometryRefresh();
       }),
       currentWindow.onResized(() => this.scheduleGeometryRefresh()),
-      currentWindow.onScaleChanged(() => this.scheduleGeometryRefresh()),
+      // A DPI change invalidates the cached scale factor that every
+      // subsequent onMoved conversion uses — refresh immediately instead of
+      // letting moves be mis-scaled for the debounce window.
+      currentWindow.onScaleChanged(() => void this.refresh()),
       currentWindow.onThemeChanged(() => {
         navigation.init();
         this.scheduleGeometryRefresh();
@@ -68,6 +77,30 @@ class SystemAppearanceStore {
     } finally {
       this.refreshing = false;
     }
+    void this.verifyViewport();
+  }
+
+  /**
+   * Invariant: the CSS viewport times devicePixelRatio must equal the native
+   * client size in physical pixels. When it does not, WebView2 is laying out
+   * against stale bounds or a wrong scale factor — the bug that shows up as
+   * an offset layout with exposed backdrop bands. Surface it instead of
+   * letting it masquerade as a visual-effect problem.
+   */
+  private async verifyViewport(): Promise<void> {
+    try {
+      const size = await getCurrentWindow().innerSize();
+      const expectedWidth = Math.round(document.documentElement.clientWidth * window.devicePixelRatio);
+      const expectedHeight = Math.round(document.documentElement.clientHeight * window.devicePixelRatio);
+      const drift = Math.max(Math.abs(size.width - expectedWidth), Math.abs(size.height - expectedHeight));
+      this.viewportMismatch =
+        drift > 2
+          ? `The rendered page (${expectedWidth}×${expectedHeight} px) does not cover the window client area (${size.width}×${size.height} px); the layout may appear offset.`
+          : null;
+      if (this.viewportMismatch) console.warn("Ravyn viewport mismatch:", this.viewportMismatch);
+    } catch {
+      // Geometry introspection is diagnostics only — never fail the refresh.
+    }
   }
 
   private scheduleGeometryRefresh(): void {
@@ -93,7 +126,12 @@ class SystemAppearanceStore {
     this.frameOffsetY = appearance.frame_offset_y;
 
     const root = document.documentElement;
-    const useNativeBackdrop = appearance.supported && appearance.transparency_enabled;
+    // The native compositor backdrop only exists on Windows 11 22H2+; on
+    // Windows 10 the window is opaque and the synthetic wallpaper material
+    // below is the sole backdrop.
+    const useNativeBackdrop =
+      appearance.supported && appearance.native_backdrop && appearance.transparency_enabled;
+    this.nativeBackdrop = useNativeBackdrop;
     root.dataset.nativeBackdrop = useNativeBackdrop ? "true" : "false";
     root.dataset.wallpaperPosition = appearance.wallpaper_position;
     root.dataset.systemBackdrop = appearance.wallpaper_path ? "true" : "false";

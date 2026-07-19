@@ -6,6 +6,7 @@ import { logger } from "../../shared/logger";
 import { notify } from "../notifications";
 import { loadSettings } from "../../shared/settings";
 import { domainMatches } from "../../shared/urls";
+import { downloadLabel, trackDownload } from "./completion";
 import { evaluateEligibility, type DownloadCandidate } from "./eligibility";
 import type { BypassRegistry } from "./bypass";
 import type { DelegationRegistry } from "./delegation";
@@ -177,6 +178,7 @@ export class DownloadInterceptor {
         payload,
       );
       await this.delegated.remember(item.url, result.id);
+      await trackDownload(result.id, downloadLabel(payload));
       handedOff = true;
       await browser.downloads.cancel(item.id);
       await browser.downloads.removeFile(item.id).catch(() => undefined);

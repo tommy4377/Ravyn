@@ -151,6 +151,10 @@ export function installAppUpdateNow(): Promise<void> {
 export interface BrowserIntegrationStatus {
   supported: boolean;
   registered: boolean;
+  /** A registration exists but points at a missing or outdated executable. */
+  stale: boolean;
+  /** Executable path the registered manifest currently points at. */
+  registered_executable: string | null;
   host_name: string;
   extension_id: string;
   manifest_path: string | null;
@@ -210,6 +214,8 @@ export type WallpaperPosition = "center" | "tile" | "stretch" | "fit" | "fill" |
 
 export interface DesktopAppearance {
   supported: boolean;
+  /** True when the window carries a native compositor backdrop (Windows 11 22H2+). */
+  native_backdrop: boolean;
   wallpaper_path: string | null;
   wallpaper_revision: string | null;
   wallpaper_position: WallpaperPosition;

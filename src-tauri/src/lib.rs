@@ -554,15 +554,30 @@ fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWi
             .maximizable(false)
             .center();
     #[cfg(target_os = "windows")]
-    let builder = builder.transparent(true).effects(
+    let builder = with_native_backdrop(builder);
+    builder.build()
+}
+
+/// Applies the compositor acrylic backdrop on Windows 11 22H2+. Older builds
+/// (all of Windows 10, early Windows 11) only have the undocumented
+/// accent-policy blur, which stutters and trails during window moves and
+/// bleeds through any client area the page does not cover — those stay
+/// opaque and the webview draws the synthetic material instead.
+#[cfg(target_os = "windows")]
+fn with_native_backdrop(
+    builder: tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle>,
+) -> tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle> {
+    if !crate::appearance::native_backdrop_supported() {
+        return builder;
+    }
+    builder.transparent(true).effects(
         tauri::window::EffectsBuilder::new()
             .effect(tauri::window::Effect::Acrylic)
             // The web layer owns the theme tint. A nearly transparent native
-            // color keeps Windows 10 acrylic active without double-tinting it.
+            // color keeps the acrylic active without double-tinting it.
             .color(tauri::window::Color(0, 0, 0, 1))
             .build(),
-    );
-    builder.build()
+    )
 }
 
 fn create_main_window(
@@ -577,14 +592,7 @@ fn create_main_window(
             .visible(visible)
             .center();
     #[cfg(target_os = "windows")]
-    let builder = builder.transparent(true).effects(
-        tauri::window::EffectsBuilder::new()
-            .effect(tauri::window::Effect::Acrylic)
-            // The web layer owns the theme tint. A nearly transparent native
-            // color keeps Windows 10 acrylic active without double-tinting it.
-            .color(tauri::window::Color(0, 0, 0, 1))
-            .build(),
-    );
+    let builder = with_native_backdrop(builder);
     builder.build()
 }
 
@@ -697,6 +705,19 @@ pub fn run() {
                 tauri::async_runtime::spawn_blocking(|| {
                     if let Err(error) = crate::browser_integration::repair_for_current_executable() {
                         tracing::warn!(%error, "failed to repair Firefox browser integration at startup");
+                    }
+                });
+            } else {
+                // A portable/dev executable never rewrites the registration
+                // (least privilege), but a stale one — pointing at an
+                // executable that no longer exists — must not fail silently.
+                tauri::async_runtime::spawn_blocking(|| {
+                    let status = crate::browser_integration::status();
+                    if status.stale {
+                        tracing::warn!(
+                            registered = ?status.registered_executable,
+                            "Firefox integration points at a missing Ravyn executable; run the installed Ravyn or repair it from Settings"
+                        );
                     }
                 });
             }

@@ -1,9 +1,12 @@
-//! Windows appearance bridge for the synthetic Fluent backdrop.
+//! Windows appearance bridge for the Fluent backdrop.
 //!
-//! Ravyn deliberately renders its material in the webview so the visual result
-//! stays consistent on Windows 10 and Windows 11. This module supplies the
-//! current desktop wallpaper, positioning metadata, window/monitor geometry,
-//! and the Windows accent color without applying native Mica or Acrylic.
+//! On Windows 11 22H2+ the shell windows use the compositor-owned acrylic
+//! backdrop and this module only supplies accent/transparency metadata. On
+//! Windows 10 (and pre-22H2 Windows 11) no compositor backdrop exists — the
+//! only native option is the undocumented accent-policy blur, which stutters
+//! and trails while the window moves — so the windows stay opaque and the
+//! webview renders a synthetic material instead, positioned from the desktop
+//! wallpaper, window/monitor geometry, and accent color provided here.
 
 use serde::Serialize;
 use tauri::Manager;
@@ -11,6 +14,9 @@ use tauri::Manager;
 #[derive(Debug, Clone, Serialize)]
 pub struct DesktopAppearance {
     pub supported: bool,
+    /// Whether the window actually carries a native compositor backdrop.
+    /// False on Windows 10, where the webview must draw the material itself.
+    pub native_backdrop: bool,
     pub wallpaper_path: Option<String>,
     pub wallpaper_revision: Option<String>,
     pub wallpaper_position: String,
@@ -25,6 +31,49 @@ pub struct DesktopAppearance {
     pub scale_factor: f64,
     pub accent_color: Option<String>,
     pub transparency_enabled: bool,
+}
+
+/// First build with the documented compositor backdrop
+/// (`DWMWA_SYSTEMBACKDROP_TYPE`, Windows 11 22H2). Everything older — all of
+/// Windows 10 and early Windows 11 — only offers the undocumented
+/// accent-policy blur, which desynchronizes from the window during move and
+/// resize operations.
+const FIRST_COMPOSITOR_BACKDROP_BUILD: u32 = 22_621;
+
+/// Whether this Windows build supports a compositor-owned window backdrop
+/// that stays glitch-free while the window is dragged.
+pub fn native_backdrop_supported() -> bool {
+    has_compositor_backdrop(windows_build_number())
+}
+
+fn has_compositor_backdrop(build: u32) -> bool {
+    build >= FIRST_COMPOSITOR_BACKDROP_BUILD
+}
+
+#[cfg(target_os = "windows")]
+fn windows_build_number() -> u32 {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BUILD.get_or_init(|| {
+        RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+            .ok()
+            .and_then(|key| {
+                key.get_value::<String, _>("CurrentBuild")
+                    .or_else(|_| key.get_value::<String, _>("CurrentBuildNumber"))
+                    .ok()
+            })
+            .and_then(|value| value.trim().parse().ok())
+            // An unreadable build number falls back to the synthetic backdrop,
+            // which works everywhere.
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_build_number() -> u32 {
+    0
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,6 +253,7 @@ fn platform_appearance(
     let scale = scale_factor.max(0.5);
     Ok(DesktopAppearance {
         supported: true,
+        native_backdrop: native_backdrop_supported(),
         wallpaper_path,
         wallpaper_revision,
         wallpaper_position: wallpaper_position.to_owned(),
@@ -308,6 +358,7 @@ fn platform_appearance(
     let scale = scale_factor.max(0.5);
     Ok(DesktopAppearance {
         supported: false,
+        native_backdrop: false,
         wallpaper_path: None,
         wallpaper_revision: None,
         wallpaper_position: "fill".to_owned(),
@@ -328,6 +379,15 @@ fn platform_appearance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compositor_backdrop_requires_windows_11_22h2() {
+        assert!(!has_compositor_backdrop(0)); // unreadable build number
+        assert!(!has_compositor_backdrop(19_045)); // Windows 10 22H2
+        assert!(!has_compositor_backdrop(22_000)); // Windows 11 21H2 (accent acrylic)
+        assert!(has_compositor_backdrop(22_621)); // Windows 11 22H2
+        assert!(has_compositor_backdrop(26_100)); // Windows 11 24H2
+    }
 
     #[test]
     fn virtual_desktop_supports_negative_monitor_coordinates() {

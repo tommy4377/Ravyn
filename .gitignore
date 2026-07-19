@@ -24,6 +24,7 @@ desktop.ini
 *.key
 
 # Tool configs (local overrides)
+.mcp.json
 .serena/project.local.yml
 .codex/
 

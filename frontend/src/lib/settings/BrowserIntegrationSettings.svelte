@@ -92,6 +92,8 @@
         <h3>Native messaging host</h3>
         {#if loading}
           <StatusBadge label="Checking" severity="info" spinning />
+        {:else if status?.stale}
+          <StatusBadge label="Stale registration" severity="warning" icon="alert-circle" />
         {:else if status?.registered}
           <StatusBadge label="Registered" severity="success" icon="check-circle" />
         {:else}
@@ -99,6 +101,11 @@
         {/if}
       </div>
       <p>Firefox starts a short-lived Ravyn process that accepts only validated download, media, rule, and job-control commands.</p>
+      {#if status?.stale}
+        <p class="warning">
+          Firefox is configured to start <code>{status.registered_executable ?? "an unknown executable"}</code>, which is missing or outdated — the extension cannot connect until the registration is repaired{status.installed_mode ? "" : " from an installed Ravyn"}.
+        </p>
+      {/if}
     </div>
     <div class="actions">
       <Button disabled={loading || busy || !status?.installed_mode} onclick={() => void repair()}>

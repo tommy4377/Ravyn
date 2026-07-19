@@ -20,6 +20,14 @@ import {
   validateDownloadPayload,
 } from "../shared/validation";
 import { BypassRegistry } from "./downloads/bypass";
+import {
+  clearTrackedDownloads,
+  downloadLabel,
+  handleCompletionEvent,
+  reconcileCompletions,
+  trackBatchResult,
+  trackDownload,
+} from "./downloads/completion";
 import { DelegationRegistry } from "./downloads/delegation";
 import { DownloadInterceptor } from "./downloads/interceptor";
 import { registerMenuHandlers } from "./menus/handlers";
@@ -58,7 +66,18 @@ async function initialize(): Promise<void> {
     // than the old request-refresh stub), so this fires the moment a rule
     // actually changes instead of waiting out the 10-minute cache TTL.
     if (event.event === "rule_changed") rules.invalidate();
+    void handleCompletionEvent(event);
     void broadcast({ type: "ravyn-native-event", event });
+  });
+  // The event stream has no replay: completions that happened while the
+  // port was down (event-page suspension, backend restart) are only
+  // recoverable by re-checking the tracked jobs once the backend is back.
+  let backendWasConnected = false;
+  native.subscribeStatus((status) => {
+    if (status.backendConnected && !backendWasConnected) {
+      void reconcileCompletions(native);
+    }
+    backendWasConnected = status.backendConnected;
   });
   void native.connect().catch(() => undefined);
   browser.tabs.onRemoved.addListener((tabId) => resources.clear(tabId));
@@ -95,22 +114,28 @@ async function handleMessage(
   switch (request.type) {
     case "connection-status":
       return native.refreshStatus();
-    case "download-url":
-      return native.request(
-        "create_download",
-        await enrichDownload(
-          validateDownloadPayload(request.payload),
-          sender.tab,
-        ),
+    case "download-url": {
+      const payload = await enrichDownload(
+        validateDownloadPayload(request.payload),
+        sender.tab,
       );
+      const job = await native.request<{ id?: string }>(
+        "create_download",
+        payload,
+      );
+      void trackDownload(job?.id, downloadLabel(payload));
+      return job;
+    }
     case "download-batch": {
       const batch = validateBatchPayload(request.payload);
       const downloads = await Promise.all(
         batch.downloads.map((download) => enrichDownload(download, sender.tab)),
       );
-      return native.request("create_batch", {
+      const result = await native.request("create_batch", {
         downloads,
       } satisfies CreateBatchPayload);
+      trackBatchResult(result, downloads);
+      return result;
     }
     case "probe-media":
       return native.request(
@@ -186,6 +211,7 @@ async function handleMessage(
       );
     case "clear-extension-data":
       await clearExtensionData();
+      await clearTrackedDownloads();
       resources.clearAll();
       await removeOptionalPermissions();
       return loadSettings();
@@ -236,18 +262,24 @@ async function downloadMediaElement(
               resource.type === "audio",
           ));
   if (direct) {
-    return native.request(
-      "create_download",
-      await enrichDownload(
-        {
-          url: direct.url,
-          kind: direct.type === "manifest" ? "media" : "http",
-          referer: pageUrl,
-          sourceContext,
-        },
-        tab,
-      ),
+    const payload = await enrichDownload(
+      {
+        url: direct.url,
+        kind: direct.type === "manifest" ? "media" : "http",
+        referer: pageUrl,
+        sourceContext,
+      },
+      tab,
     );
+    const job = await native.request<{ id?: string }>(
+      "create_download",
+      payload,
+    );
+    void trackDownload(
+      job?.id,
+      downloadLabel({ url: direct.url, filename: direct.filename }),
+    );
+    return job;
   }
   // No direct media URL was found on the element — the common case is a
   // JS-driven player (YouTube and effectively every site with custom
@@ -257,7 +289,7 @@ async function downloadMediaElement(
   // to call probe_media instead — which only returns format metadata and
   // never creates a job — so the overlay button showed a success checkmark
   // on every such click while nothing was ever actually queued.
-  return native.request(
+  const job = await native.request<{ id?: string }>(
     "create_download",
     await enrichDownload(
       {
@@ -268,6 +300,11 @@ async function downloadMediaElement(
       tab,
     ),
   );
+  void trackDownload(
+    job?.id,
+    sourceContext.pageTitle ?? downloadLabel({ url: pageUrl }),
+  );
+  return job;
 }
 
 async function enrichDownload(
@@ -376,7 +413,7 @@ async function activeTab(): Promise<browser.tabs.Tab | undefined> {
 async function downloadCurrentPage(): Promise<void> {
   const tab = await activeTab();
   if (!tab?.url) return;
-  await native.request("create_download", {
+  const job = await native.request<{ id?: string }>("create_download", {
     url: tab.url,
     kind: "media",
     sourceContext: {
@@ -388,6 +425,7 @@ async function downloadCurrentPage(): Promise<void> {
       tabId: tab.id,
     },
   });
+  void trackDownload(job?.id, tab.title ?? downloadLabel({ url: tab.url }));
 }
 
 async function updateBadge(tabId: number): Promise<void> {

@@ -14,6 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u32 = 1;
+/// Oldest extension protocol this host still accepts. The extension and the
+/// desktop application update on independent cadences (AMO vs. the app
+/// updater), so version skew is a normal condition — requests inside the
+/// window are served, requests outside fail with an explicit
+/// `PROTOCOL_MISMATCH` naming the supported range.
+const MIN_PROTOCOL_VERSION: u32 = 1;
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
 const MAX_BATCH_ITEMS: usize = 1_000;
 const MAX_COOKIES: usize = 500;
@@ -216,11 +222,14 @@ fn handle_request(client: &reqwest::blocking::Client, request: NativeRequest) ->
             false,
         );
     }
-    if request.protocol_version != PROTOCOL_VERSION {
+    if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&request.protocol_version) {
         return NativeResponse::error(
             &request.id,
             "PROTOCOL_MISMATCH",
-            "the extension and native host use incompatible protocol versions",
+            &format!(
+                "the extension speaks native protocol {} but this Ravyn supports {}–{}; update Ravyn or the extension",
+                request.protocol_version, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION
+            ),
             false,
         );
     }
@@ -283,6 +292,7 @@ fn get_capabilities(client: &reqwest::blocking::Client) -> Result<Value, HostErr
     let backend_connected = load_live_descriptor(client).is_ok();
     Ok(json!({
         "protocolVersion": PROTOCOL_VERSION,
+        "minProtocolVersion": MIN_PROTOCOL_VERSION,
         "hostVersion": env!("CARGO_PKG_VERSION"),
         "backendConnected": backend_connected,
         "features": [
@@ -976,9 +986,13 @@ fn load_live_descriptor(
             true,
         )
     })?;
+    // Path comparison (not string equality): the descriptor is written by the
+    // desktop process and read by the Firefox-spawned host, whose environments
+    // can express the same directory with different casing or separators — a
+    // mismatch here used to brick the bridge until the file was deleted.
     if descriptor.schema != 1
         || descriptor.api_token.len() < 20
-        || descriptor.data_dir != data_dir.display().to_string()
+        || !crate::browser_integration::same_path(Path::new(&descriptor.data_dir), &data_dir)
     {
         return Err(HostError::new(
             "BACKEND_DESCRIPTOR_INVALID",
@@ -1466,5 +1480,39 @@ mod tests {
         );
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "UNKNOWN_COMMAND");
+    }
+
+    #[test]
+    fn protocol_versions_outside_the_supported_window_are_rejected() {
+        let client = reqwest::blocking::Client::new();
+        for version in [MIN_PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1] {
+            let response = handle_request(
+                &client,
+                NativeRequest {
+                    id: "request-proto".into(),
+                    protocol_version: version,
+                    command: "ping".into(),
+                    payload: json!({}),
+                },
+            );
+            assert!(!response.ok);
+            let error = response.error.unwrap();
+            assert_eq!(error.code, "PROTOCOL_MISMATCH");
+            assert!(
+                error
+                    .message
+                    .contains(&format!("{MIN_PROTOCOL_VERSION}\u{2013}{PROTOCOL_VERSION}"))
+            );
+        }
+        let response = handle_request(
+            &client,
+            NativeRequest {
+                id: "request-proto-ok".into(),
+                protocol_version: PROTOCOL_VERSION,
+                command: "ping".into(),
+                payload: json!({}),
+            },
+        );
+        assert!(response.ok);
     }
 }
