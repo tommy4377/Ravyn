@@ -115,6 +115,9 @@ const CAPABILITY_PROCESS_LIMITS: crate::services::process::ProcessLimits =
         cpu_time: std::time::Duration::from_secs(10),
         memory_bytes: 512 * 1024 * 1024,
         output_file_bytes: None,
+        output_tree_bytes: None,
+        output_tree_files: None,
+        output_tree_depth: None,
         stdout_bytes: 64 * 1024,
         stderr_bytes: 64 * 1024,
     };

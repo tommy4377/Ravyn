@@ -7,10 +7,7 @@ use uuid::Uuid;
 use crate::{
     core::{
         events::Event,
-        models::{
-            CreateJob, DuplicatePolicy, Job, JobKind, JobStatus, OutputSourceKind, OutputType,
-            UpdateJob,
-        },
+        models::{CreateJob, DuplicatePolicy, Job, JobKind, JobStatus, UpdateJob},
     },
     error::{RavynError, Result},
     services::{
@@ -20,7 +17,6 @@ use crate::{
         rules::{self},
         security,
     },
-    storage::NewLibraryEntry,
 };
 
 use crate::core::manager::{JobManager, validate_tags, validate_torrent_options};

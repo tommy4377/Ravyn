@@ -30,7 +30,7 @@ pub(super) fn start_event_stream(client: &reqwest::blocking::Client) {
     std::thread::spawn(move || {
         let event_client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(4))
-            .read_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
             .user_agent(format!("Ravyn-Native-Events/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or(fallback_client);
@@ -185,8 +185,6 @@ fn forward_event(event_name: Option<&str>, event_id: Option<&str>, payload: &str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn accepts_only_numeric_sse_cursors() {
         assert!("42".parse::<u64>().is_ok());

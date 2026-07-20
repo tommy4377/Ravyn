@@ -195,10 +195,10 @@
           "markdownDescription": "Enables the backend_info command without any pre-configured scope."
         },
         {
-          "description": "Allows the main Ravyn window to inspect the Firefox native-messaging registration.",
+          "description": "Enables the browser_integration_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-browser-integration-status",
-          "markdownDescription": "Allows the main Ravyn window to inspect the Firefox native-messaging registration."
+          "markdownDescription": "Enables the browser_integration_status command without any pre-configured scope."
         },
         {
           "description": "Enables the cancel_app_update command without any pre-configured scope.",
@@ -267,10 +267,10 @@
           "markdownDescription": "Enables the prompt_torrent_default_app command without any pre-configured scope."
         },
         {
-          "description": "Allows the main Ravyn window to remove the current-user Firefox native-messaging registration.",
+          "description": "Enables the remove_browser_integration command without any pre-configured scope.",
           "type": "string",
           "const": "allow-remove-browser-integration",
-          "markdownDescription": "Allows the main Ravyn window to remove the current-user Firefox native-messaging registration."
+          "markdownDescription": "Enables the remove_browser_integration command without any pre-configured scope."
         },
         {
           "description": "Enables the repair_application command without any pre-configured scope.",
@@ -279,10 +279,10 @@
           "markdownDescription": "Enables the repair_application command without any pre-configured scope."
         },
         {
-          "description": "Allows the main Ravyn window to repair the current-user Firefox native-messaging registration.",
+          "description": "Enables the repair_browser_integration command without any pre-configured scope.",
           "type": "string",
           "const": "allow-repair-browser-integration",
-          "markdownDescription": "Allows the main Ravyn window to repair the current-user Firefox native-messaging registration."
+          "markdownDescription": "Enables the repair_browser_integration command without any pre-configured scope."
         },
         {
           "description": "Enables the restart_application command without any pre-configured scope.",
@@ -303,10 +303,10 @@
           "markdownDescription": "Enables the setup_installation_info command without any pre-configured scope."
         },
         {
-          "description": "Allows the main Ravyn window to consume a pending action delivered by the Firefox extension.",
+          "description": "Enables the take_browser_action command without any pre-configured scope.",
           "type": "string",
           "const": "allow-take-browser-action",
-          "markdownDescription": "Allows the main Ravyn window to consume a pending action delivered by the Firefox extension."
+          "markdownDescription": "Enables the take_browser_action command without any pre-configured scope."
         },
         {
           "description": "Denies the app_update_status command without any pre-configured scope.",
@@ -325,6 +325,12 @@
           "type": "string",
           "const": "deny-backend-info",
           "markdownDescription": "Denies the backend_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_integration_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browser-integration-status",
+          "markdownDescription": "Denies the browser_integration_status command without any pre-configured scope."
         },
         {
           "description": "Denies the cancel_app_update command without any pre-configured scope.",
@@ -393,10 +399,22 @@
           "markdownDescription": "Denies the prompt_torrent_default_app command without any pre-configured scope."
         },
         {
+          "description": "Denies the remove_browser_integration command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-browser-integration",
+          "markdownDescription": "Denies the remove_browser_integration command without any pre-configured scope."
+        },
+        {
           "description": "Denies the repair_application command without any pre-configured scope.",
           "type": "string",
           "const": "deny-repair-application",
           "markdownDescription": "Denies the repair_application command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the repair_browser_integration command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-repair-browser-integration",
+          "markdownDescription": "Denies the repair_browser_integration command without any pre-configured scope."
         },
         {
           "description": "Denies the restart_application command without any pre-configured scope.",
@@ -415,6 +433,12 @@
           "type": "string",
           "const": "deny-setup-installation-info",
           "markdownDescription": "Denies the setup_installation_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the take_browser_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-take-browser-action",
+          "markdownDescription": "Denies the take_browser_action command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

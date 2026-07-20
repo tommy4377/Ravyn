@@ -30,14 +30,15 @@ use crate::error::{ProvisioningErrorCode, RavynError, Result};
 mod support;
 
 pub use support::{
-    current_target, effective_feature_set, features_from_stored_json,
+    PersistedComponent, current_target, effective_feature_set, features_from_stored_json,
     required_components_for_features, resolve_profile_features,
 };
 use support::{
-    component_config_path, executable_resolves, ffmpeg_capability_check, minimal_test_archive,
-    rqbit_api_health, rqbit_endpoint_matches, seven_zip_capability_check, version_cmp,
-    ytdlp_capability_check,
+    component_config_path, executable_resolves, ffmpeg_capability_check, rqbit_api_health,
+    seven_zip_capability_check, version_cmp, ytdlp_capability_check,
 };
+#[cfg(test)]
+use support::{minimal_test_archive, rqbit_endpoint_matches};
 
 // ---------------------------------------------------------------------------
 // Feature and component identifiers
@@ -1170,6 +1171,9 @@ impl ComponentManager {
             cpu_time: std::time::Duration::from_secs(5),
             memory_bytes: 512 * 1024 * 1024,
             output_file_bytes: None,
+            output_tree_bytes: None,
+            output_tree_files: None,
+            output_tree_depth: None,
             stdout_bytes: 64 * 1024,
             stderr_bytes: 64 * 1024,
         };
