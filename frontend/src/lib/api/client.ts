@@ -38,6 +38,7 @@ import type {
   JobLogRecord,
   JobOutput,
   JobPage,
+  JobSummary,
   HostProfile,
   LibraryEntry,
   LibraryImportRequest,
@@ -208,6 +209,10 @@ export class RavynClient {
 
   listJobs(params?: JobListParams, signal?: AbortSignal): Promise<JobPage> {
     return this.request("GET", "/v1/jobs", undefined, signal, { ...params });
+  }
+
+  getJobSummary(signal?: AbortSignal): Promise<JobSummary> {
+    return this.request("GET", "/v1/jobs/summary", undefined, signal);
   }
 
   getJob(id: string, signal?: AbortSignal): Promise<Job> {

@@ -159,14 +159,17 @@ def frontend_tauri_commands() -> set[str]:
 
 
 def declared_app_command_permissions() -> dict[str, set[str]]:
-    path = ROOT / "src-tauri/permissions/app-commands.toml"
-    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     permissions: dict[str, set[str]] = {}
-    for permission in parsed.get("permission", []):
-        identifier = permission.get("identifier")
-        allowed = permission.get("commands", {}).get("allow", [])
-        if isinstance(identifier, str):
-            permissions[identifier] = {str(command) for command in allowed}
+    permission_root = ROOT / "src-tauri/permissions"
+    for path in sorted(permission_root.rglob("*.toml")):
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        for permission in parsed.get("permission", []):
+            identifier = permission.get("identifier")
+            allowed = permission.get("commands", {}).get("allow", [])
+            if isinstance(identifier, str):
+                permissions.setdefault(identifier, set()).update(
+                    str(command) for command in allowed
+                )
     return permissions
 
 

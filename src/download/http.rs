@@ -14,8 +14,8 @@ use percent_encoding::percent_decode_str;
 use reqwest::{
     Client, StatusCode,
     header::{
-        AUTHORIZATION, CONTENT_RANGE, COOKIE, HeaderMap, HeaderName, HeaderValue, IF_RANGE, RANGE,
-        REFERER, RETRY_AFTER, USER_AGENT,
+        AUTHORIZATION, CONTENT_RANGE, COOKIE, HeaderMap, HeaderName, HeaderValue, IF_RANGE,
+        PROXY_AUTHORIZATION, RANGE, REFERER, RETRY_AFTER, USER_AGENT,
     },
 };
 use sha2::{Digest, Sha256};
@@ -30,7 +30,7 @@ use crate::{
     config::Config,
     core::{
         bandwidth::{FairBandwidthScheduler, FlowClass, FlowConfig},
-        models::{CreateJob, DuplicatePolicy, Job, JobKind, ProgressSnapshot},
+        models::{browser_cookie_header, CreateJob, DuplicatePolicy, Job, JobKind, ProgressSnapshot},
         progress::ProgressPublisher,
         rate_limit::RateLimiters,
     },
@@ -187,6 +187,49 @@ impl HttpAdapter {
         Ok(headers)
     }
 
+    /// Builds request headers for a concrete URL without forwarding credentials
+    /// across origins. Ravyn follows redirects manually, so it must reproduce the
+    /// credential-stripping behavior normally provided by the HTTP client.
+    fn request_headers_for_url(&self, job: &Job, target: &url::Url) -> Result<HeaderMap> {
+        let mut headers = self.request_headers(job)?;
+        let source = url::Url::parse(&job.source)?;
+        if !same_origin(&source, target) {
+            // Custom headers can carry API keys under arbitrary names. Do not
+            // forward any user-provided header to a different origin. Keep only
+            // the explicitly configured User-Agent, which is not a credential.
+            headers.clear();
+            if let Some(user_agent) = job.options_json.user_agent.as_deref() {
+                headers.insert(
+                    USER_AGENT,
+                    HeaderValue::from_str(user_agent).map_err(|error| {
+                        RavynError::Invalid(format!("invalid user agent: {error}"))
+                    })?,
+                );
+            }
+            headers.remove(AUTHORIZATION);
+            headers.remove(PROXY_AUTHORIZATION);
+            headers.remove(COOKIE);
+            headers.remove(REFERER);
+        } else if let Some(browser_cookie) =
+            browser_cookie_header(&job.options_json.browser_cookies, target)
+        {
+            let combined = headers
+                .get(COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .map_or(browser_cookie.clone(), |legacy| {
+                    format!("{legacy}; {browser_cookie}")
+                });
+            headers.insert(
+                COOKIE,
+                HeaderValue::from_str(&combined).map_err(|error| {
+                    RavynError::Invalid(format!("invalid browser cookie value: {error}"))
+                })?,
+            );
+        }
+        Ok(headers)
+    }
+
     async fn apply_post_probe_rules(
         &self,
         job: &Job,
@@ -194,12 +237,16 @@ impl HttpAdapter {
     ) -> Result<Job> {
         let default_destination = self.config.effective_download_dir();
         let current_destination = PathBuf::from(&job.destination);
+        let automatic_destination = job.options_json.library_auto_destination;
         let mut request = CreateJob {
             preset_id: None,
             kind: JobKind::Http,
             source: job.source.clone(),
-            destination: (current_destination != default_destination)
-                .then_some(current_destination),
+            // An automatically selected library destination is not an explicit
+            // user override. Leave the destination open during the MIME-aware
+            // rule pass so a more specific post-probe rule can replace it.
+            destination: (!automatic_destination && current_destination != default_destination)
+                .then_some(current_destination.clone()),
             filename: job.filename.clone(),
             priority: job.priority,
             speed_limit_bps: job
@@ -225,7 +272,10 @@ impl HttpAdapter {
         let destination = request
             .destination
             .clone()
-            .unwrap_or_else(|| default_destination.clone());
+            .unwrap_or_else(|| current_destination.clone());
+        if automatic_destination && request.destination.is_some() {
+            request.options.library_auto_destination = false;
+        }
         security::validate_output_path(&self.config, &destination)?;
         self.repository
             .update_job_routing(
@@ -313,13 +363,50 @@ impl HttpAdapter {
     }
 
     async fn run_job(&self, job: &Job, cancellation: CancellationToken) -> Result<DownloadOutcome> {
-        let initial_headers = self.request_headers(job)?;
+        // A completed transfer may have crashed before the executor verified,
+        // post-processed, and finalized the job. Reuse the durable file instead
+        // of treating it as a conflicting new download or fetching it again.
+        if job.transfer_mode == "complete" {
+            if let Some(filename) = job.filename.as_deref() {
+                let checkpoint = PathBuf::from(&job.destination).join(filename);
+                security::validate_output_path(&self.config, &checkpoint)?;
+                match fs::symlink_metadata(&checkpoint).await {
+                    Ok(metadata)
+                        if metadata.is_file()
+                            && !metadata.file_type().is_symlink()
+                            && job
+                                .total_bytes
+                                .and_then(|value| u64::try_from(value).ok())
+                                .is_none_or(|expected| expected == metadata.len()) =>
+                    {
+                        return Ok(DownloadOutcome {
+                            primary_path: Some(checkpoint.clone()),
+                            files: vec![checkpoint],
+                            artifacts: Vec::new(),
+                            terminal_status: None,
+                            terminal_message: None,
+                        });
+                    }
+                    Ok(_) | Err(_) => {
+                        // The checkpoint is incomplete or no longer exists.
+                        // Reset only the transfer marker; normal remote identity
+                        // reconciliation below will decide whether partial data
+                        // can be resumed safely.
+                        self.repository.set_transfer_mode(job.id, "none").await?;
+                    }
+                }
+            } else {
+                self.repository.set_transfer_mode(job.id, "none").await?;
+            }
+        }
+
         let mut current_url = url::Url::parse(&job.source)?;
         let metadata = {
             let mut resolved = None;
             for _ in 0..=10 {
                 let client = self.client_for_job(job, current_url.as_str()).await?;
-                match probe::probe(&client, current_url.as_str(), &initial_headers).await? {
+                let headers = self.request_headers_for_url(job, &current_url)?;
+                match probe::probe(&client, current_url.as_str(), &headers).await? {
                     probe::ProbeResult::Metadata(metadata) => {
                         resolved = Some(metadata);
                         break;
@@ -346,10 +433,22 @@ impl HttpAdapter {
         }
         fs::create_dir_all(&job.destination).await?;
         let client = self.client_for_job(&job, &metadata.final_url).await?;
-        let headers = self.request_headers(&job)?;
+        let final_url = url::Url::parse(&metadata.final_url)?;
+        let headers = self.request_headers_for_url(&job, &final_url)?;
         let host_limit = self.host_limit(&metadata.final_url).await?;
 
         let mut output = self.destination(&job, &metadata);
+        if job.filename.is_none() {
+            if let Some(resolved_name) = output
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+            {
+                self.repository
+                    .update_job_fields(job.id, None, None, None, Some(&resolved_name), None)
+                    .await?;
+                job.filename = Some(resolved_name);
+            }
+        }
         if fs::try_exists(&output).await? && !job.options_json.overwrite {
             let mut occupied_partial = output.as_os_str().to_os_string();
             occupied_partial.push(".ravyn.part");
@@ -489,7 +588,8 @@ impl HttpAdapter {
                         for _ in 0..=10 {
                             let mirror_client =
                                 self.client_for_job(&job, mirror_url.as_str()).await?;
-                            match probe::probe(&mirror_client, mirror_url.as_str(), &headers)
+                            let mirror_headers = self.request_headers_for_url(&job, &mirror_url)?;
+                            match probe::probe(&mirror_client, mirror_url.as_str(), &mirror_headers)
                                 .await?
                             {
                                 probe::ProbeResult::Metadata(value) => {
@@ -546,6 +646,8 @@ impl HttpAdapter {
                         )));
                     }
                     let mirror_limit = self.host_limit(&mirror_metadata.final_url).await?;
+                    let mirror_final_url = url::Url::parse(&mirror_metadata.final_url)?;
+                    let mirror_headers = self.request_headers_for_url(&job, &mirror_final_url)?;
                     Ok::<_, RavynError>(segmented::SourceContext {
                         client: mirror_client,
                         url: mirror_metadata.final_url,
@@ -553,7 +655,7 @@ impl HttpAdapter {
                         throughput_score: mirror_profile
                             .and_then(|value| value.average_throughput_bps)
                             .unwrap_or(0),
-                        headers: headers.clone(),
+                        headers: mirror_headers,
                         validator: mirror_validator,
                         host_limit: mirror_limit,
                     })
@@ -1106,6 +1208,15 @@ pub fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>
         }
     }
     Ok(())
+}
+
+fn same_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left
+            .host_str()
+            .zip(right.host_str())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 /// Extracts and sanitizes a filename candidate from Content-Disposition.

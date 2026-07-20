@@ -6,10 +6,11 @@
   import { notifications } from "../stores/notifications.svelte";
   import { formatSpeed } from "../util/format";
 
-  const activeCount = $derived(jobsStore.jobsFor("active").length);
-  const total = $derived(jobsStore.list.length);
+  const activeCount = $derived(jobsStore.summary?.active ?? jobsStore.jobsFor("active").length);
+  const total = $derived(jobsStore.summary?.total ?? jobsStore.list.length);
   const totalSpeed = $derived(
-    [...jobsStore.liveProgress.values()].reduce((sum, progress) => sum + Math.max(0, progress.bytesPerSecond), 0),
+    jobsStore.summary?.speed_bps ??
+      [...jobsStore.liveProgress.values()].reduce((sum, progress) => sum + Math.max(0, progress.bytesPerSecond), 0),
   );
 </script>
 
@@ -20,7 +21,7 @@
   </span>
   <span class="divider" aria-hidden="true"></span>
   <span class="item" role="status">
-    {activeCount} active · {total} loaded
+    {activeCount} active · {total} total
     {#if totalSpeed > 0}<span class="speed">· {formatSpeed(totalSpeed)}</span>{/if}
   </span>
   <button type="button" class="notifications" aria-label={notifications.unreadCount ? `Open notifications, ${notifications.unreadCount} unread` : "Open notifications"} onclick={() => navigation.openNotifications()}>

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -81,6 +82,10 @@ pub fn parse_ytdlp_progress_for_fuzzing(line: &str) -> Option<ProgressSnapshot> 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaProbeRequest {
     pub url: String,
+    #[serde(default)]
+    pub cookies: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cookie_header: Option<String>,
     #[serde(default)]
     pub cookies_from_browser: Option<String>,
     #[serde(default)]
@@ -295,7 +300,7 @@ impl MediaAdapter {
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
-        append_probe_network_options(&mut command, request);
+        append_probe_network_options(&mut command, request)?;
 
         let maximum_output = self.config.media_probe_max_mib.saturating_mul(1024 * 1024);
         let limits = process_supervisor::ProcessLimits {

@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
@@ -37,6 +38,17 @@ pub async fn serve(app: Ravyn) -> Result<()> {
 /// Used by the desktop shell to bind an ephemeral loopback port and learn the
 /// effective address before the server starts.
 pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) -> Result<()> {
+    serve_with_listener_shutdown(app, listener, CancellationToken::new()).await
+}
+
+/// Serve the API using an application-owned cancellation token in addition to
+/// operating-system termination signals. Desktop shells use this to drain the
+/// HTTP server and stop background workers before terminating the process.
+pub async fn serve_with_listener_shutdown(
+    app: Ravyn,
+    listener: tokio::net::TcpListener,
+    shutdown: CancellationToken,
+) -> Result<()> {
     if !app.config.listen.ip().is_loopback()
         && (!app.config.allow_remote_api
             || !app.config.remote_api_behind_tls_proxy
@@ -89,15 +101,43 @@ pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) 
         .local_addr()
         .map_err(|e| crate::error::RavynError::Internal(e.to_string()))?;
     tracing::info!(address=%bound,"Ravyn backend listening");
-    axum::serve(
+
+    // Coordinate HTTP draining and worker shutdown from the same edge. Axum
+    // stops accepting new connections immediately while the manager cancels
+    // active work in parallel; the SSE stream observes the manager token and
+    // closes promptly instead of keeping graceful shutdown alive indefinitely.
+    let coordinated_shutdown = CancellationToken::new();
+    let signal = coordinated_shutdown.clone();
+    let signal_task = tokio::spawn(async move {
+        wait_for_shutdown(shutdown).await;
+        signal.cancel();
+    });
+    let manager = app.manager.clone();
+    let manager_shutdown = coordinated_shutdown.clone();
+    let manager_task = tokio::spawn(async move {
+        manager_shutdown.cancelled().await;
+        manager.shutdown().await;
+    });
+
+    let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal(app.manager))
+    .with_graceful_shutdown(coordinated_shutdown.clone().cancelled_owned())
     .await
-    .map_err(|e| crate::error::RavynError::Internal(e.to_string()))
+    .map_err(|e| crate::error::RavynError::Internal(e.to_string()));
+
+    // A listener failure must still stop background workers even when no OS or
+    // desktop shutdown signal was received.
+    coordinated_shutdown.cancel();
+    signal_task.abort();
+    let _ = signal_task.await;
+    if let Err(error) = manager_task.await {
+        tracing::warn!(%error, "backend manager shutdown task ended unexpectedly");
+    }
+    result
 }
-async fn shutdown_signal(manager: Arc<crate::core::manager::JobManager>) {
+async fn wait_for_shutdown(shutdown: CancellationToken) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -113,8 +153,11 @@ async fn shutdown_signal(manager: Arc<crate::core::manager::JobManager>) {
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! {_=ctrl_c=>{},_=terminate=>{}}
-    manager.shutdown().await;
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+        _ = shutdown.cancelled() => {},
+    }
 }
 
 #[derive(Clone)]
@@ -383,17 +426,7 @@ async fn require_token(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            (path == "/v1/events")
-                .then(|| request.uri().query())
-                .flatten()
-                .and_then(|query| {
-                    url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| {
-                        (name == "access_token").then(|| value.into_owned())
-                    })
-                })
-        });
+        .map(ToOwned::to_owned);
     let global_valid = state.global_token.as_deref().is_some_and(|expected| {
         bearer
             .as_deref()

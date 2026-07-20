@@ -1,4 +1,5 @@
 import { describeError } from "../api/errors";
+import { collectAllPages } from "../api/pagination";
 import type {
   BandwidthSchedule,
   CleanupPolicies,
@@ -251,15 +252,19 @@ export class SettingsController {
         connection.client.getSettings(),
         connection.client.listPresets(),
         connection.client.listProfiles(),
-        connection.client.listSecrets({ limit: 100 }),
-        connection.client.listTags({ limit: 250 }).catch(() => null),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listSecrets({ limit, cursor }),
+        ),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listTags({ limit, cursor }),
+        ).catch(() => null),
         connection.client.getCleanupPolicies().catch(() => null),
       ]);
       this.sync(response.values);
       this.presets = presets;
       this.profiles = profiles;
-      this.secrets = secrets.items;
-      this.tags = tags?.items ?? [];
+      this.secrets = secrets;
+      this.tags = tags ?? [];
       this.cleanupPolicies = cleanupPolicies;
       this.restartRequired = response.restart_required;
     } catch (cause) {

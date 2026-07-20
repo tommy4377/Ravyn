@@ -39,12 +39,17 @@ class ConnectionStore {
       const setupState = await client.getSetupState();
       const events = new RavynEventClient(backend.base_url, backend.api_token);
       events.connect();
+      try {
+        await mainWindowReady();
+      } catch (error) {
+        events.close();
+        throw error;
+      }
 
       this.client = client;
       this.events = events;
       this.setupState = setupState;
       this.status = "ready";
-      await mainWindowReady();
     } catch (cause) {
       this.errorMessage = describeError(cause);
       this.status = "error";

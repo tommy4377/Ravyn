@@ -45,6 +45,17 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         Some("JobPage")
     ),
     op!(
+        "get",
+        "/v1/jobs/summary",
+        "getJobSummary",
+        "Jobs",
+        "Get aggregate queue statistics and recent jobs",
+        "200",
+        false,
+        false,
+        Some("JobSummary")
+    ),
+    op!(
         "post",
         "/v1/jobs",
         "createJob",

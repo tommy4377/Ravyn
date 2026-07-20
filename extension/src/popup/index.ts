@@ -651,8 +651,31 @@ async function submitResources(paused: boolean): Promise<void> {
   });
   setBusy(false);
   if (hasError(response)) return show(response.error.message);
-  show(`${downloads.length} resources accepted by Ravyn.`);
-  selected.clear();
+  const result = response as {
+    attempted?: number;
+    accepted?: number;
+    failed?: number;
+    results?: Array<{ ok?: boolean }>;
+  };
+  const accepted = result.accepted ?? 0;
+  const failed = result.failed ?? Math.max(0, downloads.length - accepted);
+  if (failed > 0) {
+    show(
+      `${accepted} accepted by Ravyn · ${failed} failed. Failed resources remain selected.`,
+    );
+    const nextSelected = new Set<string>();
+    result.results?.forEach((entry, index) => {
+      if (entry?.ok !== true) {
+        const resource = chosen[index];
+        if (resource) nextSelected.add(resource.id);
+      }
+    });
+    selected.clear();
+    for (const id of nextSelected) selected.add(id);
+  } else {
+    show(`${accepted || downloads.length} resources accepted by Ravyn.`);
+    selected.clear();
+  }
   renderResources();
   await refreshSummary();
 }

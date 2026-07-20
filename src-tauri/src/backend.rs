@@ -5,7 +5,12 @@
 //! frontend windows can ask for it with `backend_info`.
 
 use serde::Serialize;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// Snapshot handed to the frontend once the backend is listening.
 #[derive(Debug, Clone, Serialize)]
@@ -20,9 +25,55 @@ pub struct BackendInfo {
 #[derive(Clone)]
 pub struct BackendHandle {
     receiver: watch::Receiver<Option<BackendInfo>>,
+    ready_sender: Arc<Mutex<Option<watch::Sender<Option<BackendInfo>>>>>,
+    stopped: watch::Receiver<bool>,
+    stopped_sender: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    shutdown: CancellationToken,
+    started: Arc<AtomicBool>,
 }
 
 impl BackendHandle {
+    /// Create a dormant backend handle. The desktop starts it from Tauri's
+    /// setup hook, after the single-instance plugin has accepted the process
+    /// as the primary instance.
+    pub fn new() -> Self {
+        let (ready_sender, receiver) = watch::channel(None);
+        let (stopped_sender, stopped) = watch::channel(false);
+        Self {
+            receiver,
+            ready_sender: Arc::new(Mutex::new(Some(ready_sender))),
+            stopped,
+            stopped_sender: Arc::new(Mutex::new(Some(stopped_sender))),
+            shutdown: CancellationToken::new(),
+            started: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Start the embedded backend exactly once.
+    pub fn start(&self) -> Result<(), String> {
+        let sender = self
+            .ready_sender
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or_else(|| "embedded backend has already been started".to_owned())?;
+        let stopped = self
+            .stopped_sender
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or_else(|| "embedded backend stop channel is unavailable".to_owned())?;
+        self.started.store(true, Ordering::Release);
+        let shutdown = self.shutdown.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = run_backend(sender, shutdown).await {
+                tracing::error!(%error, "embedded Ravyn backend failed");
+            }
+            let _ = stopped.send(true);
+        });
+        Ok(())
+    }
+
     /// Wait until the backend reports its bound address, up to `timeout`.
     pub async fn wait_ready(&self, timeout: std::time::Duration) -> Result<BackendInfo, String> {
         let mut receiver = self.receiver.clone();
@@ -42,6 +93,37 @@ impl BackendHandle {
                 }
             }
         }
+    }
+
+    /// Signal the API server and workers to stop, then wait for the embedded
+    /// backend task to finish. A timeout prevents desktop exit from hanging
+    /// forever if an external engine refuses to terminate.
+    pub async fn shutdown_and_wait(&self, timeout: std::time::Duration) -> Result<(), String> {
+        if !self.started.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.shutdown.cancel();
+        let mut stopped = self.stopped.clone();
+        let wait = async {
+            loop {
+                if *stopped.borrow() {
+                    return Ok::<(), String>(());
+                }
+                stopped
+                    .changed()
+                    .await
+                    .map_err(|_| "backend task ended without a shutdown notification".to_owned())?;
+            }
+        };
+        tokio::time::timeout(timeout, wait)
+            .await
+            .map_err(|_| "timed out waiting for the embedded backend to stop".to_owned())?
+    }
+}
+
+impl Default for BackendHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -74,30 +156,17 @@ pub fn resolve_data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("./ravyn-data")
 }
 
-/// Start the embedded backend and return a handle plus the first-window label
-/// decision channel.
-pub fn start() -> (BackendHandle, watch::Receiver<Option<BackendInfo>>) {
-    let (sender, receiver) = watch::channel(None);
-    let handle = BackendHandle {
-        receiver: receiver.clone(),
-    };
-
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = run_backend(sender).await {
-            tracing::error!(%error, "embedded Ravyn backend failed");
-        }
-    });
-
-    (handle, receiver)
-}
-
-async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), String> {
+async fn run_backend(
+    sender: watch::Sender<Option<BackendInfo>>,
+    shutdown: CancellationToken,
+) -> Result<(), String> {
     use clap::Parser as _;
 
     let data_dir = resolve_data_dir();
     let data_dir_str = data_dir.display().to_string();
-    // This token is process-local and is passed only through the Tauri IPC
-    // response to Ravyn's own webview. It is never written to settings or disk.
+    // This token is process-local and is passed to Ravyn's own webviews through
+    // Tauri IPC. The Firefox bridge also publishes it in a tightly permissioned
+    // per-user runtime descriptor so the short-lived native host can authenticate.
     let api_token = uuid::Uuid::new_v4().to_string();
 
     // Managed component installation is driven explicitly by the setup flow,
@@ -147,7 +216,7 @@ async fn run_backend(sender: watch::Sender<Option<BackendInfo>>) -> Result<(), S
     write_desktop_ready_marker(&info);
     crate::integration::confirm_installed_copy_ready();
 
-    let result = ravyn::api::serve_with_listener(app, listener)
+    let result = ravyn::api::serve_with_listener_shutdown(app, listener, shutdown)
         .await
         .map_err(|e| e.to_string());
     drop(descriptor_guard);

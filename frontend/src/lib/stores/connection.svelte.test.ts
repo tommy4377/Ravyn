@@ -16,68 +16,85 @@ vi.mock("../native/tauri", () => ({
   mainWindowReady: (...args: unknown[]) => mainWindowReady(...(args as [])),
 }));
 
-class FakeEventSource {
-  static instances: FakeEventSource[] = [];
-  onopen: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: (() => void) | null = null;
-  closed = false;
-  constructor(public readonly url: string) {
-    FakeEventSource.instances.push(this);
-  }
-  close(): void {
-    this.closed = true;
-  }
+const eventSignals: AbortSignal[] = [];
+
+function installFetchMock(): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/events")) {
+        const signal = init?.signal;
+        if (signal) eventSignals.push(signal);
+        let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(value) {
+            controller = value;
+          },
+        });
+        signal?.addEventListener(
+          "abort",
+          () => {
+            try {
+              controller?.close();
+            } catch {
+              // The stream may already be closed by the test environment.
+            }
+          },
+          { once: true },
+        );
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response(JSON.stringify({ completed: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }),
+  );
 }
 
 describe("ConnectionStore.connect", () => {
   beforeEach(() => {
-    vi.stubGlobal("EventSource", FakeEventSource);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({ completed: true }),
-      })),
-    );
-    FakeEventSource.instances = [];
+    connection.events?.close();
+    eventSignals.length = 0;
+    installFetchMock();
     backendInfo.mockClear();
     mainWindowReady.mockClear();
   });
 
   afterEach(() => {
+    connection.events?.close();
     cleanup();
     vi.unstubAllGlobals();
   });
 
   it("does not re-trigger a calling $effect when it reassigns this.events", async () => {
     // AppShell boots the connection from inside an $effect. connect() closes
-    // any previous EventSource before reconnecting; if that read of
-    // `this.events` were tracked, the `this.events = events` assignment
-    // later in the same call would re-run the effect — an infinite connect
-    // loop that pins the main window on the "Connecting…" boot screen.
+    // any previous SSE client before reconnecting; if that read of
+    // `this.events` were tracked, the `this.events = events` assignment later
+    // in the same call would re-run the effect and create a connect loop.
     let effectRuns = 0;
     render(ConnectEffectHarness, {
       props: { onRun: () => (effectRuns += 1) },
     });
 
     await waitFor(() => expect(connection.status).toBe("ready"));
-    // Give any spuriously-scheduled effect re-run a chance to land.
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(effectRuns).toBe(1);
     expect(backendInfo).toHaveBeenCalledTimes(1);
-    expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0]!.closed).toBe(false);
+    expect(eventSignals).toHaveLength(1);
+    expect(eventSignals[0]!.aborted).toBe(false);
   });
 
-  it("closes the previous EventSource when a retry reconnects", async () => {
+  it("aborts the previous authenticated SSE stream when a retry reconnects", async () => {
     await connection.connect();
     await connection.connect();
-    expect(FakeEventSource.instances).toHaveLength(2);
-    expect(FakeEventSource.instances[0]!.closed).toBe(true);
-    expect(FakeEventSource.instances[1]!.closed).toBe(false);
+    expect(eventSignals).toHaveLength(2);
+    expect(eventSignals[0]!.aborted).toBe(true);
+    expect(eventSignals[1]!.aborted).toBe(false);
   });
 });

@@ -113,11 +113,15 @@ export function trackBatchResult(
   if (!Array.isArray(results)) return;
   results.forEach((entry, index) => {
     if (!entry || typeof entry !== "object") return;
-    const record = entry as { ok?: unknown; job?: { id?: unknown } };
+    const record = entry as {
+      ok?: unknown;
+      jobId?: unknown;
+      job?: { id?: unknown };
+    };
     if (record.ok !== true) return;
     const download = downloads[index];
     void trackDownload(
-      record.job?.id,
+      record.jobId ?? record.job?.id,
       download ? downloadLabel(download) : "Download",
     );
   });

@@ -97,6 +97,7 @@ impl Repository {
             .bind(name)
             .fetch_optional(self.pool())
             .await?;
+        let was_existing = existing.is_some();
         let (id, account) = match existing {
             Some(row) => (
                 row_uuid(&row, "id")?,
@@ -107,11 +108,24 @@ impl Repository {
                 (id, id.to_string())
             }
         };
+        let previous_secret = if was_existing {
+            crate::services::secrets::get(account.clone()).await.ok()
+        } else {
+            None
+        };
         crate::services::secrets::set(account.clone(), secret).await?;
         let now = Utc::now();
-        sqlx::query("INSERT INTO secret_references(id,name,secret_type,keyring_account,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET secret_type=excluded.secret_type,updated_at=excluded.updated_at")
-            .bind(id.to_string()).bind(name).bind(secret_type).bind(account).bind(now).bind(now)
-            .execute(self.pool()).await?;
+        let database_write = sqlx::query("INSERT INTO secret_references(id,name,secret_type,keyring_account,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET secret_type=excluded.secret_type,updated_at=excluded.updated_at")
+            .bind(id.to_string()).bind(name).bind(secret_type).bind(account.clone()).bind(now).bind(now)
+            .execute(self.pool()).await;
+        if let Err(error) = database_write {
+            if let Some(previous) = previous_secret {
+                let _ = crate::services::secrets::set(account, previous).await;
+            } else {
+                let _ = crate::services::secrets::delete(account).await;
+            }
+            return Err(error.into());
+        }
         self.get_secret_reference(id).await
     }
 
@@ -156,7 +170,7 @@ impl Repository {
     }
 
     pub async fn delete_secret_reference(&self, id: Uuid) -> Result<()> {
-        let row = sqlx::query("SELECT keyring_account FROM secret_references WHERE id=?")
+        let row = sqlx::query("SELECT name,secret_type,keyring_account,created_at,updated_at FROM secret_references WHERE id=?")
             .bind(id.to_string())
             .fetch_optional(self.pool())
             .await?
@@ -187,11 +201,29 @@ impl Repository {
             )));
         }
         let account: String = row.try_get("keyring_account")?;
-        crate::services::secrets::delete(account).await?;
+        let name: String = row.try_get("name")?;
+        let secret_type: String = row.try_get("secret_type")?;
+        let created_at: chrono::DateTime<Utc> = row.try_get("created_at")?;
+        let updated_at: chrono::DateTime<Utc> = row.try_get("updated_at")?;
         sqlx::query("DELETE FROM secret_references WHERE id=?")
             .bind(id.to_string())
             .execute(self.pool())
             .await?;
+        if let Err(error) = crate::services::secrets::delete(account.clone()).await {
+            let restore = sqlx::query("INSERT INTO secret_references(id,name,secret_type,keyring_account,created_at,updated_at) VALUES(?,?,?,?,?,?)")
+                .bind(id.to_string())
+                .bind(name)
+                .bind(secret_type)
+                .bind(account)
+                .bind(created_at)
+                .bind(updated_at)
+                .execute(self.pool())
+                .await;
+            if let Err(restore_error) = restore {
+                tracing::error!(%restore_error, %id, "failed to restore secret reference after keyring deletion failure");
+            }
+            return Err(error);
+        }
         Ok(())
     }
 }

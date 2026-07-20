@@ -20,6 +20,7 @@ import type {
   MediaOptions,
   JobOutput,
   JobPage,
+  JobSummary,
   Page,
   PageQueryParams,
   SegmentRecord,
@@ -87,6 +88,10 @@ export class JobsService {
 
   list(params?: JobListParams, signal?: AbortSignal): Promise<JobPage> {
     return this.client.listJobs(params, signal);
+  }
+
+  summary(signal?: AbortSignal): Promise<JobSummary> {
+    return this.client.getJobSummary(signal);
   }
 
   get(id: string, signal?: AbortSignal): Promise<Job> {

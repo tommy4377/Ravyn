@@ -1,5 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
+  import { collectAllPages } from "../api/pagination";
   import type { LibraryCategory, LibraryEntry, LibraryEntryState, LibraryImportStatus } from "../api/types";
   import Button from "../components/Button.svelte";
   import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
@@ -115,30 +116,33 @@
     }
   }
 
+  let loadGeneration = 0;
+
   async function load(): Promise<void> {
     if (!connection.client) return;
+    const generation = ++loadGeneration;
     loading = true;
     error = null;
     try {
-      const request = {
+      const base = {
         q: search || undefined,
         category: (category || undefined) as LibraryCategory | undefined,
-        limit: 250,
       };
-      if (mode === "trash") {
-        entries = (await connection.client.listLibrary({ ...request, state: "trashed" })).items;
-      } else {
-        const [active, missing] = await Promise.all([
-          connection.client.listLibrary({ ...request, state: "active" }),
-          connection.client.listLibrary({ ...request, state: "missing" }),
-        ]);
-        entries = [...active.items, ...missing.items];
-      }
+      const fetchState = (state: "active" | "missing" | "trashed") =>
+        collectAllPages((cursor, limit) =>
+          connection.client!.listLibrary({ ...base, state, limit, cursor }),
+        );
+      const nextEntries =
+        mode === "trash"
+          ? await fetchState("trashed")
+          : (await Promise.all([fetchState("active"), fetchState("missing")])).flat();
+      if (generation !== loadGeneration) return;
+      entries = nextEntries;
       if (selectedId && !entries.some((entry) => entry.id === selectedId)) selectedId = null;
     } catch (cause) {
-      error = describeError(cause);
+      if (generation === loadGeneration) error = describeError(cause);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
 

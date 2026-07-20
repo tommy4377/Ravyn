@@ -88,6 +88,27 @@ pub(super) fn schemas() -> Value {
                 {"properties":{"items":{"type":"array","items":{"$ref":"#/components/schemas/Job"}}}}
             ]
         },
+        "JobSummaryItem": {
+            "type":"object",
+            "required":["id","filename","status","progress","speed_bps"],
+            "properties": {
+                "id":{"type":"string","format":"uuid"},
+                "filename":{"type":"string"},
+                "status":{"type":"string"},
+                "progress":{"type":["number","null"],"minimum":0,"maximum":1},
+                "speed_bps":{"type":"integer","minimum":0}
+            }
+        },
+        "JobSummary": {
+            "type":"object",
+            "required":["active","queued","speed_bps","recent"],
+            "properties": {
+                "active":{"type":"integer","minimum":0},
+                "queued":{"type":"integer","minimum":0},
+                "speed_bps":{"type":"integer","minimum":0},
+                "recent":{"type":"array","items":{"$ref":"#/components/schemas/JobSummaryItem"}}
+            }
+        },
         "JobOutputPage": {
             "allOf":[
                 {"$ref":"#/components/schemas/GenericPage"},

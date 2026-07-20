@@ -18,12 +18,32 @@ mod tray;
 mod uninstall;
 mod webview_runtime;
 
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager};
 
 use backend::{BackendHandle, BackendInfo};
 
 /// How long window bootstrap waits for the embedded backend.
 const BACKEND_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BACKEND_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Drain the embedded backend before terminating the Tauri process. Multiple
+/// exit sources (tray, setup handoff, updater) may race, so only the first one
+/// starts the shutdown sequence.
+pub(crate) fn request_graceful_exit(app: &tauri::AppHandle, code: i32) {
+    if EXIT_REQUESTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    let backend = app.state::<BackendHandle>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = backend.shutdown_and_wait(BACKEND_SHUTDOWN_TIMEOUT).await {
+            tracing::warn!(%error, "embedded backend did not stop cleanly before desktop exit");
+        }
+        app.exit(code);
+    });
+}
 
 /// Base URL and state of the embedded backend, awaited until ready.
 #[tauri::command]
@@ -187,7 +207,7 @@ async fn finish_setup_handoff(
     guard.finish_handoff(result.is_ok())?;
     let should_exit = result?;
     if should_exit {
-        app.exit(0);
+        request_graceful_exit(&app, 0);
     }
     Ok(())
 }
@@ -276,7 +296,7 @@ async fn restart_application(
     })();
     guard.finish_restart(result.is_ok())?;
     result?;
-    app.exit(0);
+    request_graceful_exit(&app, 0);
     Ok(())
 }
 
@@ -427,7 +447,7 @@ fn install_app_update_now(
     // does not misreport the intentional restart as a command failure.
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        app.exit(0);
+        request_graceful_exit(&app, 0);
     });
     Ok(())
 }
@@ -623,7 +643,7 @@ pub fn run() {
         browser_action_state.replace(action);
     }
 
-    let (handle, _receiver) = backend::start();
+    let handle = BackendHandle::new();
 
     #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
     let mut builder = tauri::Builder::default()
@@ -633,12 +653,13 @@ pub fn run() {
         // would otherwise boot a fully redundant backend, rqbit child, and
         // window against the same database. This plugin detects that a
         // primary instance already owns the app and forwards the new
-        // process's argv here instead, so the second process exits
-        // immediately without ever starting Tauri.
+        // process's argv here instead, so the secondary instance exits before
+        // the embedded backend or application windows are started.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(action) = parse_launch_action(&argv) {
                 app.state::<browser_integration::BrowserActionState>()
-                    .replace(action);
+                    .replace(action.clone());
+                let _ = app.emit(browser_integration::BROWSER_ACTION_EVENT, action);
             }
             focus_main_window_or_setup(app);
         }))
@@ -691,7 +712,7 @@ pub fn run() {
                 match app_updates::install_pending_on_close(window.app_handle()) {
                     Ok(true) => {
                         api.prevent_close();
-                        window.app_handle().exit(0);
+                        request_graceful_exit(window.app_handle(), 0);
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -701,6 +722,9 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            handle
+                .start()
+                .map_err(std::io::Error::other)?;
             if crate::installation::current_executable_is_installed() {
                 tauri::async_runtime::spawn_blocking(|| {
                     if let Err(error) = crate::browser_integration::repair_for_current_executable() {
@@ -752,6 +776,14 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Ravyn desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the Ravyn desktop application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !EXIT_REQUESTED.load(Ordering::Acquire) {
+                    api.prevent_exit();
+                    request_graceful_exit(app, 0);
+                }
+            }
+        });
 }

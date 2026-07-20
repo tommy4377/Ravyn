@@ -75,7 +75,11 @@ fn automatic_library_destination(
 }
 
 impl JobManager {
-    pub async fn create(&self, mut request: CreateJob) -> Result<Job> {
+    pub async fn create(&self, request: CreateJob) -> Result<Job> {
+        self.create_internal(request, None).await
+    }
+
+    async fn create_internal(&self, mut request: CreateJob, forced_id: Option<Uuid>) -> Result<Job> {
         if self.repository.library_move_blocks_new_jobs().await? {
             return Err(RavynError::Conflict(
                 "new downloads are paused while the Library is moving or waiting for restart"
@@ -267,14 +271,42 @@ impl JobManager {
             }
         }
         let tags = request.options.tags.clone();
-        let job = self
-            .repository
-            .insert_job(request, self.config.effective_download_dir())
-            .await?;
-        self.repository.attach_tags(job.id, &tags).await?;
+        let requested_initial_pause = request.options.initially_paused;
+        if cache_candidate.is_some() {
+            // Keep the dispatcher away from the job until the verified local
+            // object has been staged as a durable completed transfer checkpoint.
+            request.options.initially_paused = true;
+        }
+        let job = if let Some(id) = forced_id {
+            self.repository
+                .insert_job_with_tags_id(
+                    request,
+                    self.config.effective_download_dir(),
+                    &tags,
+                    id,
+                )
+                .await?
+        } else {
+            self.repository
+                .insert_job_with_tags(request, self.config.effective_download_dir(), &tags)
+                .await?
+        };
         if let Some(entry) = cache_candidate {
-            match self.materialize_cached_entry(job.clone(), entry).await {
-                Ok(completed) => return Ok(completed),
+            match self.stage_cached_entry(job.clone(), entry).await {
+                Ok(staged) => {
+                    if !requested_initial_pause {
+                        self.repository
+                            .transition_status(
+                                staged.id,
+                                &[JobStatus::Paused],
+                                JobStatus::Queued,
+                                None,
+                            )
+                            .await?;
+                        self.events.publish(Event::QueueChanged);
+                    }
+                    return self.repository.get_job(staged.id).await;
+                }
                 Err(error) => {
                     let message = error.to_string();
                     let _ = self
@@ -314,7 +346,7 @@ impl JobManager {
         Ok(actual.eq_ignore_ascii_case(expected))
     }
 
-    async fn materialize_cached_entry(
+    async fn stage_cached_entry(
         &self,
         job: Job,
         entry: crate::storage::LibraryEntry,
@@ -332,72 +364,34 @@ impl JobManager {
             .filename
             .clone()
             .unwrap_or_else(|| crate::services::filename::sanitize(&entry.filename));
-        let target = destination.join(filename);
+        let target = destination.join(&filename);
         security::validate_output_path(&self.config, &target)?;
         if target != entry.path {
-            if tokio::fs::try_exists(&target).await? {
-                if job.options_json.overwrite {
-                    tokio::fs::remove_file(&target).await?;
-                } else {
-                    return Err(RavynError::Conflict(format!(
-                        "cache target already exists: {}",
-                        target.display()
-                    )));
-                }
-            }
-            if tokio::fs::hard_link(&entry.path, &target).await.is_err() {
-                tokio::fs::copy(&entry.path, &target).await?;
-            }
+            materialize_cached_file(&entry.path, &target, job.options_json.overwrite).await?;
         }
-        let source_kind = match job.kind {
-            JobKind::Http => OutputSourceKind::Http,
-            JobKind::Media => OutputSourceKind::Media,
-            JobKind::Torrent => OutputSourceKind::Torrent,
-        };
-        let output = self
-            .repository
-            .register_output(&job, &target, OutputType::Primary, source_kind)
+        if job.filename.as_deref() != Some(filename.as_str()) {
+            self.repository
+                .update_job_fields(job.id, None, None, None, Some(&filename), None)
+                .await?;
+        }
+        self.repository
+            .update_progress(job.id, source_metadata.len(), Some(source_metadata.len()))
             .await?;
-        if let Some(sha256) = entry.sha256.as_deref() {
-            self.repository
-                .set_output_checksum(output.id, "sha256", sha256)
-                .await?;
-        }
-        if target != entry.path {
-            self.repository
-                .upsert_library_entry(NewLibraryEntry {
-                    job_id: Some(job.id),
-                    source_url: job.source.clone(),
-                    mirrors: job.options_json.mirrors.clone(),
-                    sha256: entry.sha256.clone(),
-                    size_bytes: Some(source_metadata.len()),
-                    path: target,
-                    filename: entry.filename,
-                    category: entry.category,
-                    mime_type: entry.mime_type,
-                    media_metadata: entry.media_metadata,
-                    torrent_metadata: entry.torrent_metadata,
-                    tags: job.options_json.tags.clone(),
-                    trust: entry.trust,
-                    imported: false,
-                    downloaded_at: chrono::Utc::now(),
-                })
-                .await?;
-        }
+        self.repository.set_transfer_mode(job.id, "complete").await?;
         self.repository
             .increment_stat_counter("duplicate_avoidance_count", 1)
             .await?;
         self.repository
             .increment_stat_counter("saved_bandwidth_bytes", source_metadata.len())
             .await?;
-        self.repository
-            .complete_from_local_cache(job.id, source_metadata.len())
-            .await?;
-        self.events.publish(Event::JobStatus {
-            job_id: job.id,
-            status: JobStatus::Completed,
-            error: None,
-        });
+        self.events.publish(Event::Progress(
+            crate::core::models::ProgressSnapshot {
+                job_id: job.id,
+                downloaded_bytes: source_metadata.len(),
+                total_bytes: Some(source_metadata.len()),
+                bytes_per_second: 0,
+            },
+        ));
         self.repository.get_job(job.id).await
     }
 
@@ -409,28 +403,52 @@ impl JobManager {
             ));
         }
         let request_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&request)?));
-        let _guard = self.idempotency.lock().await;
-        if let Some((stored_hash, resource_id)) = self
-            .repository
-            .get_idempotent_resource("create_job", key)
-            .await?
-        {
+        let lock_key = format!("create_job:{key}");
+        let key_lock = {
+            let mut locks = self.idempotency.lock().await;
+            locks
+                .entry(lock_key.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let guard = key_lock.lock().await;
+        let result = async {
+            let reservation = Uuid::new_v4();
+            let (stored_hash, resource_id) = self
+                .repository
+                .reserve_idempotent_resource("create_job", key, &request_hash, reservation)
+                .await?;
             if stored_hash != request_hash {
                 return Err(RavynError::Conflict(
                     "Idempotency-Key was already used for a different request".into(),
                 ));
             }
-            let id = Uuid::parse_str(&resource_id).map_err(|error| {
+            let reserved_id = Uuid::parse_str(&resource_id).map_err(|error| {
                 RavynError::Internal(format!("stored idempotency resource is invalid: {error}"))
             })?;
-            return self.repository.get_job(id).await;
+            match self.repository.get_job(reserved_id).await {
+                Ok(job) => return Ok(job),
+                Err(RavynError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+
+            let job = self.create_internal(request, Some(reserved_id)).await?;
+            if job.id != reserved_id {
+                self.repository
+                    .update_idempotent_resource("create_job", key, &request_hash, job.id)
+                    .await?;
+            }
+            Ok(job)
         }
-        let job = self.create(request).await?;
-        self.repository
-            .put_idempotent_resource("create_job", key, &request_hash, job.id)
-            .await?;
-        Ok(job)
+        .await;
+        drop(guard);
+        let mut locks = self.idempotency.lock().await;
+        if std::sync::Arc::strong_count(&key_lock) == 2 {
+            locks.remove(&lock_key);
+        }
+        result
     }
+
     pub async fn update_job(&self, id: Uuid, request: UpdateJob) -> Result<Job> {
         let current = self.repository.get_job(id).await?;
         let routing_change = request.destination.is_some() || request.filename.is_some();
@@ -476,20 +494,40 @@ impl JobManager {
         let job = self.repository.get_job(id).await?;
         let allowed = if job.kind == JobKind::Torrent {
             vec![
+                JobStatus::Queued,
                 JobStatus::Downloading,
                 JobStatus::Probing,
                 JobStatus::Seeding,
             ]
         } else {
-            vec![JobStatus::Downloading, JobStatus::Probing]
+            vec![
+                JobStatus::Queued,
+                JobStatus::Downloading,
+                JobStatus::Probing,
+            ]
         };
-        self.repository
-            .transition_status(id, &allowed, JobStatus::Paused, None)
-            .await?;
-        self.cancel_active_and_wait(id).await?;
+
+        // Pause the external torrent engine before committing the persisted
+        // state. If the database transition fails, resume the torrent as a
+        // best-effort compensation so runtime and storage do not diverge.
         if job.kind == JobKind::Torrent {
             self.torrent.pause_job(id).await?;
         }
+        if let Err(error) = self
+            .repository
+            .transition_status(id, &allowed, JobStatus::Paused, None)
+            .await
+        {
+            if job.kind == JobKind::Torrent {
+                let _ = self.torrent.resume_job(id).await;
+            }
+            return Err(error);
+        }
+
+        // Once the durable state is Paused, the worker may be force-aborted
+        // after the cooperative grace period. A late worker observes the
+        // persisted pause state and cannot legitimately complete the job.
+        self.cancel_active_and_wait(id).await?;
         self.events.publish(Event::JobStatus {
             job_id: id,
             status: JobStatus::Paused,
@@ -529,7 +567,7 @@ impl JobManager {
             if let Err(error) = self.torrent.resume_job(id).await {
                 let _ = self
                     .repository
-                    .set_status(id, JobStatus::Paused, Some(&error.to_string()))
+                    .set_status(id, job.status, job.error.as_deref())
                     .await;
                 return Err(error);
             }
@@ -545,14 +583,29 @@ impl JobManager {
         }
         Ok(())
     }
+
     pub async fn cancel(&self, id: Uuid) -> Result<()> {
         let job = self.repository.get_job(id).await?;
-        self.repository
-            .set_status(id, JobStatus::Cancelled, None)
-            .await?;
-        self.cancel_active_and_wait(id).await?;
+
+        // A torrent must be stopped before its durable state is changed. This
+        // avoids reporting Cancelled while the torrent engine is still active
+        // if the external pause operation fails.
         if job.kind == JobKind::Torrent {
             self.torrent.pause_job(id).await?;
+        }
+        if let Err(error) = self
+            .repository
+            .set_status(id, JobStatus::Cancelled, None)
+            .await
+        {
+            if job.kind == JobKind::Torrent {
+                let _ = self.torrent.resume_job(id).await;
+            }
+            return Err(error);
+        }
+
+        self.cancel_active_and_wait(id).await?;
+        if job.kind == JobKind::Torrent {
             if let Some(state) = self.repository.get_torrent_seeding_state(id).await? {
                 if state.stopped_at.is_none() {
                     self.repository
@@ -583,6 +636,7 @@ impl JobManager {
         self.repository.delete_job(id).await
     }
     pub async fn retry(&self, id: Uuid) -> Result<()> {
+        let job = self.repository.get_job(id).await?;
         self.repository
             .transition_status(
                 id,
@@ -591,7 +645,7 @@ impl JobManager {
                 None,
             )
             .await?;
-        let job = self.repository.get_job(id).await?;
+
         // Stale byte counters from the failed attempt would otherwise leave a
         // frozen progress bar until the restarted transfer reports fresh
         // snapshots (resumed transfers jump back to their real offset).
@@ -603,8 +657,33 @@ impl JobManager {
                 total_bytes: job.total_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
                 bytes_per_second: 0,
             }));
+
         if job.kind == JobKind::Torrent {
-            self.torrent.resume_job(id).await?;
+            if let Err(error) = self.torrent.resume_job(id).await {
+                // Restore both state and counters when the external torrent
+                // engine cannot resume. This keeps the retry operation
+                // transactional from the API caller's perspective.
+                let _ = self
+                    .repository
+                    .set_status(id, job.status, job.error.as_deref())
+                    .await;
+                let _ = self
+                    .repository
+                    .update_progress(
+                        id,
+                        u64::try_from(job.downloaded_bytes).unwrap_or_default(),
+                        job.total_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+                    )
+                    .await;
+                self.events
+                    .publish(Event::Progress(crate::core::models::ProgressSnapshot {
+                        job_id: id,
+                        downloaded_bytes: u64::try_from(job.downloaded_bytes).unwrap_or_default(),
+                        total_bytes: job.total_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+                        bytes_per_second: 0,
+                    }));
+                return Err(error);
+            }
         }
         self.metrics.job_retried(job.kind);
         self.events.publish(Event::QueueChanged);
@@ -638,11 +717,79 @@ impl JobManager {
                 if let Some(abort) = abort {
                     abort.abort();
                 }
-                return Err(RavynError::Conflict(
-                    "worker did not stop cooperatively within 10 seconds".into(),
-                ));
+                self.active.lock().await.remove(&id);
+                self.metrics.job_suspended(id);
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+async fn materialize_cached_file(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    overwrite: bool,
+) -> Result<()> {
+    let target_exists = tokio::fs::try_exists(target).await?;
+    if target_exists && !overwrite {
+        return Err(RavynError::Conflict(format!(
+            "cache target already exists: {}",
+            target.display()
+        )));
+    }
+    if target_exists && tokio::fs::symlink_metadata(target).await?.is_dir() {
+        return Err(RavynError::Conflict(format!(
+            "cache target is a directory: {}",
+            target.display()
+        )));
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| RavynError::Invalid("cache target has no parent directory".into()))?;
+    let nonce = Uuid::new_v4();
+    let temporary = parent.join(format!(".ravyn-cache-{nonce}.tmp"));
+    let backup = parent.join(format!(".ravyn-cache-{nonce}.bak"));
+
+    // Cache materialization must produce an independent file. Hard links would
+    // allow later edits to the download to mutate the Library object and break
+    // its stored checksum. A future platform-specific reflink optimization may
+    // replace this copy while preserving copy-on-write semantics.
+    if let Err(error) = tokio::fs::copy(source, &temporary).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+
+    if !target_exists {
+        if let Err(error) = tokio::fs::rename(&temporary, target).await {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+
+    // Windows cannot atomically rename over an existing destination. Move the
+    // old file aside only after the replacement has been fully materialized,
+    // then restore it if activation fails. This guarantees a copy/link error
+    // never destroys the user's pre-existing target.
+    if let Err(error) = tokio::fs::rename(target, &backup).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    match tokio::fs::rename(&temporary, target).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&backup).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            if let Err(restore_error) = tokio::fs::rename(&backup, target).await {
+                return Err(RavynError::Internal(format!(
+                    "failed to activate cached file ({error}) and restore the original target ({restore_error})"
+                )));
+            }
+            Err(error.into())
         }
     }
 }

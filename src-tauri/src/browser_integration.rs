@@ -5,13 +5,15 @@
 //! desktop process owns the authenticated loopback backend.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const HOST_NAME: &str = "com.ravyn.download_manager";
 pub const EXTENSION_ID: &str = "firefox-extension@ravyn.app";
 pub const HOST_MANIFEST_FILE: &str = "com.ravyn.download_manager.json";
-const ACTION_FILE: &str = "browser-action.json";
+const ACTION_DIRECTORY: &str = "browser-actions";
+pub const BROWSER_ACTION_EVENT: &str = "ravyn://browser-action";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserIntegrationStatus {
@@ -39,12 +41,12 @@ pub struct BrowserAction {
 }
 
 #[derive(Default)]
-pub struct BrowserActionState(Mutex<Option<BrowserAction>>);
+pub struct BrowserActionState(Mutex<VecDeque<BrowserAction>>);
 
 impl BrowserActionState {
     pub fn replace(&self, action: BrowserAction) {
         if let Ok(mut pending) = self.0.lock() {
-            *pending = Some(action);
+            pending.push_back(action);
         }
     }
 
@@ -52,55 +54,74 @@ impl BrowserActionState {
         self.0
             .lock()
             .ok()
-            .and_then(|mut pending| pending.take())
+            .and_then(|mut pending| pending.pop_front())
             .or_else(take_published_action)
     }
 }
 
 pub fn publish_action(action: &BrowserAction) -> Result<(), String> {
-    let path = action_path();
-    let parent = path
-        .parent()
-        .ok_or_else(|| "the browser action path has no parent directory".to_owned())?;
-    std::fs::create_dir_all(parent)
+    let directory = action_directory();
+    std::fs::create_dir_all(&directory)
         .map_err(|error| format!("failed to create the browser action directory: {error}"))?;
+    crate::native_messaging::restrict_directory_to_current_user(&directory)?;
+    let name = format!(
+        "{:020}-{}-{}.json",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    );
+    let path = directory.join(name);
+    let temporary = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec(action)
         .map_err(|error| format!("failed to serialize the browser action: {error}"))?;
-    let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, bytes)
         .map_err(|error| format!("failed to write the browser action: {error}"))?;
-    restrict_action_file(&temporary)?;
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|error| format!("failed to replace the browser action: {error}"))?;
-    }
+    crate::native_messaging::restrict_file_to_current_user(&temporary)?;
     std::fs::rename(&temporary, &path)
         .map_err(|error| format!("failed to publish the browser action: {error}"))
 }
 
 fn take_published_action() -> Option<BrowserAction> {
-    let path = action_path();
-    let bytes = std::fs::read(&path).ok()?;
-    let _ = std::fs::remove_file(path);
-    serde_json::from_slice(&bytes).ok()
+    let directory = action_directory();
+    if !directory.exists() {
+        return None;
+    }
+    crate::native_messaging::restrict_directory_to_current_user(&directory).ok()?;
+    let mut entries = std::fs::read_dir(&directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let _ = std::fs::remove_file(&path);
+        if let Ok(action) = serde_json::from_slice::<BrowserAction>(&bytes) {
+            let section = action.section.as_deref().map(sanitize_section);
+            let source_url = action
+                .source_url
+                .as_deref()
+                .and_then(sanitize_source_url);
+            return Some(BrowserAction {
+                section,
+                source_url,
+            });
+        }
+    }
+    None
 }
 
-fn action_path() -> PathBuf {
+fn action_directory() -> PathBuf {
     crate::backend::resolve_data_dir()
         .join("runtime")
-        .join(ACTION_FILE)
-}
-
-#[cfg(unix)]
-fn restrict_action_file(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to restrict the browser action file: {error}"))
-}
-
-#[cfg(not(unix))]
-fn restrict_action_file(_path: &Path) -> Result<(), String> {
-    Ok(())
+        .join(ACTION_DIRECTORY)
 }
 
 /// Handles explicit installer lifecycle commands without starting Tauri.

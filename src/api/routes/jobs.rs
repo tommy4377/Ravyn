@@ -40,6 +40,87 @@ pub(super) async fn list_jobs(
         next_cursor,
     }))
 }
+#[derive(Serialize)]
+pub(super) struct JobSummaryItem {
+    id: Uuid,
+    filename: String,
+    status: JobStatus,
+    progress: Option<f64>,
+    speed_bps: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct JobSummary {
+    total: u64,
+    active: u64,
+    queued: u64,
+    completed: u64,
+    failed: u64,
+    speed_bps: u64,
+    recent: Vec<JobSummaryItem>,
+}
+
+pub(super) async fn job_summary(State(s): State<ApiState>) -> Result<Json<JobSummary>> {
+    let active = s
+        .repository
+        .count_jobs_by_statuses(&[
+            JobStatus::Probing,
+            JobStatus::Downloading,
+            JobStatus::Verifying,
+            JobStatus::PostProcessing,
+            JobStatus::Seeding,
+        ])
+        .await?;
+    let queued = s
+        .repository
+        .count_jobs_by_statuses(&[JobStatus::Queued])
+        .await?;
+    let completed = s
+        .repository
+        .count_jobs_by_statuses(&[JobStatus::Completed, JobStatus::Partial])
+        .await?;
+    let failed = s
+        .repository
+        .count_jobs_by_statuses(&[JobStatus::Failed, JobStatus::Cancelled])
+        .await?;
+    let total = s.repository.count_jobs().await?;
+    let metrics = s.manager.metrics();
+    let mut recent = s
+        .repository
+        .list_jobs_page(JobListFilter {
+            limit: 8,
+            ..JobListFilter::default()
+        })
+        .await?;
+    recent.truncate(8);
+    let recent = recent
+        .into_iter()
+        .map(|job| {
+            let downloaded = u64::try_from(job.downloaded_bytes).unwrap_or_default();
+            let total = job.total_bytes.and_then(|value| u64::try_from(value).ok());
+            let progress = total
+                .filter(|value| *value > 0)
+                .map(|total| (downloaded as f64 / total as f64).clamp(0.0, 1.0));
+            JobSummaryItem {
+                id: job.id,
+                filename: job.filename.unwrap_or_else(|| "Download".to_owned()),
+                status: job.status,
+                progress,
+                speed_bps: metrics.transfer_rate(job.id).unwrap_or_default(),
+            }
+        })
+        .collect();
+    Ok(Json(JobSummary {
+        total,
+        active,
+        queued,
+        completed,
+        failed,
+        speed_bps: metrics.aggregate_transfer_rate(),
+        recent,
+    }))
+}
+
 pub(super) async fn get_job(State(s): State<ApiState>, Path(id): Path<Uuid>) -> Result<Json<Job>> {
     Ok(Json(s.repository.get_job(id).await?.redacted()))
 }
@@ -225,20 +306,62 @@ pub(super) async fn apply_job_action(
     State(s): State<ApiState>,
     Json(mut request): Json<BulkJobActionRequest>,
 ) -> Result<Json<Vec<BulkJobActionResult>>> {
-    if request.ids.is_empty() {
-        request.ids = s
-            .repository
-            .list_jobs()
-            .await?
-            .into_iter()
-            .map(|job| job.id)
-            .collect();
+    let all_matching = request.ids.is_empty();
+    if all_matching {
+        request.ids = match request.action {
+            BulkJobAction::Pause => {
+                s.repository
+                    .list_job_ids_by_statuses(&[
+                        JobStatus::Queued,
+                        JobStatus::Probing,
+                        JobStatus::Downloading,
+                        JobStatus::Seeding,
+                    ])
+                    .await?
+            }
+            BulkJobAction::Resume => {
+                s.repository
+                    .list_job_ids_by_statuses(&[JobStatus::Paused, JobStatus::Failed])
+                    .await?
+            }
+            BulkJobAction::Cancel => {
+                s.repository
+                    .list_job_ids_by_statuses(&[
+                        JobStatus::Queued,
+                        JobStatus::Probing,
+                        JobStatus::Downloading,
+                        JobStatus::Paused,
+                        JobStatus::Verifying,
+                        JobStatus::PostProcessing,
+                        JobStatus::Seeding,
+                        JobStatus::Partial,
+                        JobStatus::Failed,
+                    ])
+                    .await?
+            }
+            BulkJobAction::Retry => {
+                s.repository
+                    .list_job_ids_by_statuses(&[
+                        JobStatus::Failed,
+                        JobStatus::Cancelled,
+                        JobStatus::Partial,
+                    ])
+                    .await?
+            }
+            BulkJobAction::Delete => s
+                .repository
+                .list_jobs()
+                .await?
+                .into_iter()
+                .map(|job| job.id)
+                .collect(),
+        };
     }
     request.ids.sort_unstable();
     request.ids.dedup();
-    if request.ids.len() > 1_000 {
+    if !all_matching && request.ids.len() > 1_000 {
         return Err(crate::error::RavynError::Invalid(
-            "bulk actions may target at most 1000 jobs".into(),
+            "explicit bulk actions may target at most 1000 jobs".into(),
         ));
     }
     let action_name = match request.action {

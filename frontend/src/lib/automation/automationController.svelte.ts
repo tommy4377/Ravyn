@@ -1,4 +1,5 @@
 import { describeError } from "../api/errors";
+import { collectAllPages } from "../api/pagination";
 import type {
   AutomationRule,
   RulePreview,
@@ -84,12 +85,16 @@ export class AutomationController {
     this.loading = true;
     this.error = null;
     try {
-      const [rulePage, schedulePage] = await Promise.all([
-        connection.client.listRules({ limit: 250 }),
-        connection.client.listSchedules({ limit: 250 }),
+      const [rules, schedules] = await Promise.all([
+        collectAllPages((cursor, limit) =>
+          connection.client!.listRules({ limit, cursor }),
+        ),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listSchedules({ limit, cursor }),
+        ),
       ]);
-      this.rules = rulePage.items;
-      this.schedules = schedulePage.items;
+      this.rules = rules;
+      this.schedules = schedules;
     } catch (cause) {
       this.error = describeError(cause);
     } finally {

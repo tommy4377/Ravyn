@@ -3,6 +3,12 @@
 
 use super::*;
 
+
+static DOWNLOAD_ROOT_READINESS: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::path::PathBuf, std::time::Instant, bool)>>,
+> = std::sync::OnceLock::new();
+const DOWNLOAD_ROOT_READINESS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
@@ -23,20 +29,39 @@ pub(super) struct Readiness {
 pub(super) async fn readiness(State(s): State<ApiState>) -> impl IntoResponse {
     let database_writable = s.repository.health_check().await.is_ok();
     let config = s.manager.config();
-    let probe = config
-        .effective_download_dir()
-        .join(format!(".ravyn-readiness-{}", Uuid::new_v4()));
-    let download_root_writable = match tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&probe)
-        .await
-    {
-        Ok(file) => {
-            drop(file);
-            tokio::fs::remove_file(&probe).await.is_ok()
+    let download_root = config.effective_download_dir();
+    let cached_root_writable = DOWNLOAD_ROOT_READINESS
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.clone())
+        .filter(|(path, checked_at, _)| {
+            path == &download_root && checked_at.elapsed() < DOWNLOAD_ROOT_READINESS_TTL
+        })
+        .map(|(_, _, writable)| writable);
+    let download_root_writable = if let Some(writable) = cached_root_writable {
+        writable
+    } else {
+        let probe = download_root.join(format!(".ravyn-readiness-{}", Uuid::new_v4()));
+        let writable = match tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&probe)
+            .await
+        {
+            Ok(file) => {
+                drop(file);
+                tokio::fs::remove_file(&probe).await.is_ok()
+            }
+            Err(_) => false,
+        };
+        if let Ok(mut cache) = DOWNLOAD_ROOT_READINESS
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+        {
+            *cache = Some((download_root, std::time::Instant::now(), writable));
         }
-        Err(_) => false,
+        writable
     };
     let progress_writer_running = s.manager.progress_writer_is_running().await;
     let accepting_tasks = s.manager.is_accepting_tasks();
@@ -862,10 +887,13 @@ pub(super) async fn events(
                 .data(r#"{"reason":"subscriber_lagged"}"#),
         }))
     });
-    let stream = replay.chain(live);
+    let shutdown = s.manager.shutdown_token();
+    let stream = replay.chain(live).take_until(async move {
+        shutdown.cancelled().await;
+    });
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(Duration::from_secs(1))
             .text("keep-alive"),
     )
 }

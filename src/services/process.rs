@@ -77,6 +77,12 @@ pub struct ProcessLimits {
     pub cpu_time: Duration,
     pub memory_bytes: u64,
     pub output_file_bytes: Option<u64>,
+    /// Maximum total bytes allowed below a monitored output directory.
+    pub output_tree_bytes: Option<u64>,
+    /// Maximum number of regular files allowed below a monitored output directory.
+    pub output_tree_files: Option<usize>,
+    /// Maximum directory nesting depth below a monitored output directory.
+    pub output_tree_depth: Option<usize>,
     pub stdout_bytes: usize,
     pub stderr_bytes: usize,
 }
@@ -88,6 +94,9 @@ impl Default for ProcessLimits {
             cpu_time: Duration::from_secs(2 * 60 * 60),
             memory_bytes: 2 * 1024 * 1024 * 1024,
             output_file_bytes: None,
+            output_tree_bytes: None,
+            output_tree_files: None,
+            output_tree_depth: None,
             stdout_bytes: 1024 * 1024,
             stderr_bytes: 1024 * 1024,
         }
@@ -142,17 +151,21 @@ pub async fn run(
                 tree.terminate(&mut child).await;
                 return Err(RavynError::Process("external process exceeded its wall-clock limit".into()));
             }
-            _ = output_check.tick(), if output_path.is_some() && limits.output_file_bytes.is_some() => {
-                let exceeded = match (&output_path, limits.output_file_bytes) {
-                    (Some(path), Some(limit)) => tokio::fs::metadata(path)
-                        .await
-                        .ok()
-                        .is_some_and(|metadata| metadata.len() > limit),
-                    _ => false,
+            _ = output_check.tick(), if output_path.is_some() && (
+                limits.output_file_bytes.is_some()
+                    || limits.output_tree_bytes.is_some()
+                    || limits.output_tree_files.is_some()
+                    || limits.output_tree_depth.is_some()
+            ) => {
+                let exceeded = match &output_path {
+                    Some(path) => output_limits_exceeded(path, limits).await?,
+                    None => false,
                 };
                 if exceeded {
                     tree.terminate(&mut child).await;
-                    return Err(RavynError::Process("external process exceeded its output file-size limit".into()));
+                    return Err(RavynError::Process(
+                        "external process exceeded its configured output limits".into(),
+                    ));
                 }
             }
             status = child.wait() => break status?,
@@ -172,6 +185,51 @@ pub async fn run(
         stdout_truncated,
         stderr_truncated,
     })
+}
+
+async fn output_limits_exceeded(path: &std::path::Path, limits: &ProcessLimits) -> Result<bool> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() {
+        return Ok(limits
+            .output_file_bytes
+            .is_some_and(|limit| metadata.len() > limit));
+    }
+    if !metadata.is_dir() {
+        return Ok(true);
+    }
+
+    let mut pending = vec![(path.to_path_buf(), 0_usize)];
+    let mut files = 0_usize;
+    let mut bytes = 0_u64;
+    while let Some((directory, depth)) = pending.pop() {
+        if limits.output_tree_depth.is_some_and(|limit| depth > limit) {
+            return Ok(true);
+        }
+        let mut entries = tokio::fs::read_dir(directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+                return Ok(true);
+            }
+            if file_type.is_dir() {
+                pending.push((entry.path(), depth.saturating_add(1)));
+                continue;
+            }
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(metadata.len());
+            if limits.output_tree_files.is_some_and(|limit| files > limit)
+                || limits.output_tree_bytes.is_some_and(|limit| bytes > limit)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub fn configure(command: &mut Command, limits: &ProcessLimits) {

@@ -184,6 +184,28 @@ export function takeBrowserAction(): Promise<BrowserAction | null> {
   return invoke<BrowserAction | null>("take_browser_action");
 }
 
+export async function drainBrowserActions(
+  handler: (action: BrowserAction) => void,
+): Promise<void> {
+  // Bound the drain so a corrupted or continuously refilled queue cannot keep
+  // the frontend in an infinite IPC loop.
+  for (let index = 0; index < 100; index += 1) {
+    const action = await takeBrowserAction();
+    if (!action) return;
+    handler(action);
+  }
+}
+
+export function onBrowserAction(
+  handler: (action: BrowserAction) => void,
+): Promise<UnlistenFn> {
+  // The native event is only an availability signal. Drain the authoritative
+  // queue so bursts of browser actions cannot overwrite or strand older ones.
+  return listen<BrowserAction>("ravyn://browser-action", () => {
+    void drainBrowserActions(handler).catch(() => undefined);
+  });
+}
+
 /** Native folder picker; returns the chosen absolute path or null. */
 export async function pickFolder(defaultPath?: string): Promise<string | null> {
   const result = await open({

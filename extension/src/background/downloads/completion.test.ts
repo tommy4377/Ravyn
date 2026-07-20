@@ -19,7 +19,7 @@ function statusEvent(
 ): NativeEvent {
   return {
     type: "event",
-    protocolVersion: 1,
+    protocolVersion: 2,
     event: "job_status",
     payload: {
       type: "job_status",

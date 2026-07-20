@@ -78,13 +78,16 @@ impl Rule {
             request.destination = Some(destination.clone());
         }
         request.options.tags.extend(self.actions.tags.clone());
+        request.options.tags.sort();
+        request.options.tags.dedup();
         if self.actions.speed_limit_bps.is_some() {
             request.speed_limit_bps = self.actions.speed_limit_bps;
         }
-        request
-            .options
-            .post_actions
-            .extend(self.actions.post_actions.clone());
+        for action in &self.actions.post_actions {
+            if !request.options.post_actions.contains(action) {
+                request.options.post_actions.push(action.clone());
+            }
+        }
     }
 }
 fn domain_matches(pattern: &str, host: &str) -> bool {
@@ -138,10 +141,11 @@ pub fn apply_matching(
             .options
             .tags
             .extend(rule.actions.tags.iter().cloned());
-        request
-            .options
-            .post_actions
-            .extend(rule.actions.post_actions.iter().cloned());
+        for action in &rule.actions.post_actions {
+            if !request.options.post_actions.contains(action) {
+                request.options.post_actions.push(action.clone());
+            }
+        }
     }
     request.options.tags.sort();
     request.options.tags.dedup();
@@ -187,10 +191,11 @@ pub fn preview_matching(
             .options
             .tags
             .extend(rule.actions.tags.iter().cloned());
-        result
-            .options
-            .post_actions
-            .extend(rule.actions.post_actions.iter().cloned());
+        for action in &rule.actions.post_actions {
+            if !result.options.post_actions.contains(action) {
+                result.options.post_actions.push(action.clone());
+            }
+        }
     }
     result.options.tags.sort();
     result.options.tags.dedup();

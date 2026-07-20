@@ -12,6 +12,8 @@ import {
   trackBatchResult,
   trackDownload,
 } from "../downloads/completion";
+import { createBatchSafely } from "../downloads/batch";
+import { enrichDownload, enrichProbe } from "../downloads/browser-context";
 import { notify } from "../notifications";
 import type { NativeClient } from "../native/client";
 import type { ResourceCache } from "../network/cache";
@@ -48,12 +50,14 @@ async function handle(
   // but Firefox still populates linkUrl when the element sits inside an
   // <a> (e.g. a gallery thumbnail), which previously downloaded the page.
   const directUrl = info.srcUrl ?? info.linkUrl;
+  const createDownload = (payload: CreateDownloadPayload) =>
+    create(native, payload, tab);
   switch (info.menuItemId) {
     case MenuId.linkDownload:
     case MenuId.imageDownload:
     case MenuId.mediaDownload:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           referer: info.pageUrl,
           sourceContext,
@@ -69,7 +73,7 @@ async function handle(
         stringValue(context?.currentSrc) ??
         directUrl;
       if (original)
-        await create(native, {
+        await createDownload({
           url: original,
           referer: info.pageUrl,
           sourceContext,
@@ -84,7 +88,7 @@ async function handle(
       break;
     case MenuId.linkPaused:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           paused: true,
           referer: info.pageUrl,
@@ -94,11 +98,14 @@ async function handle(
     case MenuId.linkAnalyze:
     case MenuId.mediaAnalyze:
       if (directUrl)
-        await native.request("probe_media", { url: directUrl, sourceContext });
+        await native.request(
+          "probe_media",
+          await enrichProbe(directUrl, sourceContext, tab),
+        );
       break;
     case MenuId.imageConvert:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           referer: info.pageUrl,
           postProcessingPreset: "image-webp",
@@ -107,7 +114,7 @@ async function handle(
       break;
     case MenuId.mediaAudio:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           kind: "media",
           referer: info.pageUrl,
@@ -118,7 +125,7 @@ async function handle(
     case MenuId.mediaSubtitles: {
       const subtitleUrl = info.pageUrl ?? directUrl;
       if (subtitleUrl)
-        await create(native, {
+        await createDownload({
           url: subtitleUrl,
           kind: "media",
           media: { writeSubtitles: true, subtitleLanguages: ["all"] },
@@ -142,7 +149,12 @@ async function handle(
         });
       break;
     case MenuId.selectionUrls:
-      await sendSelectionUrls(native, info.selectionText ?? "", sourceContext);
+      await sendSelectionUrls(
+        native,
+        info.selectionText ?? "",
+        sourceContext,
+        tab,
+      );
       break;
     case MenuId.selectionScan:
       if (tabId !== undefined) {
@@ -183,7 +195,7 @@ async function handle(
       break;
     case MenuId.pageYtdlp:
       if (info.pageUrl)
-        await create(native, {
+        await createDownload({
           url: info.pageUrl,
           kind: "media",
           sourceContext,
@@ -209,13 +221,15 @@ async function handle(
 async function create(
   native: NativeClient,
   payload: CreateDownloadPayload,
+  tab?: browser.tabs.Tab,
 ): Promise<void> {
   const normalized = normalizeUrl(payload.url);
   if (!normalized) return;
-  const job = await native.request<{ id?: string }>("create_download", {
-    ...payload,
-    url: normalized,
-  });
+  const enriched = await enrichDownload({ ...payload, url: normalized }, tab);
+  const job = await native.request<{ id?: string }>(
+    "create_download",
+    enriched,
+  );
   void trackDownload(
     job?.id,
     downloadLabel({ url: normalized, filename: payload.filename }),
@@ -226,13 +240,15 @@ async function sendSelectionUrls(
   native: NativeClient,
   selection: string,
   sourceContext: SourceContext,
+  tab?: browser.tabs.Tab,
 ): Promise<void> {
-  const downloads = urlsFromText(selection).map((url) => ({
-    url,
-    sourceContext,
-  }));
+  const downloads = await Promise.all(
+    urlsFromText(selection).map((url) =>
+      enrichDownload({ url, sourceContext }, tab),
+    ),
+  );
   if (!downloads.length) return;
-  const result = await native.request("create_batch", { downloads });
+  const result = await createBatchSafely(native, downloads);
   trackBatchResult(result, downloads);
 }
 
