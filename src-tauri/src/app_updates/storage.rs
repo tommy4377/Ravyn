@@ -13,7 +13,9 @@ pub(super) fn read_last_result(app: &AppHandle) -> Result<Option<AppUpdateResult
     read_json_file(&update_directory(app)?.join(UPDATE_RESULT_FILENAME))
 }
 
-fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
+pub(super) fn read_json_file<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+) -> Result<Option<T>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 use tokio::task::AbortHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{

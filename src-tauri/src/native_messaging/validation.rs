@@ -140,9 +140,9 @@ pub(super) fn sanitize_tags(values: &[String]) -> Result<Vec<String>, HostError>
 }
 
 #[derive(Debug, Clone)]
-struct SanitizedCookie {
-    name: String,
-    value: String,
+pub(super) struct SanitizedCookie {
+    pub(super) name: String,
+    pub(super) value: String,
     domain: String,
     path: String,
     secure: bool,
@@ -152,7 +152,7 @@ struct SanitizedCookie {
 }
 
 impl SanitizedCookie {
-    fn as_json(&self) -> Value {
+    pub(super) fn as_json(&self) -> Value {
         json!({
             "name": self.name,
             "value": self.value,

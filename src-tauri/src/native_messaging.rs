@@ -12,7 +12,6 @@ use validation::*;
 use event_stream::{start_event_stream, stop_event_stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

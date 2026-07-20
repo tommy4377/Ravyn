@@ -22,7 +22,7 @@ pub fn show(app: &tauri::AppHandle, title: &str, body: Option<&str>) -> Result<b
     let mut permission = manager
         .permission_state()
         .map_err(|error| format!("failed to read notification permission: {error}"))?;
-    if permission == PermissionState::Unknown {
+    if permission == PermissionState::Prompt {
         manager
             .request_permission()
             .map_err(|error| format!("failed to request notification permission: {error}"))?;

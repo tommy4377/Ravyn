@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 mod artifacts;
 
+pub use artifacts::EngineCleanupReport;
 use artifacts::*;
 
 use crate::{

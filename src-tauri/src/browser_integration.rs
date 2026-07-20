@@ -62,31 +62,6 @@ impl BrowserActionState {
     }
 }
 
-pub fn publish_action(action: &BrowserAction) -> Result<(), String> {
-    let directory = action_directory();
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("failed to create the browser action directory: {error}"))?;
-    crate::native_messaging::restrict_directory_to_current_user(&directory)?;
-    let name = format!(
-        "{:020}-{}-{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    );
-    let path = directory.join(name);
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(action)
-        .map_err(|error| format!("failed to serialize the browser action: {error}"))?;
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("failed to write the browser action: {error}"))?;
-    crate::native_messaging::restrict_file_to_current_user(&temporary)?;
-    std::fs::rename(&temporary, &path)
-        .map_err(|error| format!("failed to publish the browser action: {error}"))
-}
-
 fn take_published_action() -> Option<BrowserAction> {
     let directory = action_directory();
     if !directory.exists() {
