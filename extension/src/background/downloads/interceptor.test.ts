@@ -260,12 +260,14 @@ describe("DownloadInterceptor.handle", () => {
       confirmationIdFromCall(windowsCreate, 0),
       false,
     );
-    await first;
+    // Either concurrent handle may acquire the confirmation lock first. Wait
+    // for the second dialog before awaiting a specific promise so the test
+    // verifies serialization without assuming scheduler fairness.
     await vi.waitFor(() => expect(windowsCreate).toHaveBeenCalledTimes(2));
     interceptor.resolveConfirmation(
       confirmationIdFromCall(windowsCreate, 1),
       false,
     );
-    await second;
+    await Promise.all([first, second]);
   });
 });

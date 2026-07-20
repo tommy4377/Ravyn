@@ -4,13 +4,18 @@
 //! host discovers the authenticated desktop backend through a per-user runtime
 //! descriptor, validates every command, and exposes only browser-safe actions.
 
+mod event_stream;
+mod validation;
+
+use validation::*;
+
+use event_stream::{start_event_stream, stop_event_stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u32 = 2;
@@ -160,16 +165,19 @@ pub(crate) fn restrict_directory_to_current_user(_path: &Path) -> Result<(), Str
     Ok(())
 }
 
-pub fn try_handle_command_line() -> bool {
+pub fn try_handle_command_line() -> Option<i32> {
     let arguments = std::env::args().collect::<Vec<_>>();
     if !is_native_host_invocation(&arguments) {
-        return false;
+        return None;
     }
-    if let Err(error) = run_host() {
-        let response = NativeResponse::error("startup", "NATIVE_HOST_FAILED", &error, false);
-        let _ = write_message(&response);
+    match run_host() {
+        Ok(()) => Some(0),
+        Err(error) => {
+            let response = NativeResponse::error("startup", "NATIVE_HOST_FAILED", &error, false);
+            let _ = write_message(&response);
+            Some(1)
+        }
     }
-    true
 }
 
 fn is_native_host_invocation(arguments: &[String]) -> bool {
@@ -1012,6 +1020,10 @@ fn open_ravyn(client: &reqwest::blocking::Client, payload: &Value) -> Result<Val
             .and_then(Value::as_str)
             .unwrap_or("downloads"),
     );
+    let intent = payload
+        .get("intent")
+        .and_then(Value::as_str)
+        .and_then(sanitize_browser_intent);
     let source = payload
         .get("sourceUrl")
         .or_else(|| payload.get("source_url"))
@@ -1019,15 +1031,20 @@ fn open_ravyn(client: &reqwest::blocking::Client, payload: &Value) -> Result<Val
         .map(validate_optional_url)
         .transpose()?;
     let action = crate::browser_integration::BrowserAction {
+        intent: intent.map(str::to_owned),
         section: Some(section.into()),
-        source_url: source.clone(),
+        source_url: source,
     };
-    if let Ok(descriptor) = load_live_descriptor(client) {
-        crate::browser_integration::publish_action(&action)
-            .map_err(|error| HostError::new("APP_ACTION_FAILED", error, true))?;
-        focus_existing_process(descriptor.process_id);
-    } else {
-        launch_desktop(Some((section, source.as_deref())))?;
+
+    // Always launch a regular Ravyn process carrying the action. When the app
+    // is already running, the Tauri single-instance plugin forwards these
+    // arguments to the primary process and emits the browser-action event
+    // immediately. This avoids the old disk-queue-only path that could strand
+    // actions until another event or restart.
+    let running_process = load_live_descriptor(client).ok().map(|descriptor| descriptor.process_id);
+    launch_desktop(Some(&action))?;
+    if let Some(process_id) = running_process {
+        focus_existing_process(process_id);
     }
     Ok(json!({ "opened": true }))
 }
@@ -1054,7 +1071,7 @@ fn focus_existing_process(process_id: u32) {
 #[cfg(not(windows))]
 fn focus_existing_process(_process_id: u32) {}
 
-fn launch_desktop(action: Option<(&str, Option<&str>)>) -> Result<(), HostError> {
+fn launch_desktop(action: Option<&crate::browser_integration::BrowserAction>) -> Result<(), HostError> {
     let executable = std::env::current_exe().map_err(|error| {
         HostError::new(
             "APP_LAUNCH_FAILED",
@@ -1063,10 +1080,19 @@ fn launch_desktop(action: Option<(&str, Option<&str>)>) -> Result<(), HostError>
         )
     })?;
     let mut command = std::process::Command::new(&executable);
-    if let Some((section, source)) = action {
+    if let Some(action) = action {
         command.arg("--browser-action");
-        command.arg(format!("--browser-section={}", sanitize_section(section)));
-        if let Some(source) = source.and_then(|value| validate_optional_url(value).ok()) {
+        if let Some(intent) = action.intent.as_deref().and_then(sanitize_browser_intent) {
+            command.arg(format!("--browser-intent={intent}"));
+        }
+        if let Some(section) = action.section.as_deref() {
+            command.arg(format!("--browser-section={}", sanitize_section(section)));
+        }
+        if let Some(source) = action
+            .source_url
+            .as_deref()
+            .and_then(|value| validate_optional_url(value).ok())
+        {
             command.arg(format!(
                 "--browser-source={}",
                 percent_encoding::utf8_percent_encode(&source, percent_encoding::NON_ALPHANUMERIC)
@@ -1103,115 +1129,7 @@ fn configure_detached_process(command: &mut std::process::Command) {
 #[cfg(not(windows))]
 fn configure_detached_process(_command: &mut std::process::Command) {}
 
-static EVENT_STREAM_CONTROL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 static STDOUT_LOCK: Mutex<()> = Mutex::new(());
-
-/// Proxies the backend's `/v1/events` SSE stream onto stdout as native
-/// "event" messages. The cancellation flag makes subscribe/unsubscribe
-/// semantics real instead of leaving a reconnecting thread alive forever.
-fn start_event_stream(client: &reqwest::blocking::Client) {
-    let cancellation = {
-        let mut control = EVENT_STREAM_CONTROL.lock().unwrap_or_else(|error| error.into_inner());
-        if control
-            .as_ref()
-            .is_some_and(|flag| !flag.load(Ordering::Acquire))
-        {
-            return;
-        }
-        let cancellation = Arc::new(AtomicBool::new(false));
-        *control = Some(cancellation.clone());
-        cancellation
-    };
-    let fallback_client = client.clone();
-    std::thread::spawn(move || {
-        let event_client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(4))
-            .read_timeout(Duration::from_secs(2))
-            .user_agent(format!("Ravyn-Native-Events/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or(fallback_client);
-        run_event_stream(&event_client, &cancellation);
-    });
-}
-
-fn stop_event_stream() {
-    if let Some(cancellation) = EVENT_STREAM_CONTROL
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take()
-    {
-        cancellation.store(true, Ordering::Release);
-    }
-}
-
-fn run_event_stream(client: &reqwest::blocking::Client, cancellation: &AtomicBool) {
-    while !cancellation.load(Ordering::Acquire) {
-        if let Ok(descriptor) = load_live_descriptor(client) {
-            let _ = stream_events_once(client, &descriptor, cancellation);
-        }
-        for _ in 0..30 {
-            if cancellation.load(Ordering::Acquire) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-}
-
-fn stream_events_once(
-    client: &reqwest::blocking::Client,
-    descriptor: &BackendDescriptor,
-    cancellation: &AtomicBool,
-) -> Result<(), String> {
-    let response = client
-        .get(format!("{}/v1/events", descriptor.base_url))
-        .bearer_auth(&descriptor.api_token)
-        .send()
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("event stream returned HTTP {}", response.status()));
-    }
-    let mut reader = std::io::BufReader::new(response);
-    let mut data_lines: Vec<String> = Vec::new();
-    loop {
-        if cancellation.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let mut line = String::new();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if bytes_read == 0 || cancellation.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
-        if line.is_empty() {
-            if !data_lines.is_empty() {
-                forward_event(&data_lines.join("\n"));
-                data_lines.clear();
-            }
-            continue;
-        }
-        if let Some(data) = line.strip_prefix("data:") {
-            data_lines.push(data.trim_start().to_owned());
-        }
-    }
-}
-
-fn forward_event(payload: &str) {
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return;
-    };
-    let Some(event_type) = value.get("type").and_then(Value::as_str) else {
-        return;
-    };
-    let _ = write_message(&json!({
-        "type": "event",
-        "protocolVersion": PROTOCOL_VERSION,
-        "event": event_type,
-        "payload": value,
-    }));
-}
 
 fn wait_for_backend(client: &reqwest::blocking::Client) -> Result<BackendDescriptor, HostError> {
     let deadline = std::time::Instant::now() + BACKEND_START_TIMEOUT;
@@ -1370,324 +1288,6 @@ fn api_request(
             true,
         )
     })
-}
-
-fn sanitize_source_context(context: &SourceContext) -> Result<Value, HostError> {
-    if context.browser != "firefox" {
-        return Err(HostError::new(
-            "INVALID_SOURCE_CONTEXT",
-            "browser source must be Firefox",
-            false,
-        ));
-    }
-
-    // Preserve only the fact that a request came from private browsing. Page
-    // identity and container metadata from an incognito window are deliberately
-    // not persisted in the job database.
-    if context.incognito {
-        return Ok(json!({
-            "browser": "firefox",
-            "incognito": true,
-            "container_id": null,
-            "page_url": null,
-            "page_title": null,
-            "tab_id": null,
-            "frame_id": null
-        }));
-    }
-
-    let page_url = context
-        .page_url
-        .as_deref()
-        .map(validate_optional_url)
-        .transpose()?;
-    let container_id = context
-        .container_id
-        .as_deref()
-        .map(|value| sanitize_text(value, 200))
-        .transpose()?;
-    let page_title = context
-        .page_title
-        .as_deref()
-        .map(|value| sanitize_text(value, 500))
-        .transpose()?;
-    Ok(json!({
-        "browser": "firefox",
-        "incognito": false,
-        "container_id": container_id,
-        "page_url": page_url,
-        "page_title": page_title,
-        "tab_id": context.tab_id,
-        "frame_id": context.frame_id
-    }))
-}
-
-fn validate_network_url(value: &str) -> Result<String, HostError> {
-    let parsed = url::Url::parse(value)
-        .map_err(|_| HostError::new("INVALID_URL", "download URL is invalid", false))?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.username() != ""
-        || parsed.password().is_some()
-    {
-        return Err(HostError::new(
-            "INVALID_URL",
-            "only credential-free HTTP and HTTPS URLs are accepted",
-            false,
-        ));
-    }
-    if value.len() > 16_384 {
-        return Err(HostError::new(
-            "INVALID_URL",
-            "download URL is too long",
-            false,
-        ));
-    }
-    Ok(parsed.to_string())
-}
-
-fn validate_optional_url(value: &str) -> Result<String, HostError> {
-    validate_network_url(value)
-}
-
-fn validate_uuid(value: Option<&str>) -> Result<Option<String>, HostError> {
-    value
-        .map(|value| {
-            uuid::Uuid::parse_str(value)
-                .map(|id| id.to_string())
-                .map_err(|_| {
-                    HostError::new("INVALID_IDENTIFIER", "identifier must be a UUID", false)
-                })
-        })
-        .transpose()
-}
-
-fn sanitize_filename(value: &str) -> Result<String, HostError> {
-    let value = sanitize_text(value, 255)?;
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value
-            .chars()
-            .any(|character| matches!(character, '/' | '\\' | '\0'))
-    {
-        return Err(HostError::new(
-            "INVALID_FILENAME",
-            "filename contains invalid path characters",
-            false,
-        ));
-    }
-    Ok(value)
-}
-
-fn sanitize_text(value: &str, max: usize) -> Result<String, HostError> {
-    let trimmed = value.trim();
-    if trimmed.len() > max || trimmed.chars().any(char::is_control) {
-        return Err(HostError::new(
-            "INVALID_TEXT",
-            format!("text value exceeds {max} characters or contains control characters"),
-            false,
-        ));
-    }
-    Ok(trimmed.to_owned())
-}
-
-fn sanitize_tags(values: &[String]) -> Result<Vec<String>, HostError> {
-    if values.len() > 50 {
-        return Err(HostError::new(
-            "INVALID_TAGS",
-            "at most 50 tags are accepted",
-            false,
-        ));
-    }
-    let mut tags = values
-        .iter()
-        .map(|value| sanitize_text(value, 64))
-        .collect::<Result<Vec<_>, _>>()?;
-    tags.retain(|value| !value.is_empty());
-    tags.sort();
-    tags.dedup();
-    Ok(tags)
-}
-
-#[derive(Debug, Clone)]
-struct SanitizedCookie {
-    name: String,
-    value: String,
-    domain: String,
-    path: String,
-    secure: bool,
-    http_only: bool,
-    same_site: String,
-    host_only: bool,
-}
-
-impl SanitizedCookie {
-    fn as_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "value": self.value,
-            "domain": self.domain,
-            "path": self.path,
-            "secure": self.secure,
-            "http_only": self.http_only,
-            "same_site": self.same_site,
-            "host_only": self.host_only,
-        })
-    }
-}
-
-fn sanitize_cookies(
-    values: &[CookieValue],
-    source: &str,
-) -> Result<Vec<SanitizedCookie>, HostError> {
-    if values.len() > MAX_COOKIES {
-        return Err(HostError::new(
-            "INVALID_COOKIES",
-            format!("at most {MAX_COOKIES} cookies are accepted"),
-            false,
-        ));
-    }
-    let source_url = url::Url::parse(source).map_err(|_| {
-        HostError::new("INVALID_COOKIES", "cookie source URL is invalid", false)
-    })?;
-    let source_host = source_url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let source_path = source_url.path();
-    let mut cookies = Vec::new();
-    for cookie in values {
-        let name = sanitize_text(&cookie.name, 256)?;
-        let value = sanitize_text(&cookie.value, 4_096)?;
-        let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
-        let domain_matches = if cookie.host_only {
-            source_host == domain
-        } else {
-            source_host == domain || source_host.ends_with(&format!(".{domain}"))
-        };
-        let path = if cookie.path.starts_with('/') {
-            sanitize_text(&cookie.path, 2_048)?
-        } else {
-            "/".to_owned()
-        };
-        let path_matches = source_path == path
-            || source_path.starts_with(&path)
-                && (path.ends_with('/')
-                    || source_path
-                        .as_bytes()
-                        .get(path.len())
-                        .is_some_and(|byte| *byte == b'/'));
-        if name.is_empty()
-            || !domain_matches
-            || !path_matches
-            || (cookie.secure && source_url.scheme() != "https")
-        {
-            continue;
-        }
-        cookies.push(SanitizedCookie {
-            name,
-            value,
-            domain,
-            path,
-            secure: cookie.secure,
-            http_only: cookie.http_only,
-            same_site: sanitize_text(&cookie.same_site, 32)?,
-            host_only: cookie.host_only,
-        });
-    }
-    cookies.sort_by(|left, right| right.path.len().cmp(&left.path.len()));
-    Ok(cookies)
-}
-
-fn cookie_header(cookies: &[SanitizedCookie]) -> Option<String> {
-    (!cookies.is_empty()).then(|| {
-        cookies
-            .iter()
-            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
-}
-
-fn sanitize_media_options(value: &BrowserMediaOptions) -> Result<Value, HostError> {
-    let format = value
-        .format
-        .as_deref()
-        .map(|value| sanitize_text(value, 200))
-        .transpose()?;
-    let audio_format = value
-        .audio_format
-        .as_deref()
-        .map(|value| sanitize_text(value, 20))
-        .transpose()?;
-    let subtitle_languages = value
-        .subtitle_languages
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .take(50)
-        .map(|value| sanitize_text(value, 32))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({
-        "format": format,
-        "max_height": value.max_height.map(|height| height.clamp(144, 8640)),
-        "audio_only": value.audio_only.unwrap_or(false),
-        "audio_format": audio_format,
-        "write_subtitles": value.write_subtitles.unwrap_or(false),
-        "subtitle_languages": subtitle_languages
-    }))
-}
-
-fn post_actions_for(preset: Option<&str>) -> Result<Vec<Value>, HostError> {
-    let Some(preset) = preset else {
-        return Ok(Vec::new());
-    };
-    let (extension, ffmpeg_preset) = match preset {
-        "image-webp" => ("webp", "image-webp"),
-        "image-avif" => ("avif", "image-avif"),
-        "audio-mp3" => ("mp3", "audio-mp3"),
-        "audio-opus" => ("opus", "audio-opus"),
-        "video-h264" => ("mp4", "video-h264"),
-        "video-h265" => ("mkv", "video-h265"),
-        _ => {
-            return Err(HostError::new(
-                "INVALID_POST_PROCESSING",
-                "unsupported browser post-processing preset",
-                false,
-            ));
-        }
-    };
-    Ok(vec![json!({
-        "type": "convert_media",
-        "extension": extension,
-        "preset": ffmpeg_preset,
-        "arguments": [],
-        "unsafe_arguments": false,
-        "delete_original": false
-    })])
-}
-
-fn sanitize_section(value: &str) -> &'static str {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "library" => "library",
-        "media" => "media",
-        "torrents" => "torrents",
-        "automation" => "automation",
-        "components" => "components",
-        "settings" => "settings",
-        _ => "downloads",
-    }
-}
-
-fn descriptor_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("runtime").join(DESCRIPTOR_FILE)
-}
-
-fn unix_time_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 fn read_message(reader: &mut impl Read) -> Result<Option<Value>, String> {

@@ -483,6 +483,7 @@ export class SetupController {
             installed_sha256: persistedInstallation.installed_sha256,
             integration_completed: true,
             integration_errors: [],
+            integration_warnings: [],
           };
         }
       } else if (this.applicationMode === "installed") {
@@ -512,6 +513,7 @@ export class SetupController {
           integration_errors: verified
             ? []
             : ["the running executable could not be verified"],
+          integration_warnings: [],
         };
       }
 

@@ -27,6 +27,10 @@
 
   function applyBrowserAction(action: BrowserAction | null): void {
     if (!action) return;
+    if (action.intent === "create_schedule" && action.source_url) {
+      navigation.requestSchedule(action.source_url);
+      return;
+    }
     if (action.source_url) {
       navigation.requestAdd(
         action.section === "media"

@@ -73,6 +73,20 @@ describe("menus handlers", () => {
     );
   });
 
+  it("opens the automation scheduler with the selected link prefilled", async () => {
+    const { trigger, request } = setup();
+    await trigger({
+      menuItemId: MenuId.linkSchedule,
+      linkUrl: "https://example.com/nightly.zip",
+      pageUrl: "https://example.com/",
+    });
+    expect(request).toHaveBeenCalledWith("open_ravyn", {
+      intent: "create_schedule",
+      section: "automation",
+      sourceUrl: "https://example.com/nightly.zip",
+    });
+  });
+
   it("skips subtitles when there is no page or media URL", async () => {
     const { trigger, request } = setup();
     await trigger({ menuItemId: MenuId.mediaSubtitles });

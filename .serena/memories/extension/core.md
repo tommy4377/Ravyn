@@ -1,5 +1,5 @@
 # Firefox Extension (extension/)
-- Firefox Manifest V3 browser extension for the Ravyn download manager, version synchronized with the application (currently 0.2.0).
+- Firefox Manifest V3 browser extension for the Ravyn download manager, version synchronized with the application (currently 0.3.0).
 - Build system: TypeScript, web-ext for packaging/lint, vitest for tests, deterministic zip via Python `scripts/deterministic-zip.py`. Build scripts in `scripts/`: `build-firefox.mjs`, `package-firefox.mjs`, `package-source.mjs`, `verify-packages.mjs`, `clean.mjs`.
 - Extension ID: `firefox-extension@ravyn.app`. Native messaging host: `com.ravyn.download_manager`.
 

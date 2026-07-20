@@ -259,64 +259,80 @@ jobs:
             $env:RAVYN_ENGINE_MANIFEST_PUBLIC_KEY
           Remove-Item 'dist\ravyn-component-manifest-unsigned.json'
 
-      - name: Smoke-test the self-installing executable
+      - name: Smoke-test installed-mode integration and backend readiness
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # The distribution is the application itself; installation happens
-          # through the in-app setup, which cannot run headless. CI therefore
-          # validates that the shipped executable starts, reaches full backend
-          # readiness, and registers the Firefox native host on demand.
-          $installedExe = Join-Path $env:GITHUB_WORKSPACE 'dist\Ravyn.exe'
-          if (-not (Test-Path $installedExe)) {
-            throw "The publishable executable was not found at $installedExe"
+          # Native Messaging registration intentionally refuses portable paths.
+          # Mirror the real per-user installed location so this smoke test
+          # exercises the same trust boundary as the in-app installer.
+          $publishableExe = Join-Path $env:GITHUB_WORKSPACE 'dist\Ravyn.exe'
+          if (-not (Test-Path $publishableExe)) {
+            throw "The publishable executable was not found at $publishableExe"
           }
 
-          & $installedExe --register-firefox-native-host
-          if ($LASTEXITCODE -ne 0) {
-            throw "Firefox native-host registration failed with exit code $LASTEXITCODE"
-          }
+          $smokeInstallDir = Join-Path $env:LOCALAPPDATA 'Ravyn'
+          $installedExe = Join-Path $smokeInstallDir 'Ravyn.exe'
           $nativeHostKey = 'HKCU:\Software\Mozilla\NativeMessagingHosts\com.ravyn.download_manager'
-          if (-not (Test-Path $nativeHostKey)) {
-            throw 'The native-host registration did not create the registry entry.'
-          }
-          & $installedExe --unregister-firefox-native-host
-          if ($LASTEXITCODE -ne 0) {
-            throw "Firefox native-host unregistration failed with exit code $LASTEXITCODE"
-          }
-          if (Test-Path $nativeHostKey) {
-            throw 'The native-host unregistration left the registry entry behind.'
-          }
-
           $env:RAVYN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ravyn-smoke-data'
           $readyMarker = Join-Path $env:RUNNER_TEMP 'ravyn-desktop-ready.json'
-          Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
-          $env:RAVYN_DESKTOP_READY_FILE = $readyMarker
-          $process = Start-Process -FilePath $installedExe -PassThru
+          $process = $null
 
-          $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
-          while (-not (Test-Path $readyMarker) -and [DateTimeOffset]::UtcNow -lt $deadline) {
-            if ($process.HasExited) {
-              throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+          try {
+            Remove-Item $smokeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $smokeInstallDir | Out-Null
+            Copy-Item $publishableExe $installedExe
+
+            & $installedExe --register-firefox-native-host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Firefox native-host registration failed with exit code $LASTEXITCODE"
             }
-            Start-Sleep -Milliseconds 250
-          }
-          if (-not (Test-Path $readyMarker)) {
-            throw 'Ravyn did not publish its desktop readiness marker within 45 seconds.'
-          }
+            if (-not (Test-Path $nativeHostKey)) {
+              throw 'The native-host registration did not create the registry entry.'
+            }
 
-          $ready = Get-Content $readyMarker -Raw | ConvertFrom-Json
-          if ($ready.schema -ne 1 -or $ready.process_id -ne $process.Id) {
-            throw 'The desktop readiness marker does not describe the launched process.'
-          }
-          $health = Invoke-RestMethod -Uri "$($ready.base_url)/health/ready" -TimeoutSec 10
-          if (-not $health.ready -or -not $health.database_writable -or -not $health.progress_writer_running) {
-            throw "The installed Ravyn backend failed readiness: $($health | ConvertTo-Json -Compress)"
-          }
+            & $installedExe --unregister-firefox-native-host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Firefox native-host unregistration failed with exit code $LASTEXITCODE"
+            }
+            if (Test-Path $nativeHostKey) {
+              throw 'The native-host unregistration left the registry entry behind.'
+            }
 
-          Stop-Process -Id $process.Id -Force
-          Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
-          Remove-Item Env:RAVYN_DESKTOP_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+            $env:RAVYN_DESKTOP_READY_FILE = $readyMarker
+            $process = Start-Process -FilePath $installedExe -PassThru
+
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
+            while (-not (Test-Path $readyMarker) -and [DateTimeOffset]::UtcNow -lt $deadline) {
+              if ($process.HasExited) {
+                throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not (Test-Path $readyMarker)) {
+              throw 'Ravyn did not publish its desktop readiness marker within 45 seconds.'
+            }
+
+            $ready = Get-Content $readyMarker -Raw | ConvertFrom-Json
+            if ($ready.schema -ne 1 -or $ready.process_id -ne $process.Id) {
+              throw 'The desktop readiness marker does not describe the launched process.'
+            }
+            $health = Invoke-RestMethod -Uri "$($ready.base_url)/health/ready" -TimeoutSec 10
+            if (-not $health.ready -or -not $health.database_writable -or -not $health.progress_writer_running) {
+              throw "The installed Ravyn backend failed readiness: $($health | ConvertTo-Json -Compress)"
+            }
+          } finally {
+            if ($null -ne $process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item $nativeHostKey -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+            Remove-Item $env:RAVYN_DATA_DIR -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $smokeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:RAVYN_DESKTOP_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:RAVYN_DATA_DIR -ErrorAction SilentlyContinue
+          }
 
       - name: Generate CycloneDX SBOM
         shell: pwsh

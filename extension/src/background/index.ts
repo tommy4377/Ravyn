@@ -65,12 +65,16 @@ async function initialize(): Promise<void> {
     // than the old request-refresh stub), so this fires the moment a rule
     // actually changes instead of waiting out the 10-minute cache TTL.
     if (event.event === "rule_changed") rules.invalidate();
+    if (event.event === "resync_required") {
+      rules.invalidate();
+      void reconcileCompletions(native);
+    }
     void handleCompletionEvent(event);
     void broadcast({ type: "ravyn-native-event", event });
   });
-  // The event stream has no replay: completions that happened while the
-  // port was down (event-page suspension, backend restart) are only
-  // recoverable by re-checking the tracked jobs once the backend is back.
+  // The native bridge replays backend SSE events with Last-Event-ID. A full
+  // reconciliation is still useful when the browser event page or native
+  // port was unavailable long enough to fall outside the backend replay buffer.
   let backendWasConnected = false;
   native.subscribeStatus((status) => {
     if (status.backendConnected && !backendWasConnected) {

@@ -15,11 +15,21 @@
   import RulesList from "./RulesList.svelte";
   import ScheduleEditor from "./ScheduleEditor.svelte";
   import SchedulesList from "./SchedulesList.svelte";
+  import { navigation } from "../stores/navigation.svelte";
 
   const controller = new AutomationController();
 
   $effect(() => {
     void controller.load();
+  });
+
+  $effect(() => {
+    if (navigation.pendingScheduleSource === null) return;
+    const source = navigation.consumeScheduleSource();
+    if (source === null) return;
+    controller.tab = "schedules";
+    controller.openSchedule();
+    controller.scheduleDraft.source = source;
   });
 </script>
 

@@ -22,6 +22,12 @@ use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+mod installer_helper;
+mod storage;
+
+use installer_helper::*;
+use storage::*;
+
 const METADATA_LIMIT: u64 = 512 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const AUTOMATIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -932,18 +938,35 @@ async fn perform_check_and_stage(
         let _ = clear_persisted_pending(app);
         return Err(UPDATE_CANCELLED_ERROR.into());
     }
+    let ready_version = manifest.version.clone();
     inner.pending = Some(PendingUpdate {
         manifest: manifest.clone(),
         installer_path: final_path,
         repair: repair_current_version,
     });
     inner.status.phase = AppUpdatePhase::Ready;
-    inner.status.available_version = Some(manifest.version);
+    inner.status.available_version = Some(ready_version.clone());
     inner.status.downloaded_bytes = downloaded;
     inner.status.total_bytes = Some(downloaded);
     inner.status.install_on_exit = true;
     inner.status.repair_mode = repair_current_version;
     inner.status.last_error = None;
+    drop(inner);
+
+    let (title, body) = if repair_current_version {
+        (
+            "Ravyn repair is ready".to_owned(),
+            "The verified repair package will install when Ravyn closes normally.".to_owned(),
+        )
+    } else {
+        (
+            format!("Ravyn {ready_version} is ready"),
+            "The verified update was downloaded silently and will install when Ravyn closes normally.".to_owned(),
+        )
+    };
+    if let Err(error) = crate::native_notifications::show_if_background(app, &title, Some(&body)) {
+        tracing::debug!(%error, "native update notification was unavailable");
+    }
     Ok(())
 }
 
@@ -1256,275 +1279,6 @@ fn launch_installer_helper(transaction: &PendingUpdateTransaction) -> Result<(),
 #[cfg(not(windows))]
 fn launch_installer_helper(_transaction: &PendingUpdateTransaction) -> Result<(), String> {
     Err("application update installation is supported only on Windows".into())
-}
-
-fn build_installer_helper_script(
-    transaction: &PendingUpdateTransaction,
-    parent_pid: u32,
-) -> String {
-    build_installer_helper_script_with_timeout(transaction, parent_pid, READINESS_TIMEOUT_SECS)
-}
-
-fn build_installer_helper_script_with_timeout(
-    transaction: &PendingUpdateTransaction,
-    parent_pid: u32,
-    readiness_timeout_secs: u64,
-) -> String {
-    use std::fmt::Write as _;
-
-    let shortcuts = transaction
-        .shortcuts
-        .iter()
-        .map(|path| powershell_literal(path))
-        .collect::<Vec<_>>()
-        .join(",");
-    let shortcuts = if shortcuts.is_empty() {
-        "@()".to_owned()
-    } else {
-        format!("@({shortcuts})")
-    };
-
-    let mut script = String::new();
-    writeln!(&mut script, "$ErrorActionPreference='Stop';").unwrap();
-    writeln!(&mut script, "$parentPid={parent_pid};").unwrap();
-    for (name, path) in [
-        ("installDir", &transaction.install_dir),
-        ("installed", &transaction.installed_exe),
-        ("backupDir", &transaction.backup_dir),
-        ("shortcutBackupDir", &transaction.shortcuts_backup_dir),
-        ("regUninstallBackup", &transaction.registry_uninstall_backup),
-        ("regRunBackup", &transaction.registry_run_backup),
-        ("journal", &transaction.journal_path),
-        ("installer", &transaction.installer_path),
-        ("ready", &transaction.readiness_marker),
-        ("transactionPath", &transaction.transaction_path),
-        ("pendingStatePath", &transaction.pending_state_path),
-        ("resultPath", &transaction.result_path),
-    ] {
-        writeln!(&mut script, "${name}={};", powershell_literal(path)).unwrap();
-    }
-    writeln!(&mut script, "$shortcuts={shortcuts};").unwrap();
-    writeln!(
-        &mut script,
-        "$fromVersion={};",
-        powershell_string(&transaction.from_version)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$toVersion={};",
-        powershell_string(&transaction.to_version)
-    )
-    .unwrap();
-    writeln!(&mut script, "$timeoutSeconds={readiness_timeout_secs};").unwrap();
-    writeln!(
-        &mut script,
-        "$regUninstallKey={};",
-        powershell_string(REGISTRY_UNINSTALL_KEY)
-    )
-    .unwrap();
-    writeln!(
-        &mut script,
-        "$regRunKey={};",
-        powershell_string(REGISTRY_RUN_KEY)
-    )
-    .unwrap();
-    script.push_str(
-        "function Write-Journal([string]$phase) { try { Set-Content -LiteralPath $journal -Value $phase -Force } catch {} };\n\
-         function Restore-Installation {\n\
-           Write-Journal 'rollback';\n\
-           if (Test-Path -LiteralPath $backupDir) {\n\
-             Get-ChildItem -LiteralPath $installDir -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe','.dll' } | Remove-Item -Force -ErrorAction SilentlyContinue;\n\
-             Get-ChildItem -LiteralPath $backupDir -File -Force | Copy-Item -Destination $installDir -Force;\n\
-           };\n\
-           if ($script:uninstallKeyExisted) { if (Test-Path -LiteralPath $regUninstallBackup) { reg.exe import $regUninstallBackup | Out-Null } }\n\
-           else { reg.exe delete $regUninstallKey /f | Out-Null };\n\
-           if ($script:runHadRavyn) { if (Test-Path -LiteralPath $regRunBackup) { reg.exe import $regRunBackup | Out-Null } }\n\
-           else { Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Ravyn' -Force -ErrorAction SilentlyContinue };\n\
-           $i=0;\n\
-           foreach ($link in $shortcuts) {\n\
-             $saved=Join-Path $shortcutBackupDir (\"$i.lnk\");\n\
-             if (Test-Path -LiteralPath $saved) { Copy-Item -LiteralPath $saved -Destination $link -Force -ErrorAction SilentlyContinue }\n\
-             elseif (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue };\n\
-             $i++;\n\
-           };\n\
-         };\n\
-         $ravyn=Get-Process -Id $parentPid -ErrorAction SilentlyContinue;\n\
-         if ($null -ne $ravyn) { $ravyn.WaitForExit() };\n\
-         $outcome='failed'; $message=''; $launched=$null;\n\
-         $script:uninstallKeyExisted=$false; $script:runHadRavyn=$false;\n\
-         try {\n\
-           Write-Journal 'backup';\n\
-           Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue;\n\
-           if (Test-Path -LiteralPath $backupDir) { Remove-Item -LiteralPath $backupDir -Recurse -Force };\n\
-           New-Item -ItemType Directory -Force -Path $backupDir | Out-Null;\n\
-           Get-ChildItem -LiteralPath $installDir -File -Force | Where-Object { $_.Extension -in '.exe','.dll' } | Copy-Item -Destination $backupDir -Force;\n\
-           $script:uninstallKeyExisted=Test-Path 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn';\n\
-           if ($script:uninstallKeyExisted) { reg.exe export $regUninstallKey $regUninstallBackup /y | Out-Null };\n\
-           $script:runHadRavyn=$null -ne (Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Ravyn' -ErrorAction SilentlyContinue);\n\
-           if ($script:runHadRavyn) { reg.exe export $regRunKey $regRunBackup /y | Out-Null };\n\
-           New-Item -ItemType Directory -Force -Path $shortcutBackupDir | Out-Null;\n\
-           $i=0;\n\
-           foreach ($link in $shortcuts) {\n\
-             if (Test-Path -LiteralPath $link) { Copy-Item -LiteralPath $link -Destination (Join-Path $shortcutBackupDir (\"$i.lnk\")) -Force };\n\
-             $i++;\n\
-           };\n\
-           Write-Journal 'install';\n\
-           Copy-Item -LiteralPath $installer -Destination $installed -Force;\n\
-           if (Test-Path 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn') { Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn' -Name 'DisplayVersion' -Value $toVersion -ErrorAction SilentlyContinue };\n\
-           Write-Journal 'verify';\n\
-           $launched=Start-Process -FilePath $installed -PassThru;\n\
-           $deadline=(Get-Date).AddSeconds($timeoutSeconds);\n\
-           while ((Get-Date) -lt $deadline) {\n\
-             if (Test-Path -LiteralPath $ready) { $outcome='succeeded'; $message='The updated version reached backend and UI readiness.'; break };\n\
-             if ($launched.HasExited) { break };\n\
-             Start-Sleep -Milliseconds 500;\n\
-           };\n\
-           if ($outcome -ne 'succeeded') {\n\
-             $message='The updated version did not reach readiness before the safety deadline.';\n\
-             if (($null -ne $launched) -and (!$launched.HasExited)) { Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $launched.Id -Timeout 10 -ErrorAction SilentlyContinue };\n\
-             Restore-Installation;\n\
-             $outcome='rolled_back';\n\
-           };\n\
-         } catch {\n\
-           $message=$_.Exception.Message;\n\
-           if (($null -ne $launched) -and (!$launched.HasExited)) { Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $launched.Id -Timeout 10 -ErrorAction SilentlyContinue };\n\
-           if (Test-Path -LiteralPath $backupDir) {\n\
-             Restore-Installation;\n\
-             $outcome='rolled_back';\n\
-           };\n\
-         };\n\
-         Write-Journal 'finalize';\n\
-         Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue;\n\
-         Remove-Item -LiteralPath $shortcutBackupDir -Recurse -Force -ErrorAction SilentlyContinue;\n\
-         Remove-Item -LiteralPath $regUninstallBackup -Force -ErrorAction SilentlyContinue;\n\
-         Remove-Item -LiteralPath $regRunBackup -Force -ErrorAction SilentlyContinue;\n\
-         if ($outcome -eq 'succeeded') {\n\
-           Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue;\n\
-         };\n\
-         try {\n\
-           $resultObject=[ordered]@{outcome=$outcome;from_version=$fromVersion;to_version=$toVersion;completed_at_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();message=$message};\n\
-           $json=$resultObject | ConvertTo-Json -Compress;\n\
-           $resultTemp=\"$resultPath.tmp\";\n\
-           [System.IO.File]::WriteAllText($resultTemp,$json,(New-Object System.Text.UTF8Encoding($false)));\n\
-           Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue;\n\
-           Move-Item -LiteralPath $resultTemp -Destination $resultPath;\n\
-         } catch {\n\
-           $message=\"$message Result persistence failed: $($_.Exception.Message)\".Trim();\n\
-         } finally {\n\
-           Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue;\n\
-           Remove-Item -LiteralPath $pendingStatePath -Force -ErrorAction SilentlyContinue;\n\
-           Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue;\n\
-           Remove-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue;\n\
-           if (($outcome -eq 'rolled_back') -or ($outcome -eq 'failed')) { if (Test-Path -LiteralPath $installed) { Start-Process -FilePath $installed | Out-Null } };\n\
-         };\n\
-         if ($outcome -eq 'failed') { exit 1 } else { exit 0 };\n",
-    );
-    script
-}
-
-fn update_directory(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_cache_dir()
-        .map(|path| path.join("updates"))
-        .map_err(|error| format!("failed to resolve the update state directory: {error}"))
-}
-
-fn read_last_result(app: &AppHandle) -> Result<Option<AppUpdateResult>, String> {
-    read_json_file(&update_directory(app)?.join(UPDATE_RESULT_FILENAME))
-}
-
-fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
-    };
-    if bytes.is_empty() || bytes.len() > 64 * 1024 {
-        return Err(format!("{} is empty or oversized", path.display()));
-    }
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
-    serde_json::from_slice(bytes)
-        .map(Some)
-        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
-}
-
-fn write_json_atomic_sync(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| format!("failed to serialize update state: {error}"))?;
-    write_bytes_atomic_sync(path, &bytes)
-}
-
-fn write_bytes_atomic_sync(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "the update state path has no parent directory".to_owned())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create the update state directory: {error}"))?;
-    let temporary = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&temporary);
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("failed to write update state: {error}"))?;
-    if path.exists() {
-        std::fs::remove_file(path)
-            .map_err(|error| format!("failed to replace update state: {error}"))?;
-    }
-    std::fs::rename(&temporary, path)
-        .map_err(|error| format!("failed to activate update state: {error}"))
-}
-
-async fn read_response_bounded(
-    response: reqwest::Response,
-    limit: u64,
-    label: &str,
-    cancellation: &CancellationToken,
-) -> Result<Vec<u8>, String> {
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    loop {
-        let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
-            next = stream.next() => next,
-        };
-        let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|error| format!("failed to read {label}: {error}"))?;
-        let next_len = bytes.len().saturating_add(chunk.len());
-        if u64::try_from(next_len).unwrap_or(u64::MAX) > limit {
-            return Err(format!("{label} exceeds the maximum size"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if bytes.is_empty() {
-        return Err(format!("{label} is empty"));
-    }
-    Ok(bytes)
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        path.to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_ascii_lowercase()
-    };
-    normalize(left) == normalize(right)
-}
-
-fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn powershell_literal(path: &Path) -> String {
-    powershell_string(&path.to_string_lossy())
-}
-
-fn powershell_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]

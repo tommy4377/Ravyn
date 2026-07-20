@@ -148,6 +148,14 @@ def tauri_command_handlers() -> set[str]:
     }
 
 
+
+def tauri_build_manifest_commands() -> set[str]:
+    source = (ROOT / "src-tauri/build.rs").read_text(encoding="utf-8")
+    match = re.search(r"\.commands\(\s*&\[([^\]]+)\]\s*\)", source, re.DOTALL)
+    if not match:
+        fail("could not find the Tauri build.rs app-manifest command list")
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', match.group(1)))
+
 def frontend_tauri_commands() -> set[str]:
     source = (ROOT / "frontend/src/lib/native/tauri.ts").read_text(encoding="utf-8")
     return set(
@@ -185,6 +193,13 @@ def capability_permission_identifiers() -> set[str]:
 
 def validate_tauri_command_contracts() -> tuple[int, int]:
     handlers = tauri_command_handlers()
+    build_manifest = tauri_build_manifest_commands()
+    if handlers != build_manifest:
+        fail(
+            "Tauri invoke handler/build.rs app-manifest drift detected:\n"
+            f"  handler only: {sorted(handlers - build_manifest)}\n"
+            f"  build.rs only: {sorted(build_manifest - handlers)}"
+        )
     frontend = frontend_tauri_commands()
     missing_handlers = frontend - handlers
     if missing_handlers:
@@ -218,6 +233,45 @@ def validate_tauri_command_contracts() -> tuple[int, int]:
         )
     return len(handlers), len(frontend)
 
+
+
+def validate_tauri_capability_activation() -> int:
+    """Reject an explicit empty Tauri capability list that disables every ACL."""
+    config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    security = config.get("app", {}).get("security", {})
+    configured = security.get("capabilities")
+    files = sorted((ROOT / "src-tauri/capabilities").glob("*.json"))
+    if configured == []:
+        fail(
+            "tauri.conf.json explicitly sets app.security.capabilities to an empty list; "
+            "this disables the capability files required by frontend IPC"
+        )
+    if configured is not None:
+        identifiers = {
+            json.loads(path.read_text(encoding="utf-8")).get("identifier") for path in files
+        }
+        missing = sorted(set(configured) - identifiers)
+        if missing:
+            fail(f"tauri.conf.json enables unknown capability identifiers: {missing}")
+    return len(files)
+
+
+def validate_release_versions() -> str:
+    """Keep application and extension metadata on one release version."""
+    tauri = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"]
+    frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))["version"]
+    extension = json.loads((ROOT / "extension/package.json").read_text(encoding="utf-8"))["version"]
+    extension_manifest = json.loads(
+        (ROOT / "extension/manifests/base.json").read_text(encoding="utf-8")
+    )["version"]
+    root = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+    desktop = tomllib.loads(
+        (ROOT / "src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    )["package"]["version"]
+    versions = {tauri, frontend, extension, extension_manifest, root, desktop}
+    if len(versions) != 1:
+        fail(f"release metadata versions are not synchronized: {sorted(versions)}")
+    return tauri
 
 def validate_frontend_dependencies() -> int:
     package = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
@@ -327,6 +381,8 @@ def main() -> int:
     try:
         route_count, client_count = validate_contracts()
         tauri_handler_count, tauri_frontend_count = validate_tauri_command_contracts()
+        capability_file_count = validate_tauri_capability_activation()
+        release_version = validate_release_versions()
         dependency_count = validate_frontend_dependencies()
         json_count, toml_count = validate_config_files()
         migration_count = validate_sqlite_migrations()
@@ -342,6 +398,8 @@ def main() -> int:
         f"- Tauri commands: {tauri_frontend_count} frontend invokes, "
         f"all registered within {tauri_handler_count} handlers and capability-permitted"
     )
+    print(f"- Tauri capability files: {capability_file_count}; activation configuration is valid")
+    print(f"- Synchronized release version: {release_version}")
     print(f"- Frontend packages checked: {dependency_count}; no duplicate UI stack")
     print(f"- Parsed configuration files: {json_count} JSON, {toml_count} TOML")
     print(f"- Applied SQLite migrations in memory: {migration_count}")

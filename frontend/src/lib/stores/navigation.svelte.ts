@@ -61,6 +61,7 @@ class NavigationStore {
   systemAccent = $state<string | null>(null);
   pendingAddKind = $state<"http" | "media" | "torrent" | null>(null);
   pendingAddSource = $state("");
+  pendingScheduleSource = $state<string | null>(null);
   settingsDirty = $state(false);
   pendingSection = $state<NavSection | null>(null);
 
@@ -233,6 +234,17 @@ class NavigationStore {
     const kind = this.pendingAddKind;
     this.pendingAddKind = null;
     return kind;
+  }
+
+  requestSchedule(source: string): void {
+    this.pendingScheduleSource = source;
+    this.navigate("automation");
+  }
+
+  consumeScheduleSource(): string | null {
+    const source = this.pendingScheduleSource;
+    this.pendingScheduleSource = null;
+    return source;
   }
 }
 

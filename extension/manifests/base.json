@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "Ravyn",
   "description": "__MSG_extensionDescription__",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "default_locale": "en",
   "icons": {
     "16": "icons/ravyn-16.png",
@@ -52,11 +52,15 @@
   ],
   "commands": {
     "open-popup": {
-      "suggested_key": { "default": "Alt+Shift+R" },
+      "suggested_key": {
+        "default": "Alt+Shift+R"
+      },
       "description": "Open the Ravyn resource picker"
     },
     "download-current-page": {
-      "suggested_key": { "default": "Alt+Shift+D" },
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
       "description": "Send the current page to Ravyn"
     }
   },

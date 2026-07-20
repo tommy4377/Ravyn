@@ -23,6 +23,7 @@ class SystemAppearanceStore {
   viewportMismatch = $state<string | null>(null);
 
   private initialized = false;
+  private disposed = false;
   private moveTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private unlisteners: UnlistenFn[] = [];
@@ -35,6 +36,7 @@ class SystemAppearanceStore {
   init(): () => void {
     if (this.initialized) return () => this.dispose();
     this.initialized = true;
+    this.disposed = false;
     if (!isTauri()) return () => this.dispose();
 
     void this.refresh();
@@ -57,9 +59,16 @@ class SystemAppearanceStore {
         if (focused) void this.refresh();
       }),
     ]).then((unlisteners) => {
+      // Listener registration is asynchronous. If the store was disposed while
+      // Tauri was resolving the registrations, release them immediately rather
+      // than leaking callbacks across an HMR cycle or a fast window shutdown.
+      if (this.disposed) {
+        for (const unlisten of unlisteners) unlisten();
+        return;
+      }
       this.unlisteners.push(...unlisteners);
     }).catch((cause) => {
-      this.lastError = describeCause(cause);
+      if (!this.disposed) this.lastError = describeCause(cause);
     });
     this.pollTimer = setInterval(() => void this.refresh(), WALLPAPER_POLL_INTERVAL);
     return () => this.dispose();
@@ -165,6 +174,7 @@ class SystemAppearanceStore {
   }
 
   private dispose(): void {
+    this.disposed = true;
     if (this.moveTimer) clearTimeout(this.moveTimer);
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.moveTimer = null;

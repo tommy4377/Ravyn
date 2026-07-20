@@ -87,6 +87,7 @@ export interface IntegrationReport {
   installed_sha256: string | null;
   integration_completed: boolean;
   integration_errors: string[];
+  integration_warnings: string[];
 }
 
 /** Wait for the embedded backend and return its base URL. */
@@ -164,6 +165,7 @@ export interface BrowserIntegrationStatus {
 }
 
 export interface BrowserAction {
+  intent: "navigate" | "add_download" | "create_schedule" | "scan_page" | null;
   section: string | null;
   source_url: string | null;
 }
