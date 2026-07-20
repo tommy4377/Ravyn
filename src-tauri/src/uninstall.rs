@@ -1,50 +1,87 @@
 //! Windows uninstall lifecycle for the registered `Ravyn.exe --uninstall` command.
 
-/// Handles the early command-line uninstall path. Returns `true` when the
-/// caller must exit instead of starting the Tauri application.
-pub fn try_handle_command_line() -> bool {
+/// Handles the early command-line uninstall path. Returns an exit code when
+/// the caller must exit instead of starting the Tauri application.
+pub fn try_handle_command_line() -> Option<i32> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if !arguments
         .iter()
         .skip(1)
         .any(|argument| argument == "--uninstall")
     {
-        return false;
+        return None;
     }
     let purge_data = arguments
         .iter()
         .skip(1)
         .any(|argument| argument == "--purge-data");
-    if let Err(error) = uninstall(purge_data) {
-        eprintln!("Ravyn uninstall failed: {error}");
+    match uninstall(purge_data) {
+        Ok(()) => Some(0),
+        Err(error) => {
+            eprintln!("Ravyn uninstall failed: {error}");
+            Some(1)
+        }
     }
-    true
 }
 
 #[cfg(windows)]
 fn uninstall(purge_data: bool) -> Result<(), String> {
     use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
 
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let _ = crate::browser_integration::unregister();
-    let _ = hkcu.delete_subkey_all(crate::installation::UNINSTALL_KEY);
-    if let Ok(run) = hkcu.open_subkey_with_flags(
+    let mut errors = Vec::new();
+
+    if let Err(error) = crate::browser_integration::unregister() {
+        errors.push(format!("Firefox native messaging: {error}"));
+    }
+    if let Err(error) = crate::torrent_association::unregister() {
+        errors.push(format!("torrent/magnet associations: {error}"));
+    }
+    if let Err(error) = hkcu.delete_subkey_all(crate::installation::UNINSTALL_KEY)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        errors.push(format!("Installed Apps registration: {error}"));
+    }
+    match hkcu.open_subkey_with_flags(
         r"Software\Microsoft\Windows\CurrentVersion\Run",
-        winreg::enums::KEY_WRITE,
+        KEY_WRITE,
     ) {
-        let _ = run.delete_value("Ravyn");
+        Ok(run) => {
+            if let Err(error) = run.delete_value("Ravyn")
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("startup registration: {error}"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => errors.push(format!("startup registry key: {error}")),
     }
 
-    remove_shortcuts()?;
+    if let Err(error) = remove_shortcuts() {
+        errors.push(format!("shortcuts: {error}"));
+    }
     if purge_data {
         let data_dir = crate::backend::resolve_data_dir();
-        if data_dir.exists() {
-            std::fs::remove_dir_all(&data_dir).map_err(|error| error.to_string())?;
+        if data_dir.exists()
+            && let Err(error) = std::fs::remove_dir_all(&data_dir)
+        {
+            errors.push(format!("data directory {}: {error}", data_dir.display()));
         }
     }
-    schedule_self_delete(&executable)
+    if let Err(error) = schedule_self_delete(&executable) {
+        errors.push(format!("self-delete helper: {error}"));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "uninstall completed with cleanup errors: {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 #[cfg(not(windows))]
@@ -64,14 +101,19 @@ fn remove_shortcuts() -> Result<(), String> {
     if let Ok(profile) = std::env::var("USERPROFILE") {
         links.push(std::path::PathBuf::from(profile).join(r"Desktop\Ravyn.lnk"));
     }
+    let mut errors = Vec::new();
     for link in links {
         match std::fs::remove_file(&link) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => errors.push(format!("{}: {error}", link.display())),
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(windows)]

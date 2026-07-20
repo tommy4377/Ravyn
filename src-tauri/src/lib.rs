@@ -10,6 +10,7 @@ mod browser_integration;
 mod installation;
 mod integration;
 mod native_messaging;
+mod native_notifications;
 mod setup_guard;
 mod shell_paths;
 mod silent_command;
@@ -556,12 +557,7 @@ fn notify_native(
     body: Option<String>,
 ) -> Result<(), String> {
     require_window(&window, "main")?;
-    use tauri_plugin_notification::NotificationExt;
-    let mut builder = app.notification().builder().title(title);
-    if let Some(body) = body {
-        builder = builder.body(body);
-    }
-    builder.show().map_err(|error| error.to_string())
+    native_notifications::show_if_background(&app, &title, body.as_deref()).map(|_| ())
 }
 
 fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -617,13 +613,22 @@ fn create_main_window(
 }
 
 pub fn run() {
-    if native_messaging::try_handle_command_line() {
+    if let Some(code) = native_messaging::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
-    if browser_integration::try_handle_command_line() {
+    if let Some(code) = browser_integration::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
-    if uninstall::try_handle_command_line() {
+    if let Some(code) = uninstall::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
     if !webview_runtime::ensure_available() {

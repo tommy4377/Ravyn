@@ -13,7 +13,16 @@ import {
 import { RavynExtensionError, toExtensionError } from "../../shared/errors";
 import { logger } from "../../shared/logger";
 
-const REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const COMMAND_TIMEOUT_MS: Partial<Record<NativeCommand, number>> = {
+  ping: 5_000,
+  get_capabilities: 5_000,
+  subscribe_events: 15_000,
+  unsubscribe_events: 15_000,
+  create_download: 60_000,
+  create_batch: 60_000,
+  probe_media: 120_000,
+};
 const RECONNECT_DELAYS_MS = [250, 1_000, 3_000, 10_000, 30_000];
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -30,6 +39,7 @@ export class NativeClient {
   private reconnectAttempt = 0;
   private reconnectTimer: number | null = null;
   private heartbeatTimer: number | null = null;
+  private manualDisconnect = false;
   private statusValue: ConnectionStatus = {
     hostAvailable: false,
     backendConnected: false,
@@ -53,6 +63,7 @@ export class NativeClient {
   }
 
   async connect(): Promise<void> {
+    this.manualDisconnect = false;
     if (this.port) return;
     if (this.connecting) return this.connecting;
     // A retry is already scheduled after a prior failure — let the backoff
@@ -67,6 +78,7 @@ export class NativeClient {
   }
 
   disconnect(): void {
+    this.manualDisconnect = true;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.stopHeartbeat();
@@ -98,6 +110,8 @@ export class NativeClient {
       payload,
     };
     return new Promise<T>((resolve, reject) => {
+      const timeoutMs =
+        COMMAND_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
         reject(
@@ -107,7 +121,7 @@ export class NativeClient {
             true,
           ),
         );
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
@@ -237,13 +251,18 @@ export class NativeClient {
     this.setStatus({
       hostAvailable: false,
       backendConnected: false,
-      error: {
-        code: "NATIVE_DISCONNECTED",
-        message: runtimeError?.message ?? "The Ravyn native connection closed.",
-        retryable: true,
-      },
+      ...(this.manualDisconnect
+        ? {}
+        : {
+            error: {
+              code: "NATIVE_DISCONNECTED",
+              message:
+                runtimeError?.message ?? "The Ravyn native connection closed.",
+              retryable: true,
+            },
+          }),
     });
-    this.scheduleReconnect();
+    if (!this.manualDisconnect) this.scheduleReconnect();
   }
 
   private startHeartbeat(): void {

@@ -7,6 +7,7 @@ describe("settings navigation guard", () => {
     navigation.settingsDirty = false;
     navigation.pendingSection = null;
     navigation.pendingAddKind = null;
+    navigation.pendingScheduleSource = null;
     navigation.basketDrawerOpen = false;
     navigation.notificationDrawerOpen = false;
     navigation.navigationOverlayOpen = false;
@@ -43,6 +44,16 @@ describe("settings navigation guard", () => {
     expect(navigation.pendingSection).toBe("downloads");
     expect(navigation.pendingAddKind).toBe("media");
   });
+  it("queues a browser schedule request for Automation", () => {
+    navigation.requestSchedule("https://example.com/nightly.zip");
+
+    expect(navigation.section).toBe("automation");
+    expect(navigation.consumeScheduleSource()).toBe(
+      "https://example.com/nightly.zip",
+    );
+    expect(navigation.consumeScheduleSource()).toBeNull();
+  });
+
   it("keeps only one right-side drawer open", () => {
     navigation.openBasket();
     expect(navigation.basketDrawerOpen).toBe(true);
@@ -61,5 +72,4 @@ describe("settings navigation guard", () => {
     expect(navigation.notificationDrawerOpen).toBe(false);
     expect(navigation.navigationOverlayOpen).toBe(true);
   });
-
 });

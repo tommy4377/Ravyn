@@ -122,6 +122,60 @@ pub fn register(executable: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes Ravyn's per-user torrent and magnet handler registrations.
+/// Windows UserChoice entries are intentionally left untouched because only
+/// Windows may manage the user's selected default application.
+#[cfg(windows)]
+pub fn unregister() -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{
+        SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST, SHChangeNotify,
+    };
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let mut errors = Vec::new();
+    for key in [
+        r"Software\Classes\Ravyn.Torrent",
+        r"Software\Classes\Ravyn.Magnet",
+        r"Software\Ravyn\Capabilities",
+    ] {
+        if let Err(error) = hkcu.delete_subkey_all(key)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            errors.push(format!("failed to remove {key}: {error}"));
+        }
+    }
+    match hkcu.open_subkey_with_flags(r"Software\RegisteredApplications", KEY_WRITE) {
+        Ok(registered) => {
+            if let Err(error) = registered.delete_value("Ravyn")
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("failed to remove RegisteredApplications/Ravyn: {error}"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => errors.push(format!("failed to open RegisteredApplications: {error}")),
+    }
+
+    // SAFETY: association-change notifications require null item pointers and
+    // perform no memory access through them.
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED as i32,
+            SHCNF_IDLIST | SHCNF_FLUSH,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 #[cfg(windows)]
 fn open_default_apps_settings() -> Result<(), String> {
     std::process::Command::new("explorer.exe")
@@ -138,6 +192,11 @@ pub fn register_and_prompt() -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn register(_executable: &std::path::Path) -> Result<(), String> {
+    Err("torrent file association is only supported on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn unregister() -> Result<(), String> {
     Err("torrent file association is only supported on Windows".into())
 }
 

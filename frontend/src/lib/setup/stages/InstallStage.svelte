@@ -54,6 +54,9 @@
   <!-- Windows integration steps -->
   {#if controller.integrationReport}
     <section class="group" aria-label="Application installation">
+      <p class="integration-note">
+        Installed mode also connects the official Firefox extension and registers Ravyn as an available torrent/magnet handler. Windows keeps control of your default app choice.
+      </p>
       {#each controller.integrationReport.steps as step (step.step)}
         <div class="row">
           <span class="row-title">{stepLabel(step.step)}</span>
@@ -72,6 +75,13 @@
           </span>
         </div>
       {/each}
+      {#if controller.integrationReport.integration_warnings.length > 0}
+        <div class="warnings" aria-label="Optional integration warnings">
+          {#each controller.integrationReport.integration_warnings as warning}
+            <p class="warning">Optional integration warning — {warning}</p>
+          {/each}
+        </div>
+      {/if}
       {#if !controller.installationReady}
         <div class="row-actions">
           <Button onclick={() => void controller.retryApplicationInstallation()}>
@@ -153,6 +163,7 @@
     start_menu_shortcut: "Creating Start Menu shortcut",
     desktop_shortcut: "Creating desktop shortcut",
     launch_at_startup: "Registering startup with Windows",
+    register_firefox_native_host: "Connecting the Firefox extension",
     register_torrent_association: "Registering as a torrent/magnet handler",
     restore_persisted_integration: "Restoring the verified installation",
   };
@@ -174,6 +185,12 @@
     border: 1px solid var(--stroke-divider);
     border-radius: var(--radius-layer);
     background: var(--bg-layer);
+  }
+  .integration-note {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    line-height: 1.5;
   }
   .component {
     display: flex;
@@ -203,6 +220,16 @@
   .row-actions {
     display: flex;
     gap: var(--space-2);
+  }
+  .warnings {
+    display: grid;
+    gap: var(--space-1);
+  }
+  .warning {
+    margin: 0;
+    font-size: var(--text-caption);
+    color: var(--status-warning);
+    word-break: break-word;
   }
   .row-message {
     margin: 0;

@@ -36,6 +36,9 @@ pub struct BrowserIntegrationStatus {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct BrowserAction {
+    /// Semantic action requested by the browser. Older queued actions may not
+    /// contain this field, so the frontend still falls back to section/source.
+    pub intent: Option<String>,
     pub section: Option<String>,
     pub source_url: Option<String>,
 }
@@ -104,12 +107,14 @@ fn take_published_action() -> Option<BrowserAction> {
         };
         let _ = std::fs::remove_file(&path);
         if let Ok(action) = serde_json::from_slice::<BrowserAction>(&bytes) {
+            let intent = action.intent.as_deref().and_then(sanitize_intent);
             let section = action.section.as_deref().map(sanitize_section);
             let source_url = action
                 .source_url
                 .as_deref()
                 .and_then(sanitize_source_url);
             return Some(BrowserAction {
+                intent,
                 section,
                 source_url,
             });
@@ -125,20 +130,21 @@ fn action_directory() -> PathBuf {
 }
 
 /// Handles explicit installer lifecycle commands without starting Tauri.
-pub fn try_handle_command_line() -> bool {
+pub fn try_handle_command_line() -> Option<i32> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    let Some(register_requested) = integration_command(&arguments) else {
-        return false;
-    };
+    let register_requested = integration_command(&arguments)?;
     let result = if register_requested {
         repair_for_current_executable().map(|_| ())
     } else {
         unregister().map(|_| ())
     };
-    if let Err(error) = result {
-        eprintln!("Ravyn Firefox integration command failed: {error}");
+    match result {
+        Ok(()) => Some(0),
+        Err(error) => {
+            eprintln!("Ravyn Firefox integration command failed: {error}");
+            Some(1)
+        }
     }
-    true
 }
 
 fn integration_command(arguments: &[std::ffi::OsString]) -> Option<bool> {
@@ -158,11 +164,18 @@ fn integration_command(arguments: &[std::ffi::OsString]) -> Option<bool> {
 
 pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
     let requested = arguments.iter().any(|argument| {
-        argument == "--browser-action" || argument.starts_with("--browser-section=")
+        argument == "--browser-action"
+            || argument.starts_with("--browser-intent=")
+            || argument.starts_with("--browser-section=")
     });
     if !requested {
         return None;
     }
+    let intent = arguments.iter().find_map(|argument| {
+        argument
+            .strip_prefix("--browser-intent=")
+            .and_then(sanitize_intent)
+    });
     let section = arguments.iter().find_map(|argument| {
         argument
             .strip_prefix("--browser-section=")
@@ -175,6 +188,7 @@ pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
             .and_then(sanitize_source_url)
     });
     Some(BrowserAction {
+        intent,
         section,
         source_url,
     })
@@ -196,9 +210,19 @@ pub fn parse_torrent_association_action(arguments: &[String]) -> Option<BrowserA
         .then(|| path.display().to_string())
     })?;
     Some(BrowserAction {
+        intent: Some("add_download".into()),
         section: Some("torrents".into()),
         source_url: Some(source_url),
     })
+}
+
+fn sanitize_intent(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "navigate" | "add_download" | "create_schedule" | "scan_page" => {
+            Some(value.trim().to_ascii_lowercase())
+        }
+        _ => None,
+    }
 }
 
 fn sanitize_section(value: &str) -> String {
@@ -505,6 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn browser_action_accepts_known_intent() {
+        let action = parse_browser_action(&[
+            "Ravyn".into(),
+            "--browser-action".into(),
+            "--browser-intent=create_schedule".into(),
+            "--browser-section=automation".into(),
+        ])
+        .unwrap();
+        assert_eq!(action.intent.as_deref(), Some("create_schedule"));
+        assert_eq!(action.section.as_deref(), Some("automation"));
+    }
+
+    #[test]
     fn browser_action_accepts_http_source() {
         let action = parse_browser_action(&[
             "Ravyn".into(),
@@ -526,5 +563,6 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(action.section.as_deref(), Some("torrents"));
+        assert_eq!(action.intent.as_deref(), Some("add_download"));
     }
 }

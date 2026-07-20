@@ -135,6 +135,7 @@ async function handle(
     }
     case MenuId.linkSchedule:
       await native.request("open_ravyn", {
+        intent: "create_schedule",
         section: "automation",
         sourceUrl: directUrl,
       });

@@ -11,10 +11,9 @@ import type { NativeEvent } from "../../shared/contracts";
  * Jobs are tracked in extension storage at handoff time and settled exactly
  * once: the tracked entry is removed atomically before notifying, so a
  * replayed or duplicated `job_status` event can never notify twice. Because
- * the native event stream has no replay, `reconcileCompletions` sweeps the
- * outstanding entries with `get_job` whenever the backend connection is
- * (re)established, catching jobs that finished while the event page was
- * suspended or the port was down.
+ * the native event stream is replay-aware, while `reconcileCompletions` remains
+ * the safety net for reconnects that fall outside the backend replay window or
+ * for browser event-page suspension.
  */
 
 const STORAGE_KEY = "ravyn.trackedDownloads";
@@ -152,8 +151,8 @@ export async function handleCompletionEvent(event: NativeEvent): Promise<void> {
 
 /**
  * Re-checks every outstanding tracked job against the backend. Call when the
- * backend connection is established — events emitted while the extension was
- * disconnected are otherwise lost for good.
+ * backend connection is established, covering any gap older than the replay
+ * buffer and keeping completion delivery eventually consistent.
  */
 export async function reconcileCompletions(
   native: NativeClient,

@@ -33,6 +33,7 @@ pub struct IntegrationReport {
     pub installed_sha256: Option<String>,
     pub integration_completed: bool,
     pub integration_errors: Vec<String>,
+    pub integration_warnings: Vec<String>,
 }
 
 fn ok(step: &str) -> StepResult {
@@ -75,8 +76,27 @@ fn finish_report(
         || steps
             .iter()
             .any(|step| step.step == "register_installed_app" && step.applied);
+    // Only failures that prevent a verified installed application are blocking.
+    // Optional shell conveniences remain visible as warnings so setup can
+    // complete honestly without treating a shortcut or torrent registration
+    // failure as a corrupted installation.
+    let is_blocking_step = |step: &str| {
+        step == "install_application"
+            || step == "register_firefox_native_host"
+            || (registration_required && step == "register_installed_app")
+    };
     let integration_errors = steps
         .iter()
+        .filter(|step| is_blocking_step(&step.step))
+        .filter_map(|step| {
+            step.error
+                .as_ref()
+                .map(|error| format!("{}: {error}", step.step))
+        })
+        .collect::<Vec<_>>();
+    let integration_warnings = steps
+        .iter()
+        .filter(|step| !is_blocking_step(&step.step))
         .filter_map(|step| {
             step.error
                 .as_ref()
@@ -102,6 +122,7 @@ fn finish_report(
         installed_sha256,
         integration_completed,
         integration_errors,
+        integration_warnings,
     }
 }
 

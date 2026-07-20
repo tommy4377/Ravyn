@@ -47,6 +47,8 @@ The native host is the installed Ravyn executable itself. Firefox starts it in a
 
 The permitted operations are limited to health/capability checks, download creation, batch creation, media probing, job control, rule evaluation, and opening a known Ravyn section.
 
+The content script intentionally runs on HTTP(S) pages and nested frames because resource discovery, embedded players, and context-menu targeting must work inside iframe-based media sites. Page observations stay in the extension's memory-only cache; they are sent to Ravyn only when the user or an enabled interception rule submits a download.
+
 ## Manual fixture pages
 
 ```bash
