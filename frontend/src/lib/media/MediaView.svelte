@@ -1,5 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
+  import { collectAllPages } from "../api/pagination";
   import type { Job, MediaArchiveRecord, MediaItemOutputRecord, MediaItemRecord, MediaItemSummary } from "../api/types";
   import Button from "../components/Button.svelte";
   import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
@@ -113,13 +114,17 @@
     loading = true;
     error = null;
     try {
-      const [jobPage, archivePage] = await Promise.all([
-        connection.client.listJobs({ kind: "media", limit: 250 }),
-        connection.client.listMediaArchive({ limit: 250 }),
+      const [nextJobs, nextArchive] = await Promise.all([
+        collectAllPages((cursor, limit) =>
+          connection.client!.listJobs({ kind: "media", limit, cursor }),
+        ),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listMediaArchive({ limit, cursor }),
+        ),
       ]);
-      jobs = jobPage.items;
-      for (const job of jobPage.items) jobsStore.upsert(job);
-      archive = archivePage.items;
+      jobs = nextJobs;
+      for (const job of nextJobs) jobsStore.upsert(job);
+      archive = nextArchive;
       if (selectedJobId && !jobs.some((job) => job.id === selectedJobId)) selectedJobId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -133,13 +138,15 @@
     detailsLoading = true;
     detailsError = null;
     try {
-      const [nextSummary, page] = await Promise.all([
+      const [nextSummary, nextItems] = await Promise.all([
         connection.client.getMediaSummary(jobId),
-        connection.client.listMediaItems(jobId, { limit: 500 }),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listMediaItems(jobId, { limit, cursor }),
+        ),
       ]);
       if (selectedJobId !== jobId) return;
       summary = nextSummary;
-      items = page.items;
+      items = nextItems;
     } catch (cause) {
       if (selectedJobId === jobId) detailsError = describeError(cause);
     } finally {
@@ -177,8 +184,17 @@
     // above), but the per-item playlist detail (`items`, fetched once by
     // loadDetails on selection) has no SSE channel and would otherwise
     // freeze mid-playlist-download. Poll while a job is selected.
-    const timer = window.setInterval(() => void load(), 5_000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await load();
+      if (!disposed) timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   });
 
   $effect(() => {
@@ -188,8 +204,18 @@
       selectedJob?.status ?? "",
     );
     if (!active) return;
-    const timer = window.setInterval(() => void loadDetails(jobId), 5_000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await loadDetails(jobId);
+      if (!disposed && selectedJobId === jobId)
+        timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   });
 
   $effect(() => {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
+  import { collectAllPages } from "../api/pagination";
   import type {
     TorrentDetails,
     TorrentGlobalStats,
@@ -138,18 +139,20 @@
     loading = true;
     error = null;
     try {
-      const [page, engine, jobsPage] = await Promise.all([
-        connection.client.listTorrents({ limit: 250 }),
+      const [nextTorrents, engine, torrentJobs] = await Promise.all([
+        collectAllPages((cursor, limit) =>
+          connection.client!.listTorrents({ limit, cursor }),
+        ),
         connection.client.getTorrentEngineStats().catch(() => null),
-        connection.client.listJobs({ kind: "torrent", limit: 250 }).catch(() => null),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listJobs({ kind: "torrent", limit, cursor }),
+        ).catch(() => null),
       ]);
-      torrents = page.items;
+      torrents = nextTorrents;
       engineStats = engine;
-      // Seed the shared jobsStore (already kept live by AppShell's global SSE
-      // subscription, see mem:frontend/downloads) so job status/progress for
-      // torrents stays current without a dedicated torrent-progress channel
-      // — upsert() doesn't disturb the store's own pagination/order state.
-      if (jobsPage) for (const job of jobsPage.items) jobsStore.upsert(job);
+      // Seed the shared entity cache for torrent details without treating this
+      // complete domain query as the current Downloads query ordering.
+      if (torrentJobs) for (const job of torrentJobs) jobsStore.cacheEntity(job);
       if (selectedId && !torrents.some((torrent) => torrent.job_id === selectedId)) selectedId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -191,8 +194,17 @@
     // otherwise stay frozen at whatever they were when the page loaded or a
     // row was last selected. Poll on the same ~5s cadence the backend
     // itself uses to reconcile torrent state (adapters::torrent::monitor_managed).
-    const timer = window.setInterval(() => void load(), 5_000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await load();
+      if (!disposed) timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   });
 
   $effect(() => {

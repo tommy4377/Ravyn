@@ -151,6 +151,75 @@ impl Default for TorrentOptions {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct BrowserCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: String,
+    pub host_only: bool,
+}
+
+impl BrowserCookie {
+    pub fn matches_url(&self, target: &url::Url) -> bool {
+        let Some(host) = target.host_str().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+        let domain = self.domain.trim_start_matches('.').to_ascii_lowercase();
+        let domain_matches = if self.host_only {
+            host == domain
+        } else {
+            host == domain || host.ends_with(&format!(".{domain}"))
+        };
+        if !domain_matches || (self.secure && target.scheme() != "https") {
+            return false;
+        }
+        let cookie_path = if self.path.starts_with('/') {
+            self.path.as_str()
+        } else {
+            "/"
+        };
+        let target_path = target.path();
+        target_path == cookie_path
+            || target_path.starts_with(cookie_path)
+                && (cookie_path.ends_with('/')
+                    || target_path
+                        .as_bytes()
+                        .get(cookie_path.len())
+                        .is_some_and(|byte| *byte == b'/'))
+    }
+}
+
+pub fn browser_cookie_header(cookies: &[BrowserCookie], target: &url::Url) -> Option<String> {
+    let mut matching = cookies
+        .iter()
+        .filter(|cookie| cookie.matches_url(target))
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| right.path.len().cmp(&left.path.len()));
+    (!matching.is_empty()).then(|| {
+        matching
+            .into_iter()
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SourceContextMetadata {
+    pub browser: String,
+    pub incognito: bool,
+    pub container_id: Option<String>,
+    pub page_url: Option<String>,
+    pub page_title: Option<String>,
+    pub tab_id: Option<i64>,
+    pub frame_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct DownloadOptions {
@@ -160,6 +229,9 @@ pub struct DownloadOptions {
     pub metalink: Option<MetalinkMetadata>,
     pub headers: BTreeMap<String, String>,
     pub cookies: BTreeMap<String, String>,
+    /// Browser cookies retain their scope so duplicate names on different paths
+    /// remain distinguishable until the concrete request URL is known.
+    pub browser_cookies: Vec<BrowserCookie>,
     pub proxy: Option<String>,
     /// Reference to a `proxy_credentials` entry in the platform secret store.
     pub proxy_secret_id: Option<Uuid>,
@@ -177,6 +249,9 @@ pub struct DownloadOptions {
     /// Creates the job in the paused state before the dispatcher can claim it.
     #[serde(default)]
     pub initially_paused: bool,
+    /// Sanitized browser context supplied by the companion extension.
+    #[serde(default)]
+    pub source_context: Option<SourceContextMetadata>,
     pub tags: Vec<String>,
     pub post_actions: Vec<PostAction>,
     pub media: Option<MediaOptions>,
@@ -195,15 +270,23 @@ impl DownloadOptions {
     pub fn redact_sensitive(&mut self) {
         self.headers.clear();
         self.cookies.clear();
+        self.browser_cookies.clear();
         self.proxy = None;
         if let Some(media) = self.media.as_mut() {
             media.cookies_from_browser = None;
             media.cookies_file = None;
         }
+        if let Some(context) = self.source_context.as_mut() {
+            context.container_id = None;
+            context.page_url = None;
+            context.page_title = None;
+            context.tab_id = None;
+            context.frame_id = None;
+        }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PostAction {
     VerifySha256 {

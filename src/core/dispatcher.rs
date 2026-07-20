@@ -174,6 +174,10 @@ impl JobManager {
         tasks.push(TrackedTask { name, handle });
         Ok(abort)
     }
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
     pub async fn shutdown(&self) {
         self.accepting_tasks.store(false, Ordering::Release);
         self.shutdown.cancel();

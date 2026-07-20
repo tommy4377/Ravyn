@@ -18,7 +18,28 @@ const SCAN_DEBOUNCE_MS = 200;
 export class MediaOverlayController {
   private observer: MutationObserver | null = null;
   private scanTimer: number | null = null;
+  private pendingRoots = new Set<Element>();
+  private mediaReadyListenersAttached = false;
+  private viewportListenersAttached = false;
+  private positionFrame: number | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private controls = new Map<OverlayTarget, AttachedControl>();
+  private readonly onMediaReady = (event: Event): void => {
+    const target = event.target;
+    if (
+      target instanceof HTMLMediaElement ||
+      target instanceof HTMLImageElement
+    ) {
+      this.consider(target);
+    }
+  };
+  private readonly schedulePositionUpdate = (): void => {
+    if (this.positionFrame !== null) return;
+    this.positionFrame = window.requestAnimationFrame(() => {
+      this.positionFrame = null;
+      for (const control of this.controls.values()) control.update();
+    });
+  };
   /** Elements whose overlay the user closed; never re-attached this session. */
   private dismissed = new WeakSet<OverlayTarget>();
 
@@ -27,18 +48,29 @@ export class MediaOverlayController {
   updateSettings(settings: ExtensionSettings): void {
     this.settings = settings;
     if (!this.enabled) {
-      this.clear();
       this.observer?.disconnect();
       this.observer = null;
+      if (this.scanTimer !== null) {
+        window.clearTimeout(this.scanTimer);
+        this.scanTimer = null;
+      }
+      this.pendingRoots.clear();
+      this.removeMediaReadyListeners();
+      this.removeViewportListeners();
+      this.clear();
       return;
     }
     this.ensureObserver();
+    this.ensureMediaReadyListeners();
+    this.ensureViewportListeners();
     this.scan();
   }
 
   start(): void {
     if (!this.enabled) return;
     this.ensureObserver();
+    this.ensureMediaReadyListeners();
+    this.ensureViewportListeners();
     this.scan();
   }
 
@@ -47,6 +79,9 @@ export class MediaOverlayController {
     this.observer = null;
     if (this.scanTimer !== null) window.clearTimeout(this.scanTimer);
     this.scanTimer = null;
+    this.pendingRoots.clear();
+    this.removeMediaReadyListeners();
+    this.removeViewportListeners();
     this.clear();
   }
 
@@ -57,19 +92,67 @@ export class MediaOverlayController {
     );
   }
 
+  private ensureMediaReadyListeners(): void {
+    if (this.mediaReadyListenersAttached) return;
+    document.addEventListener("load", this.onMediaReady, true);
+    document.addEventListener("loadedmetadata", this.onMediaReady, true);
+    this.mediaReadyListenersAttached = true;
+  }
+
+  private removeMediaReadyListeners(): void {
+    if (!this.mediaReadyListenersAttached) return;
+    document.removeEventListener("load", this.onMediaReady, true);
+    document.removeEventListener("loadedmetadata", this.onMediaReady, true);
+    this.mediaReadyListenersAttached = false;
+  }
+
+  private ensureViewportListeners(): void {
+    if (this.viewportListenersAttached) return;
+    window.addEventListener("scroll", this.schedulePositionUpdate, {
+      passive: true,
+    });
+    window.addEventListener("resize", this.schedulePositionUpdate, {
+      passive: true,
+    });
+    this.resizeObserver = new ResizeObserver(this.schedulePositionUpdate);
+    this.viewportListenersAttached = true;
+  }
+
+  private removeViewportListeners(): void {
+    if (!this.viewportListenersAttached) return;
+    window.removeEventListener("scroll", this.schedulePositionUpdate);
+    window.removeEventListener("resize", this.schedulePositionUpdate);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    if (this.positionFrame !== null)
+      window.cancelAnimationFrame(this.positionFrame);
+    this.positionFrame = null;
+    this.viewportListenersAttached = false;
+  }
+
   private ensureObserver(): void {
     if (this.observer) return;
-    // Debounced: an unthrottled scan-per-mutation-batch is expensive on
-    // DOM-churny pages (infinite scroll, chat apps), and attach() below adds
-    // a control host element into the document itself — a childList
-    // mutation that would otherwise re-trigger this same observer, turning
-    // attaching N controls into a self-inflicted cascade of full-document
-    // querySelectorAll scans.
-    this.observer = new MutationObserver(() => {
+    // Observe only newly inserted subtrees. Re-scanning the complete document
+    // after every mutation is disproportionately expensive on infinite-scroll
+    // and chat-style applications, especially when this controller's own
+    // overlay host insertions also trigger child-list mutations.
+    this.observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node instanceof Element) this.pendingRoots.add(node);
+        }
+      }
+      if (this.pendingRoots.size === 0) {
+        this.pruneDetached();
+        return;
+      }
       if (this.scanTimer !== null) window.clearTimeout(this.scanTimer);
       this.scanTimer = window.setTimeout(() => {
         this.scanTimer = null;
-        this.scan();
+        this.pruneDetached();
+        const roots = [...this.pendingRoots];
+        this.pendingRoots.clear();
+        for (const root of roots) this.scan(root);
       }, SCAN_DEBOUNCE_MS);
     });
     this.observer.observe(document.documentElement, {
@@ -78,37 +161,48 @@ export class MediaOverlayController {
     });
   }
 
-  private scan(): void {
+  private scan(root: ParentNode = document): void {
+    this.pruneDetached();
+    if (root instanceof Element && root.matches("video, audio, img")) {
+      this.consider(root as OverlayTarget);
+    }
+    for (const element of root.querySelectorAll<OverlayTarget>(
+      "video, audio, img",
+    )) {
+      this.consider(element);
+    }
+  }
+
+  private pruneDetached(): void {
     for (const [element, control] of this.controls) {
       if (!element.isConnected) {
         control.dispose();
         this.controls.delete(element);
       }
     }
-    for (const element of document.querySelectorAll<OverlayTarget>(
-      "video, audio, img",
-    )) {
-      const isImage = element instanceof HTMLImageElement;
-      if (isImage ? !this.settings.imageOverlays : !this.settings.videoOverlays)
-        continue;
+  }
+
+  private consider(element: OverlayTarget): void {
+    if (!this.enabled) return;
+    const isImage = element instanceof HTMLImageElement;
+    if (isImage ? !this.settings.imageOverlays : !this.settings.videoOverlays)
+      return;
+    if (
+      this.controls.has(element) ||
+      element.hasAttribute(HOST_ATTRIBUTE) ||
+      this.dismissed.has(element)
+    )
+      return;
+    if (!(element instanceof HTMLAudioElement)) {
+      const rectangle = element.getBoundingClientRect();
       if (
-        this.controls.has(element) ||
-        element.hasAttribute(HOST_ATTRIBUTE) ||
-        this.dismissed.has(element)
+        rectangle.width < this.settings.overlayMinimumWidth ||
+        rectangle.height < this.settings.overlayMinimumHeight
       )
-        continue;
-      if (!(element instanceof HTMLAudioElement)) {
-        const rectangle = element.getBoundingClientRect();
-        if (
-          rectangle.width < this.settings.overlayMinimumWidth ||
-          rectangle.height < this.settings.overlayMinimumHeight
-        ) {
-          continue;
-        }
-      }
-      if (element instanceof HTMLImageElement && !element.currentSrc) continue;
-      this.attach(element);
+        return;
     }
+    if (element instanceof HTMLImageElement && !element.currentSrc) return;
+    this.attach(element);
   }
 
   private attach(element: OverlayTarget): void {
@@ -249,8 +343,7 @@ export class MediaOverlayController {
     close.addEventListener("focus", show);
     close.addEventListener("blur", hide);
     close.addEventListener("click", dismiss);
-    window.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update, { passive: true });
+    this.resizeObserver?.observe(element);
     update();
 
     const dispose = (): void => {
@@ -270,8 +363,7 @@ export class MediaOverlayController {
       close.removeEventListener("focus", show);
       close.removeEventListener("blur", hide);
       close.removeEventListener("click", dismiss);
-      window.removeEventListener("scroll", update);
-      window.removeEventListener("resize", update);
+      this.resizeObserver?.unobserve(element);
       host.remove();
     };
     this.controls.set(element, { host, update, show, hide, dispose });

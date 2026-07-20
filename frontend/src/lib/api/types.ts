@@ -286,6 +286,16 @@ export type PostAction =
   | { type: "move"; destination: string }
   | { type: "open" };
 
+export interface SourceContextMetadata {
+  browser: string;
+  incognito: boolean;
+  container_id?: string | null;
+  page_url?: string | null;
+  page_title?: string | null;
+  tab_id?: number | null;
+  frame_id?: number | null;
+}
+
 export interface DownloadOptions {
   mirrors?: string[];
   metalink?: MetalinkMetadata | null;
@@ -301,6 +311,7 @@ export interface DownloadOptions {
   overwrite?: boolean;
   library_auto_destination?: boolean;
   initially_paused?: boolean;
+  source_context?: SourceContextMetadata | null;
   tags?: string[];
   post_actions?: PostAction[];
   media?: MediaOptions | null;
@@ -348,6 +359,22 @@ export interface Job {
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface JobSummary {
+  total: number;
+  active: number;
+  queued: number;
+  completed: number;
+  failed: number;
+  speed_bps: number;
+  recent: Array<{
+    id: string;
+    filename: string;
+    status: JobStatus;
+    progress: number | null;
+    speed_bps: number;
+  }>;
 }
 
 export interface JobListParams {
@@ -853,6 +880,7 @@ export interface TorrentSeedingState {
 
 export interface MediaProbeRequest {
   url: string;
+  cookies?: Record<string, string>;
   cookies_from_browser?: string | null;
   cookies_file?: string | null;
   proxy?: string | null;

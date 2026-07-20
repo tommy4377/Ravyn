@@ -80,12 +80,14 @@
   const canCancel = $derived(selectedJobs.some((job) => permittedActions(job.status, job.kind).cancel));
   const filterCount = $derived(kindFilter ? 1 : 0);
   const hasActiveFilter = $derived(searchInput.trim().length > 0 || filterCount > 0 || navigation.downloadsView !== "all");
-  const activeCount = $derived(jobsStore.jobsFor("active").length);
-  const queuedCount = $derived(jobsStore.jobsFor("queued").length);
-  const completedCount = $derived(jobsStore.jobsFor("completed").length);
-  const failedCount = $derived(jobsStore.jobsFor("failed").length);
+  const activeCount = $derived(jobsStore.summary?.active ?? jobsStore.jobsFor("active").length);
+  const queuedCount = $derived(jobsStore.summary?.queued ?? jobsStore.jobsFor("queued").length);
+  const completedCount = $derived(jobsStore.summary?.completed ?? jobsStore.jobsFor("completed").length);
+  const failedCount = $derived(jobsStore.summary?.failed ?? jobsStore.jobsFor("failed").length);
+  const totalCount = $derived(jobsStore.summary?.total ?? jobsStore.list.length);
   const totalSpeed = $derived(
-    [...jobsStore.liveProgress.values()].reduce((sum, progress) => sum + Math.max(0, progress.bytesPerSecond), 0),
+    jobsStore.summary?.speed_bps ??
+      [...jobsStore.liveProgress.values()].reduce((sum, progress) => sum + Math.max(0, progress.bytesPerSecond), 0),
   );
   const summaryItems = $derived<SummaryItem[]>([
     { label: "active", value: String(activeCount) },
@@ -94,7 +96,7 @@
     { label: "need attention", value: String(failedCount), tone: failedCount > 0 ? "error" : "default" },
   ]);
   const viewTabs = $derived([
-    { id: "all" as JobView, label: "All", count: jobsStore.list.length },
+    { id: "all" as JobView, label: "All", count: totalCount },
     { id: "active" as JobView, label: "In progress", count: activeCount },
     { id: "queued" as JobView, label: "Queued", count: queuedCount },
     { id: "completed" as JobView, label: "Completed", count: completedCount },

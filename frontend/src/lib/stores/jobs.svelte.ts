@@ -16,6 +16,7 @@ import type {
   Job,
   JobKind,
   JobListParams,
+  JobSummary,
   JobStatus,
   JobStatusEvent,
   ProgressEvent,
@@ -49,9 +50,12 @@ const COALESCE_INTERVAL_MS = 100; // ~10 Hz
 export class JobsStore {
   private service: JobsService | null = null;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private summaryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly pendingProgress = new Map<string, ProgressEvent>();
   private loadAbort: AbortController | null = null;
   private lastParams: JobListParams = {};
+  private queryGeneration = 0;
+  private summaryGeneration = 0;
 
   readonly byId = new SvelteMap<string, Job>();
   readonly liveProgress = new SvelteMap<string, LiveProgress>();
@@ -62,6 +66,7 @@ export class JobsStore {
   nextCursor = $state<string | null>(null);
   hasLoadedOnce = $state(false);
   searchTerm = $state("");
+  summary = $state<JobSummary | null>(null);
 
   init(service: JobsService): void {
     this.service = service;
@@ -76,6 +81,11 @@ export class JobsStore {
       this.flushTimer = null;
     }
     this.loadAbort?.abort();
+    this.summaryGeneration += 1;
+    if (this.summaryTimer) {
+      clearTimeout(this.summaryTimer);
+      this.summaryTimer = null;
+    }
   }
 
   private flushProgress(): void {
@@ -101,14 +111,21 @@ export class JobsStore {
     if (!this.service) return;
     this.loadAbort?.abort();
     const abort = new AbortController();
+    const generation = ++this.queryGeneration;
+    const summaryGeneration = ++this.summaryGeneration;
     this.loadAbort = abort;
     this.lastParams = params;
     this.searchTerm = params.search ?? "";
     this.status = "loading";
     this.errorMessage = null;
     try {
-      const page = await this.service.list({ limit: PAGE_SIZE, ...params }, abort.signal);
-      if (abort.signal.aborted) return;
+      const [page, summary] = await Promise.all([
+        this.service.list({ limit: PAGE_SIZE, ...params }, abort.signal),
+        this.service.summary(abort.signal).catch(() => null),
+      ]);
+      if (abort.signal.aborted || generation !== this.queryGeneration) return;
+      if (summary && summaryGeneration === this.summaryGeneration)
+        this.summary = summary;
       this.byId.clear();
       this.liveProgress.clear();
       for (const job of page.items) this.byId.set(job.id, job);
@@ -123,6 +140,21 @@ export class JobsStore {
     }
   }
 
+  async refreshSummary(): Promise<void> {
+    if (!this.service) return;
+    const generation = ++this.summaryGeneration;
+    const summary = await this.service.summary().catch(() => null);
+    if (summary && generation === this.summaryGeneration) this.summary = summary;
+  }
+
+  private scheduleSummaryRefresh(): void {
+    if (this.summaryTimer) return;
+    this.summaryTimer = setTimeout(() => {
+      this.summaryTimer = null;
+      void this.refreshSummary();
+    }, 500);
+  }
+
   /** Re-run the most recent query (used after resync/queue-changed events). */
   refreshAll(): void {
     void this.loadInitial(this.lastParams);
@@ -130,35 +162,69 @@ export class JobsStore {
 
   async loadMore(): Promise<void> {
     if (!this.service || !this.nextCursor || this.loadingMore) return;
+    const generation = this.queryGeneration;
+    const cursor = this.nextCursor;
+    const signal = this.loadAbort?.signal;
     this.loadingMore = true;
     try {
-      const page = await this.service.list({ ...this.lastParams, limit: PAGE_SIZE, cursor: this.nextCursor });
+      const page = await this.service.list(
+        { ...this.lastParams, limit: PAGE_SIZE, cursor },
+        signal,
+      );
+      if (signal?.aborted || generation !== this.queryGeneration) return;
       for (const job of page.items) {
-        if (!this.byId.has(job.id)) this.order.push(job.id);
         this.byId.set(job.id, job);
+        if (!this.order.includes(job.id) && this.matchesCurrentQuery(job))
+          this.order.push(job.id);
       }
       this.nextCursor = page.next_cursor;
     } catch (error) {
-      this.errorMessage = describeError(error);
+      if (!signal?.aborted && generation === this.queryGeneration)
+        this.errorMessage = describeError(error);
     } finally {
-      this.loadingMore = false;
+      if (generation === this.queryGeneration) this.loadingMore = false;
     }
   }
 
   private async refetchJob(id: string): Promise<void> {
     if (!this.service) return;
+    const generation = this.queryGeneration;
     try {
       const job = await this.service.get(id);
+      if (generation !== this.queryGeneration) return;
       this.upsert(job);
     } catch {
-      // Most likely deleted between the event and the refetch.
-      this.removeLocal(id);
+      if (generation === this.queryGeneration) this.removeLocal(id);
     }
   }
 
-  upsert(job: Job): void {
-    if (!this.byId.has(job.id)) this.order.unshift(job.id);
+  /** Updates the normalized entity cache without changing the current query result ids. */
+  cacheEntity(job: Job): void {
     this.byId.set(job.id, job);
+  }
+
+  upsert(job: Job): void {
+    this.byId.set(job.id, job);
+    const included = this.order.includes(job.id);
+    const matches = this.matchesCurrentQuery(job);
+    if (matches && !included) this.order.unshift(job.id);
+    if (!matches && included) this.removeFromQuery(job.id);
+  }
+
+  private removeFromQuery(id: string): void {
+    const index = this.order.indexOf(id);
+    if (index !== -1) this.order.splice(index, 1);
+  }
+
+  private matchesCurrentQuery(job: Job): boolean {
+    if (this.lastParams.kind && job.kind !== this.lastParams.kind) return false;
+    if (this.lastParams.status && job.status !== this.lastParams.status) return false;
+    const search = this.lastParams.search?.trim().toLowerCase();
+    if (search) {
+      const haystack = `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
   }
 
   removeLocal(id: string): void {
@@ -174,15 +240,17 @@ export class JobsStore {
         const e = event as JobStatusEvent;
         const job = this.byId.get(e.job_id);
         if (job) {
-          this.byId.set(job.id, { ...job, status: e.status, error: e.error });
+          this.upsert({ ...job, status: e.status, error: e.error });
         } else {
           void this.refetchJob(e.job_id);
         }
+        this.scheduleSummaryRefresh();
         break;
       }
       case "progress": {
         const e = event as ProgressEvent;
         this.pendingProgress.set(e.job_id, e);
+        this.scheduleSummaryRefresh();
         break;
       }
       case "queue_changed":

@@ -20,6 +20,7 @@ function setup() {
     storage: {
       local: {
         get: vi.fn().mockResolvedValue({ [SETTINGS_KEY]: DEFAULT_SETTINGS }),
+        set: vi.fn().mockResolvedValue(undefined),
       },
     },
     notifications: { create: vi.fn().mockResolvedValue("note") },
@@ -35,8 +36,7 @@ function setup() {
     onClicked(info as browser.menus.OnClickData, tab);
     // The listener is fire-and-forget (`void handle(...).catch(...)`); give
     // its promise chain a turn before asserting on the mocked calls.
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
   };
   return { trigger, request, sendMessage };
 }

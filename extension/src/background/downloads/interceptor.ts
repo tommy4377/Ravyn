@@ -1,12 +1,15 @@
-import type {
-  CreateDownloadPayload,
-  ExtensionSettings,
-} from "../../shared/contracts";
+import type { ExtensionSettings } from "../../shared/contracts";
 import { logger } from "../../shared/logger";
 import { notify } from "../notifications";
-import { loadSettings } from "../../shared/settings";
+import {
+  DEFAULT_SETTINGS,
+  SETTINGS_KEY,
+  loadSettings,
+  sanitizeSettings,
+} from "../../shared/settings";
 import { domainMatches } from "../../shared/urls";
 import { downloadLabel, trackDownload } from "./completion";
+import { enrichDownload } from "./browser-context";
 import { evaluateEligibility, type DownloadCandidate } from "./eligibility";
 import type { BypassRegistry } from "./bypass";
 import type { DelegationRegistry } from "./delegation";
@@ -63,6 +66,7 @@ export class DownloadInterceptor {
   // Serializes confirmation popups so a page dropping several downloads at
   // once doesn't open overlapping windows — one confirmation at a time.
   private confirmLock: Promise<void> = Promise.resolve();
+  private settingsSnapshot: ExtensionSettings | null = null;
 
   constructor(
     private readonly native: NativeClient,
@@ -71,7 +75,17 @@ export class DownloadInterceptor {
     private readonly bypass: BypassRegistry,
   ) {}
 
-  register(): void {
+  register(initialSettings?: ExtensionSettings): void {
+    this.settingsSnapshot = initialSettings ?? null;
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !(SETTINGS_KEY in changes)) return;
+      const stored = changes[SETTINGS_KEY]?.newValue as
+        Partial<ExtensionSettings> | undefined;
+      this.settingsSnapshot = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        ...stored,
+      });
+    });
     browser.downloads.onCreated.addListener((item) => {
       void this.handle(item).catch((error) =>
         logger.error("Download interception failed", error),
@@ -116,29 +130,37 @@ export class DownloadInterceptor {
   }
 
   private async handle(item: browser.downloads.DownloadItem): Promise<void> {
-    // The user held the bypass modifier (Alt, by default) while clicking
-    // this link — let Firefox handle it untouched, IDM-style escape hatch.
     if (await this.bypass.consume(item.url)) return;
-    // Pause before any async eligibility/rule lookups (settings, delegation
-    // cache, rule cache all round-trip through browser.storage). Otherwise
-    // Firefox keeps transferring — and can finish a small file outright —
-    // before we ever get around to pausing it, so the shelf visibly shows
-    // the download start and then vanish once we hand it off and cancel it.
-    await browser.downloads.pause(item.id).catch(() => undefined);
-    await markPending(item.id);
+
+    const settings = this.settingsSnapshot ?? (await loadSettings());
+    this.settingsSnapshot = settings;
+    if (
+      !settings.automaticInterception ||
+      settings.interceptionMode === "disabled"
+    )
+      return;
+
+    let pendingRecorded = false;
+    let browserPaused = false;
     let handedOff = false;
     let claimed = false;
-    let settings: ExtensionSettings | undefined;
+    let ravynJobId: string | undefined;
     try {
-      settings = await loadSettings();
+      // Persist ownership intent before pausing Firefox. If storage is
+      // unavailable we leave the browser download untouched instead of
+      // creating an orphaned paused download that startup recovery cannot see.
+      await markPending(item.id);
+      pendingRecorded = true;
+      await browser.downloads.pause(item.id);
+      browserPaused = true;
+
       const candidate = candidateFrom(item);
       const eligibility = evaluateEligibility(
         candidate,
         settings,
         browser.runtime.id,
       );
-      if (!eligibility.eligible || (await this.delegated.contains(item.url)))
-        return;
+      if (!eligibility.eligible) return;
       const rule = evaluateRules(await this.rules.get(), {
         url: item.url,
         mime: item.mime,
@@ -152,15 +174,15 @@ export class DownloadInterceptor {
       const decision = decideInterception(settings, rule?.action, forced);
       if (decision === "ignore") return;
       if (decision === "confirm" && !(await this.confirm(item))) return;
-      // A second `onCreated` for the same URL (double-click, or a page
-      // firing near-simultaneous requests for one resource) racing this one
-      // through the async checks above would otherwise both pass `contains`
-      // (neither has recorded a delegation yet) and both hand off — claim
-      // the URL now, right before the point of no return.
-      claimed = await this.delegated.claim(item.url);
+
+      // Firefox download ids identify one concrete browser download. Using the
+      // id rather than a two-minute URL cache allows intentional repeated
+      // downloads of the same URL while still preventing one event from being
+      // handed off twice concurrently.
+      claimed = this.delegated.claim(item.id);
       if (!claimed) return;
 
-      const payload: CreateDownloadPayload = {
+      const payload = await enrichDownload({
         url: item.url,
         kind: "http",
         filename: filenameHint(item.filename),
@@ -172,15 +194,26 @@ export class DownloadInterceptor {
           incognito: item.incognito,
           pageUrl: candidate.referrer,
         },
-      };
+      });
       const result = await this.native.request<{ id: string }>(
         "create_download",
         payload,
       );
-      await this.delegated.remember(item.url, result.id);
+      ravynJobId = result.id;
       await trackDownload(result.id, downloadLabel(payload));
+
+      try {
+        await browser.downloads.cancel(item.id);
+      } catch (error) {
+        // Ravyn only owns the transfer once Firefox has relinquished it. Roll
+        // back the newly-created Ravyn job if browser cancellation fails so the
+        // same bytes cannot continue downloading in both applications.
+        await this.native
+          .request("cancel_job", { id: result.id })
+          .catch(() => undefined);
+        throw error;
+      }
       handedOff = true;
-      await browser.downloads.cancel(item.id);
       await browser.downloads.removeFile(item.id).catch(() => undefined);
       if (settings.eraseDelegatedBrowserEntries)
         await browser.downloads.erase({ id: item.id }).catch(() => undefined);
@@ -194,16 +227,21 @@ export class DownloadInterceptor {
         "Ravyn handoff failed; Firefox will continue the download",
         error,
       );
-      if (settings?.notifications)
+      if (ravynJobId && !handedOff) {
+        await this.native
+          .request("cancel_job", { id: ravynJobId })
+          .catch(() => undefined);
+      }
+      if (settings.notifications)
         await notify(
           "Ravyn handoff failed",
           "Firefox is continuing the download.",
         );
     } finally {
-      if (claimed) await this.delegated.release(item.url);
-      if (!handedOff)
+      if (claimed) this.delegated.release(item.id);
+      if (!handedOff && browserPaused)
         await browser.downloads.resume(item.id).catch(() => undefined);
-      await clearPending(item.id);
+      if (pendingRecorded) await clearPending(item.id).catch(() => undefined);
     }
   }
 

@@ -141,13 +141,13 @@ describe("DownloadInterceptor.handle", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it("pauses immediately, then resumes when the download is ineligible", async () => {
+  it("leaves the browser download untouched when interception is disabled", async () => {
     const { interceptor, pause, resume, request } = makeInterceptor({
       automaticInterception: false,
     });
     await handle(interceptor, downloadItem());
-    expect(pause).toHaveBeenCalledWith(42);
-    expect(resume).toHaveBeenCalledWith(42);
+    expect(pause).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
     expect(request).not.toHaveBeenCalled();
   });
 
@@ -177,10 +177,10 @@ describe("DownloadInterceptor.handle", () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
-  it("hands off only once when two downloads for the same URL race concurrently", async () => {
-    // A double-click, or a page firing near-simultaneous requests for one
-    // resource, can produce two browser.downloads.onCreated events for the
-    // same URL before either has finished its async eligibility checks.
+  it("hands off one concrete Firefox download only once when the same event races", async () => {
+    // The same browser download event may be delivered twice while the first
+    // asynchronous handoff is still in flight. The browser download id, not
+    // the URL, is the ownership key.
     const { interceptor, cancel, resume, request } = makeInterceptor();
     let releaseRequest!: () => void;
     request.mockImplementationOnce(
@@ -190,16 +190,24 @@ describe("DownloadInterceptor.handle", () => {
         }),
     );
     const first = handle(interceptor, downloadItem({ id: 42 }));
-    const second = handle(interceptor, downloadItem({ id: 43 }));
+    const second = handle(interceptor, downloadItem({ id: 42 }));
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    // The second download must not also be mid-handoff waiting on its own
-    // native request — it should already have bailed out and resumed.
-    await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(43));
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(42));
     releaseRequest();
     await Promise.all([first, second]);
     expect(request).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledExactlyOnceWith(42);
-    expect(cancel).not.toHaveBeenCalledWith(43);
+  });
+
+  it("allows distinct Firefox downloads of the same URL to hand off independently", async () => {
+    const { interceptor, cancel, request } = makeInterceptor();
+    await Promise.all([
+      handle(interceptor, downloadItem({ id: 42 })),
+      handle(interceptor, downloadItem({ id: 43 })),
+    ]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledWith(42);
+    expect(cancel).toHaveBeenCalledWith(43);
   });
 
   it("resumes the browser download and notifies when the native handoff fails", async () => {

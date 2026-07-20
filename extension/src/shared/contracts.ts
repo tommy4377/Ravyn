@@ -1,8 +1,8 @@
 export const NATIVE_HOST_NAME = "com.ravyn.download_manager";
 export const EXTENSION_ID = "firefox-extension@ravyn.app";
-export const NATIVE_PROTOCOL_VERSION = 1 as const;
+export const NATIVE_PROTOCOL_VERSION = 2 as const;
 /** Oldest host protocol this extension still understands. */
-export const NATIVE_PROTOCOL_MIN = 1 as const;
+export const NATIVE_PROTOCOL_MIN = 2 as const;
 
 /**
  * Whether the host's advertised protocol window overlaps ours. The extension
@@ -104,6 +104,7 @@ export interface CookieValue {
   secure: boolean;
   httpOnly: boolean;
   sameSite: string;
+  hostOnly?: boolean;
 }
 
 export interface CreateDownloadPayload {

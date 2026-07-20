@@ -8,7 +8,7 @@
   import DownloadsView from "../downloads/DownloadsView.svelte";
   import JobDetailsPane from "../downloads/JobDetailsPane.svelte";
   import { JobsService } from "../services/jobs";
-  import { onTrayAction, openCompactWindow, takeBrowserAction, type BrowserAction, type TrayAction } from "../native/tauri";
+  import { drainBrowserActions, onBrowserAction, onTrayAction, openCompactWindow, type BrowserAction, type TrayAction } from "../native/tauri";
   import type { JobStatusEvent, RavynEvent } from "../api/types";
   import { notifyDownloadEvent } from "./downloadNotifications";
   import { connection } from "../stores/connection.svelte";
@@ -62,11 +62,18 @@
   }
 
   onMount(() => {
-    const readBrowserAction = (): void => {
-      void takeBrowserAction().then(applyBrowserAction).catch(() => undefined);
-    };
-    readBrowserAction();
-    const browserActionTimer = window.setInterval(readBrowserAction, 750);
+    let unlistenBrowserAction: (() => void) | undefined;
+    let disposed = false;
+    void onBrowserAction(applyBrowserAction)
+      .then(async (unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenBrowserAction = unlisten;
+        if (!disposed) await drainBrowserActions(applyBrowserAction);
+      })
+      .catch(() => undefined);
     const onKeydown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       const editing = target?.matches("input, textarea, select, [contenteditable='true']") ?? false;
@@ -103,8 +110,9 @@
 
     window.addEventListener("keydown", onKeydown);
     return () => {
+      disposed = true;
       window.removeEventListener("keydown", onKeydown);
-      window.clearInterval(browserActionTimer);
+      unlistenBrowserAction?.();
     };
   });
 
@@ -125,26 +133,19 @@
       jobsStore.applyEvent(event);
       void maybeOpenCompactWindow(event);
     });
-    let unlistenTray: (() => void) | undefined;
-    void onTrayAction((action: TrayAction) => {
-      const ids = jobsStore.list
-        .filter((job) =>
-          action === "pause-all"
-            ? job.status === "queued" || job.status === "downloading"
-            : job.status === "paused",
-        )
-        .map((job) => job.id);
-      if (ids.length > 0) {
-        void service
-          .bulkAction(action === "pause-all" ? "pause" : "resume", ids)
-          .catch(() => undefined);
-      }
-    })
-      .then((unlisten) => (unlistenTray = unlisten))
-      .catch(() => undefined);
+    const unlistenTrayPromise = onTrayAction((action: TrayAction) => {
+      // An empty ID list is the backend's explicit "all compatible jobs"
+      // contract. This must not depend on the frontend's filtered/paginated
+      // store, otherwise tray actions silently miss jobs that are not loaded.
+      void service
+        .bulkAction(action === "pause-all" ? "pause" : "resume", [])
+        .catch(() => undefined);
+    }).catch(() => undefined);
     return () => {
       unsubscribe();
-      unlistenTray?.();
+      void unlistenTrayPromise.then((unlisten) => {
+        if (unlisten) unlisten();
+      });
       jobsStore.dispose();
     };
   });

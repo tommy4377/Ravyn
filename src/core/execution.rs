@@ -284,8 +284,22 @@ impl JobManager {
             .await
             .ok()
             .map(|item| item.status);
-        if matches!(current, Some(JobStatus::Paused | JobStatus::Cancelled)) {
-            return;
+        match current {
+            Some(JobStatus::Paused) => {
+                self.metrics.job_suspended(job.id);
+                return;
+            }
+            Some(JobStatus::Cancelled) => {
+                self.metrics.job_finished(
+                    job.id,
+                    job.kind,
+                    "cancelled",
+                    started_at.elapsed(),
+                    Some(crate::error::FailureClass::Cancellation),
+                );
+                return;
+            }
+            _ => {}
         }
 
         let result_terminal_status = result
@@ -301,10 +315,18 @@ impl JobManager {
                 let verified_primary_checksum = if let Some(path) = outcome.primary_path.as_deref()
                 {
                     if let Some(expected) = job.expected_sha256.as_deref() {
-                        let _ = self
+                        if !self
                             .repository
-                            .set_status(job.id, JobStatus::Verifying, None)
-                            .await;
+                            .try_transition_status(
+                                job.id,
+                                &[JobStatus::Downloading],
+                                JobStatus::Verifying,
+                                None,
+                            )
+                            .await?
+                        {
+                            return Err(RavynError::Cancelled);
+                        }
                         match checksum::verify_and_return(path, expected, &token).await {
                             Ok(actual) => Some(actual),
                             Err(error)
@@ -441,10 +463,18 @@ impl JobManager {
                         .await?;
                 }
                 if !registered.is_empty() && !job.options_json.post_actions.is_empty() {
-                    let _ = self
+                    if !self
                         .repository
-                        .set_status(job.id, JobStatus::PostProcessing, None)
-                        .await;
+                        .try_transition_status(
+                            job.id,
+                            &[JobStatus::Downloading, JobStatus::Verifying],
+                            JobStatus::PostProcessing,
+                            None,
+                        )
+                        .await?
+                    {
+                        return Err(RavynError::Cancelled);
+                    }
                     for (file_index, (output_id, path)) in registered.into_iter().enumerate() {
                         let mut current_output_id = output_id;
                         let mut current = path;
@@ -626,23 +656,45 @@ impl JobManager {
             .await
             .ok()
             .map(|item| item.status);
-        if matches!(current, Some(JobStatus::Paused | JobStatus::Cancelled)) {
-            self.metrics.job_finished(
-                job.id,
-                job.kind,
-                "cancelled",
-                started_at.elapsed(),
-                Some(crate::error::FailureClass::Cancellation),
-            );
-            return;
+        match current {
+            Some(JobStatus::Paused) => {
+                self.metrics.job_suspended(job.id);
+                return;
+            }
+            Some(JobStatus::Cancelled) => {
+                self.metrics.job_finished(
+                    job.id,
+                    job.kind,
+                    "cancelled",
+                    started_at.elapsed(),
+                    Some(crate::error::FailureClass::Cancellation),
+                );
+                return;
+            }
+            _ => {}
         }
         match final_result {
             Ok(()) => {
                 let final_status = result_terminal_status.unwrap_or(JobStatus::Completed);
-                let _ = self
+                let transitioned = self
                     .repository
-                    .set_status(job.id, final_status, result_terminal_message.as_deref())
-                    .await;
+                    .try_transition_status(
+                        job.id,
+                        &[
+                            JobStatus::Downloading,
+                            JobStatus::Verifying,
+                            JobStatus::PostProcessing,
+                        ],
+                        final_status,
+                        result_terminal_message.as_deref(),
+                    )
+                    .await
+                    .unwrap_or(false);
+                if !transitioned {
+                    // A user action won the race. Never publish a terminal event
+                    // that was not committed to the database.
+                    return;
+                }
                 self.events.publish(Event::JobStatus {
                     job_id: job.id,
                     status: final_status,
@@ -736,18 +788,52 @@ impl JobManager {
             }
             Err(RavynError::Unavailable(message)) => {
                 let delay = Duration::from_secs(self.config.host_circuit_cooldown_secs);
-                if let Err(error) = self.repository.defer_job(job.id, delay, &message).await {
-                    tracing::error!(job_id = %job.id, %error, "failed to defer unavailable job");
-                    let _ = self
-                        .repository
-                        .set_status(job.id, JobStatus::Failed, Some(&message))
-                        .await;
-                } else {
-                    self.events.publish(Event::JobStatus {
+                match self
+                    .repository
+                    .try_defer_job(
+                        job.id,
+                        &[
+                            JobStatus::Downloading,
+                            JobStatus::Verifying,
+                            JobStatus::PostProcessing,
+                        ],
+                        delay,
+                        &message,
+                    )
+                    .await
+                {
+                    Ok(true) => self.events.publish(Event::JobStatus {
                         job_id: job.id,
                         status: JobStatus::Queued,
                         error: Some(message),
-                    });
+                    }),
+                    Ok(false) => return,
+                    Err(error) => {
+                        tracing::error!(job_id = %job.id, %error, "failed to defer unavailable job");
+                        if self
+                            .repository
+                            .try_transition_status(
+                                job.id,
+                                &[
+                                    JobStatus::Downloading,
+                                    JobStatus::Verifying,
+                                    JobStatus::PostProcessing,
+                                ],
+                                JobStatus::Failed,
+                                Some(&message),
+                            )
+                            .await
+                            .unwrap_or(false)
+                        {
+                            self.events.publish(Event::JobStatus {
+                                job_id: job.id,
+                                status: JobStatus::Failed,
+                                error: Some(message.clone()),
+                            });
+                        } else {
+                            return;
+                        }
+                    }
                 }
                 self.metrics.job_finished(
                     job.id,
@@ -767,10 +853,23 @@ impl JobManager {
                         .mark_media_retry_parent_failed(job.id, &public_message)
                         .await;
                 }
-                let _ = self
+                let transitioned = self
                     .repository
-                    .set_status(job.id, JobStatus::Failed, Some(&message))
-                    .await;
+                    .try_transition_status(
+                        job.id,
+                        &[
+                            JobStatus::Downloading,
+                            JobStatus::Verifying,
+                            JobStatus::PostProcessing,
+                        ],
+                        JobStatus::Failed,
+                        Some(&message),
+                    )
+                    .await
+                    .unwrap_or(false);
+                if !transitioned {
+                    return;
+                }
                 self.events.publish(Event::JobStatus {
                     job_id: job.id,
                     status: JobStatus::Failed,
