@@ -10,6 +10,7 @@ mod browser_integration;
 mod installation;
 mod integration;
 mod native_messaging;
+mod native_notifications;
 mod setup_guard;
 mod shell_paths;
 mod silent_command;
@@ -18,12 +19,32 @@ mod tray;
 mod uninstall;
 mod webview_runtime;
 
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager};
 
 use backend::{BackendHandle, BackendInfo};
 
 /// How long window bootstrap waits for the embedded backend.
 const BACKEND_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BACKEND_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Drain the embedded backend before terminating the Tauri process. Multiple
+/// exit sources (tray, setup handoff, updater) may race, so only the first one
+/// starts the shutdown sequence.
+pub(crate) fn request_graceful_exit(app: &tauri::AppHandle, code: i32) {
+    if EXIT_REQUESTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    let backend = app.state::<BackendHandle>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = backend.shutdown_and_wait(BACKEND_SHUTDOWN_TIMEOUT).await {
+            tracing::warn!(%error, "embedded backend did not stop cleanly before desktop exit");
+        }
+        app.exit(code);
+    });
+}
 
 /// Base URL and state of the embedded backend, awaited until ready.
 #[tauri::command]
@@ -187,7 +208,7 @@ async fn finish_setup_handoff(
     guard.finish_handoff(result.is_ok())?;
     let should_exit = result?;
     if should_exit {
-        app.exit(0);
+        request_graceful_exit(&app, 0);
     }
     Ok(())
 }
@@ -276,7 +297,7 @@ async fn restart_application(
     })();
     guard.finish_restart(result.is_ok())?;
     result?;
-    app.exit(0);
+    request_graceful_exit(&app, 0);
     Ok(())
 }
 
@@ -427,7 +448,7 @@ fn install_app_update_now(
     // does not misreport the intentional restart as a command failure.
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        app.exit(0);
+        request_graceful_exit(&app, 0);
     });
     Ok(())
 }
@@ -474,8 +495,8 @@ async fn open_compact_window(
     }
     tauri::WebviewWindowBuilder::new(&app, "compact", tauri::WebviewUrl::App("index.html".into()))
         .title("Ravyn downloads")
-        .inner_size(380.0, 190.0)
-        .min_inner_size(320.0, 150.0)
+        .inner_size(400.0, 130.0)
+        .resizable(false)
         .maximizable(false)
         .minimizable(false)
         .always_on_top(true)
@@ -501,6 +522,31 @@ fn focus_main_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Res
     Ok(())
 }
 
+/// Parses a browser-launch or torrent/magnet-association action out of a
+/// process argument list, checking both forms since either can arrive on the
+/// command line (a Firefox-launched relaunch vs. a Windows file/URL
+/// association double-click).
+fn parse_launch_action(arguments: &[String]) -> Option<browser_integration::BrowserAction> {
+    browser_integration::parse_browser_action(arguments)
+        .or_else(|| browser_integration::parse_torrent_association_action(arguments))
+}
+
+/// Brings whichever top-level window currently exists (main or setup) to the
+/// foreground. Used when a second process launch is redirected here by the
+/// single-instance plugin, so the OS focuses the running app instead of
+/// leaving the user staring at nothing.
+fn focus_main_window_or_setup(app: &tauri::AppHandle) {
+    let window = app
+        .get_webview_window("main")
+        .or_else(|| app.get_webview_window("setup"));
+    let Some(window) = window else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
 /// Show a native desktop notification for a download event. The message
 /// content is provided by the main window, which owns the job metadata.
 #[tauri::command]
@@ -511,46 +557,78 @@ fn notify_native(
     body: Option<String>,
 ) -> Result<(), String> {
     require_window(&window, "main")?;
-    use tauri_plugin_notification::NotificationExt;
-    let mut builder = app.notification().builder().title(title);
-    if let Some(body) = body {
-        builder = builder.body(body);
-    }
-    builder.show().map_err(|error| error.to_string())
+    native_notifications::show_if_background(&app, &title, body.as_deref()).map(|_| ())
 }
 
 fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
-    tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html".into()))
-        .title("Ravyn Setup")
-        .inner_size(760.0, 580.0)
-        .min_inner_size(640.0, 500.0)
-        .resizable(true)
-        .maximizable(false)
-        .center()
-        .build()
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, "setup", tauri::WebviewUrl::App("index.html".into()))
+            .title("Ravyn Setup")
+            .inner_size(760.0, 580.0)
+            .min_inner_size(640.0, 500.0)
+            .resizable(true)
+            .maximizable(false)
+            .center();
+    #[cfg(target_os = "windows")]
+    let builder = with_native_backdrop(builder);
+    builder.build()
+}
+
+/// Applies the compositor acrylic backdrop on Windows 11 22H2+. Older builds
+/// (all of Windows 10, early Windows 11) only have the undocumented
+/// accent-policy blur, which stutters and trails during window moves and
+/// bleeds through any client area the page does not cover — those stay
+/// opaque and the webview draws the synthetic material instead.
+#[cfg(target_os = "windows")]
+fn with_native_backdrop(
+    builder: tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle>,
+) -> tauri::WebviewWindowBuilder<'_, tauri::Wry, tauri::AppHandle> {
+    if !crate::appearance::native_backdrop_supported() {
+        return builder;
+    }
+    builder.transparent(true).effects(
+        tauri::window::EffectsBuilder::new()
+            .effect(tauri::window::Effect::Acrylic)
+            // The web layer owns the theme tint. A nearly transparent native
+            // color keeps the acrylic active without double-tinting it.
+            .color(tauri::window::Color(0, 0, 0, 1))
+            .build(),
+    )
 }
 
 fn create_main_window(
     app: &tauri::AppHandle,
     visible: bool,
 ) -> tauri::Result<tauri::WebviewWindow> {
-    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
-        .title("Ravyn")
-        .inner_size(1100.0, 720.0)
-        .min_inner_size(800.0, 560.0)
-        .visible(visible)
-        .center()
-        .build()
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("Ravyn")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(800.0, 560.0)
+            .visible(visible)
+            .center();
+    #[cfg(target_os = "windows")]
+    let builder = with_native_backdrop(builder);
+    builder.build()
 }
 
 pub fn run() {
-    if native_messaging::try_handle_command_line() {
+    if let Some(code) = native_messaging::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
-    if browser_integration::try_handle_command_line() {
+    if let Some(code) = browser_integration::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
-    if uninstall::try_handle_command_line() {
+    if let Some(code) = uninstall::try_handle_command_line() {
+        if code != 0 {
+            std::process::exit(code);
+        }
         return;
     }
     if !webview_runtime::ensure_available() {
@@ -564,17 +642,32 @@ pub fn run() {
         .init();
 
     let initial_arguments = std::env::args().collect::<Vec<_>>();
-    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments)
-        .or_else(|| browser_integration::parse_torrent_association_action(&initial_arguments));
+    let initial_browser_action = parse_launch_action(&initial_arguments);
     let browser_action_state = browser_integration::BrowserActionState::default();
     if let Some(action) = initial_browser_action {
         browser_action_state.replace(action);
     }
 
-    let (handle, _receiver) = backend::start();
+    let handle = BackendHandle::new();
 
     #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
     let mut builder = tauri::Builder::default()
+        // Must be the first plugin registered: a magnet link or .torrent file
+        // opened while Ravyn is already running launches a second OS process
+        // (the registered "%1" handler in torrent_association.rs), which
+        // would otherwise boot a fully redundant backend, rqbit child, and
+        // window against the same database. This plugin detects that a
+        // primary instance already owns the app and forwards the new
+        // process's argv here instead, so the secondary instance exits before
+        // the embedded backend or application windows are started.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(action) = parse_launch_action(&argv) {
+                app.state::<browser_integration::BrowserActionState>()
+                    .replace(action.clone());
+                let _ = app.emit(browser_integration::BROWSER_ACTION_EVENT, action);
+            }
+            focus_main_window_or_setup(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
     // MCP automation bridge for explicitly enabled development-time testing only.
@@ -624,7 +717,7 @@ pub fn run() {
                 match app_updates::install_pending_on_close(window.app_handle()) {
                     Ok(true) => {
                         api.prevent_close();
-                        window.app_handle().exit(0);
+                        request_graceful_exit(window.app_handle(), 0);
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -634,10 +727,26 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            handle
+                .start()
+                .map_err(std::io::Error::other)?;
             if crate::installation::current_executable_is_installed() {
                 tauri::async_runtime::spawn_blocking(|| {
                     if let Err(error) = crate::browser_integration::repair_for_current_executable() {
                         tracing::warn!(%error, "failed to repair Firefox browser integration at startup");
+                    }
+                });
+            } else {
+                // A portable/dev executable never rewrites the registration
+                // (least privilege), but a stale one — pointing at an
+                // executable that no longer exists — must not fail silently.
+                tauri::async_runtime::spawn_blocking(|| {
+                    let status = crate::browser_integration::status();
+                    if status.stale {
+                        tracing::warn!(
+                            registered = ?status.registered_executable,
+                            "Firefox integration points at a missing Ravyn executable; run the installed Ravyn or repair it from Settings"
+                        );
                     }
                 });
             }
@@ -672,6 +781,14 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Ravyn desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the Ravyn desktop application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !EXIT_REQUESTED.load(Ordering::Acquire) {
+                    api.prevent_exit();
+                    request_graceful_exit(app, 0);
+                }
+            }
+        });
 }

@@ -1,5 +1,5 @@
 <script lang="ts" generics="T">
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
 
   let {
     items,
@@ -48,10 +48,16 @@
 
   $effect(() => {
     if (scrollToIndex === null || !viewportEl) return;
+    // scrollTop is both an input (current position) and an output (written
+    // below) of this effect. Reading it untracked stops that write from
+    // counting as a change to one of the effect's own dependencies, which
+    // would otherwise schedule a second, wasted run of this same effect on
+    // every scroll-to-index (e.g. every arrow-key navigation).
+    const currentScrollTop = untrack(() => scrollTop);
     const top = scrollToIndex * itemHeight;
-    let next = scrollTop;
-    if (top < scrollTop) next = top;
-    else if (top + itemHeight > scrollTop + viewportHeight) next = top + itemHeight - viewportHeight;
+    let next = currentScrollTop;
+    if (top < currentScrollTop) next = top;
+    else if (top + itemHeight > currentScrollTop + viewportHeight) next = top + itemHeight - viewportHeight;
     viewportEl.scrollTop = next;
     scrollTop = next;
     scrollToIndex = null;

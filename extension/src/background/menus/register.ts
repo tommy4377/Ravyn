@@ -1,3 +1,5 @@
+import { message } from "../../shared/i18n";
+
 const ROOT = "ravyn-root";
 
 export const MenuId = {
@@ -30,29 +32,32 @@ export const MenuId = {
 export async function registerMenus(): Promise<void> {
   await browser.menus.removeAll();
   browser.menus.create({ id: ROOT, title: "Ravyn", contexts: ["all"] });
-  create(MenuId.linkDownload, "Download link with Ravyn", ["link"]);
-  create(MenuId.linkPaused, "Add link paused", ["link"]);
-  create(MenuId.linkAnalyze, "Analyze link", ["link"]);
-  create(MenuId.linkSchedule, "Schedule link in Ravyn", ["link"]);
-  create(MenuId.linkScanPage, "Scan linked page", ["link"]);
-  create(MenuId.imageDownload, "Download image with Ravyn", ["image"]);
-  create(MenuId.imageOriginal, "Download original image", ["image"]);
-  create(MenuId.imageChoose, "Choose image source", ["image"]);
-  create(MenuId.imageConvert, "Convert image to WebP and download", ["image"]);
-  create(MenuId.imageAll, "Download all page images", ["image"]);
-  create(MenuId.mediaDownload, "Download media with Ravyn", ["video", "audio"]);
-  create(MenuId.mediaAnalyze, "Analyze available formats", ["video", "audio"]);
-  create(MenuId.mediaAudio, "Download audio only", ["video", "audio"]);
-  create(MenuId.mediaSubtitles, "Download subtitles", ["video"]);
-  create(MenuId.mediaPicker, "Open media picker", ["video", "audio"]);
-  create(MenuId.selectionUrls, "Download URLs in selection", ["selection"]);
-  create(MenuId.selectionScan, "Scan selection for links", ["selection"]);
-  create(MenuId.pageScan, "Scan page resources", ["page"]);
-  create(MenuId.pageImages, "Download all images", ["page"]);
-  create(MenuId.pageMedia, "Download all media", ["page"]);
-  create(MenuId.pageYtdlp, "Send page to yt-dlp", ["page"]);
-  create(MenuId.pageMonitor, "Monitor page for new resources", ["page"]);
-  create(MenuId.pagePopup, "Open Ravyn resource picker", ["page"]);
+  create(MenuId.linkDownload, message("menuLinkDownload"), ["link"]);
+  create(MenuId.linkPaused, message("menuLinkPaused"), ["link"]);
+  create(MenuId.linkAnalyze, message("menuLinkAnalyze"), ["link"]);
+  create(MenuId.linkSchedule, message("menuLinkSchedule"), ["link"]);
+  create(MenuId.linkScanPage, message("menuLinkScanPage"), ["link"]);
+  create(MenuId.imageDownload, message("menuImageDownload"), ["image"]);
+  create(MenuId.imageOriginal, message("menuImageOriginal"), ["image"]);
+  create(MenuId.imageChoose, message("menuImageChoose"), ["image"]);
+  create(MenuId.imageConvert, message("menuImageConvert"), ["image"]);
+  create(MenuId.imageAll, message("menuImageAll"), ["image"]);
+  create(MenuId.mediaDownload, message("menuMediaDownload"), [
+    "video",
+    "audio",
+  ]);
+  create(MenuId.mediaAnalyze, message("menuMediaAnalyze"), ["video", "audio"]);
+  create(MenuId.mediaAudio, message("menuMediaAudio"), ["video", "audio"]);
+  create(MenuId.mediaSubtitles, message("menuMediaSubtitles"), ["video"]);
+  create(MenuId.mediaPicker, message("menuMediaPicker"), ["video", "audio"]);
+  create(MenuId.selectionUrls, message("menuSelectionUrls"), ["selection"]);
+  create(MenuId.selectionScan, message("menuSelectionScan"), ["selection"]);
+  create(MenuId.pageScan, message("menuPageScan"), ["page"]);
+  create(MenuId.pageImages, message("menuPageImages"), ["page"]);
+  create(MenuId.pageMedia, message("menuPageMedia"), ["page"]);
+  create(MenuId.pageYtdlp, message("menuPageYtdlp"), ["page"]);
+  create(MenuId.pageMonitor, message("menuPageMonitor"), ["page"]);
+  create(MenuId.pagePopup, message("menuPagePopup"), ["page"]);
 }
 
 function create(

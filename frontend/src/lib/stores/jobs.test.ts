@@ -99,6 +99,23 @@ describe("JobsStore", () => {
     }
   });
 
+  it("drops a progress event that arrives for a job removed just before the flush tick", () => {
+    vi.useFakeTimers();
+    try {
+      store.init(makeService());
+      store.upsert(makeJob({ id: "a" }));
+      store.applyEvent({ sequence: 1, type: "progress", job_id: "a", downloaded_bytes: 10, total_bytes: 1000, bytes_per_second: 5 });
+      // The job is removed while the progress packet is still in flight
+      // (queued for the next 100ms flush tick) — the flush must not
+      // resurrect a liveProgress entry for a job no longer in byId.
+      store.removeLocal("a");
+      vi.advanceTimersByTime(100);
+      expect(store.liveProgress.has("a")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applyEvent(queue_changed / resync_required) re-runs the last query", () => {
     const service = makeService();
     store.init(service);

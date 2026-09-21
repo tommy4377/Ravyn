@@ -1,5 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
+  import { collectAllPages } from "../api/pagination";
   import type { Job, MediaArchiveRecord, MediaItemOutputRecord, MediaItemRecord, MediaItemSummary } from "../api/types";
   import Button from "../components/Button.svelte";
   import CompactSummary, { type SummaryItem } from "../components/CompactSummary.svelte";
@@ -20,6 +21,7 @@
   import Tabs from "../components/Tabs.svelte";
   import { openNativePath, revealNativePath } from "../native/tauri";
   import { connection } from "../stores/connection.svelte";
+  import { jobsStore } from "../stores/jobs.svelte";
   import { navigation } from "../stores/navigation.svelte";
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime, formatBytes, jobDisplayName } from "../util/format";
@@ -51,16 +53,33 @@
   let archiveBusy = $state(false);
   let archiveError = $state<string | null>(null);
 
-  const selectedJob = $derived(jobs.find((job) => job.id === selectedJobId) ?? null);
+  // jobs holds the fetch identity/order; displayJobs merges in live
+  // status+progress from jobsStore (kept current by AppShell's global SSE
+  // subscription — see load() below) so status badges and progress bars
+  // don't freeze at whatever they were when the page loaded or a job was
+  // last selected.
+  const displayJobs = $derived(
+    jobs.map((job) => {
+      const live = jobsStore.byId.get(job.id);
+      if (!live) return job;
+      const liveProgress = jobsStore.liveProgress.get(job.id);
+      return {
+        ...live,
+        downloaded_bytes: liveProgress?.downloadedBytes ?? live.downloaded_bytes,
+        total_bytes: liveProgress?.totalBytes ?? live.total_bytes,
+      };
+    }),
+  );
+  const selectedJob = $derived(displayJobs.find((job) => job.id === selectedJobId) ?? null);
   const visibleJobs = $derived(search.trim()
-    ? jobs.filter((job) => `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase().includes(search.toLowerCase()))
-    : jobs);
+    ? displayJobs.filter((job) => `${job.filename ?? ""} ${job.source} ${job.status}`.toLowerCase().includes(search.toLowerCase()))
+    : displayJobs);
   const visibleArchive = $derived(search.trim()
     ? archive.filter((entry) => `${entry.extractor} ${entry.media_id} ${entry.webpage_url ?? ""}`.toLowerCase().includes(search.toLowerCase()))
     : archive);
-  const completedJobs = $derived(jobs.filter((job) => job.status === "completed").length);
-  const activeJobs = $derived(jobs.filter((job) => ["queued", "probing", "downloading", "post_processing"].includes(job.status)).length);
-  const failedJobs = $derived(jobs.filter((job) => job.status === "failed").length);
+  const completedJobs = $derived(displayJobs.filter((job) => job.status === "completed").length);
+  const activeJobs = $derived(displayJobs.filter((job) => ["queued", "probing", "downloading", "post_processing"].includes(job.status)).length);
+  const failedJobs = $derived(displayJobs.filter((job) => job.status === "failed").length);
   const failedItems = $derived(items.filter((item) => item.state === "failed").length);
   const activity = $derived(mediaActivity(items));
   const summaryItems = $derived<SummaryItem[]>([
@@ -95,12 +114,17 @@
     loading = true;
     error = null;
     try {
-      const [jobPage, archivePage] = await Promise.all([
-        connection.client.listJobs({ kind: "media", limit: 250 }),
-        connection.client.listMediaArchive({ limit: 250 }),
+      const [nextJobs, nextArchive] = await Promise.all([
+        collectAllPages((cursor, limit) =>
+          connection.client!.listJobs({ kind: "media", limit, cursor }),
+        ),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listMediaArchive({ limit, cursor }),
+        ),
       ]);
-      jobs = jobPage.items;
-      archive = archivePage.items;
+      jobs = nextJobs;
+      for (const job of nextJobs) jobsStore.upsert(job);
+      archive = nextArchive;
       if (selectedJobId && !jobs.some((job) => job.id === selectedJobId)) selectedJobId = null;
     } catch (cause) {
       error = describeError(cause);
@@ -114,13 +138,15 @@
     detailsLoading = true;
     detailsError = null;
     try {
-      const [nextSummary, page] = await Promise.all([
+      const [nextSummary, nextItems] = await Promise.all([
         connection.client.getMediaSummary(jobId),
-        connection.client.listMediaItems(jobId, { limit: 500 }),
+        collectAllPages((cursor, limit) =>
+          connection.client!.listMediaItems(jobId, { limit, cursor }),
+        ),
       ]);
       if (selectedJobId !== jobId) return;
       summary = nextSummary;
-      items = page.items;
+      items = nextItems;
     } catch (cause) {
       if (selectedJobId === jobId) detailsError = describeError(cause);
     } finally {
@@ -152,7 +178,45 @@
     }
   }
 
-  $effect(() => { void load(); });
+  $effect(() => {
+    void load();
+    // Top-level job status/progress comes live via jobsStore (see load()
+    // above), but the per-item playlist detail (`items`, fetched once by
+    // loadDetails on selection) has no SSE channel and would otherwise
+    // freeze mid-playlist-download. Poll while a job is selected.
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await load();
+      if (!disposed) timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  });
+
+  $effect(() => {
+    const jobId = selectedJobId;
+    if (!jobId) return;
+    const active = ["queued", "probing", "downloading", "post_processing"].includes(
+      selectedJob?.status ?? "",
+    );
+    if (!active) return;
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await loadDetails(jobId);
+      if (!disposed && selectedJobId === jobId)
+        timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  });
 
   $effect(() => {
     producedFiles = [];

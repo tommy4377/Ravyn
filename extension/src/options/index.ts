@@ -60,6 +60,15 @@ async function grantNetwork(): Promise<void> {
     origins: ["<all_urls>"],
   });
   element<HTMLInputElement>("network").checked = granted;
+  if (granted) {
+    // Persist immediately — leaving this to the Save button meant the
+    // permission could be held but never actually activated if the user
+    // closed the page right after granting it.
+    settings = (await send({
+      type: "save-settings",
+      settings: { networkObservation: true },
+    })) as ExtensionSettings;
+  }
   show(
     granted
       ? "Network media detection permission granted."
@@ -72,8 +81,13 @@ function writeForm(value: ExtensionSettings): void {
   select("mode", value.interceptionMode);
   checked("private", value.includePrivateWindows);
   checked("erase", value.eraseDelegatedBrowserEntries);
+  select("bypass-key", value.bypassModifierKey);
+  element<HTMLTextAreaElement>("intercept-extensions").value =
+    value.interceptExtensions.join(", ");
+  number("min-size", Math.round(value.minInterceptSizeBytes / (1024 * 1024)));
   checked("media-detection", value.mediaDetection);
   checked("overlays", value.videoOverlays);
+  checked("image-overlays", value.imageOverlays);
   number("overlay-width", value.overlayMinimumWidth);
   number("overlay-height", value.overlayMinimumHeight);
   checked("network", value.networkObservation);
@@ -92,8 +106,14 @@ function readForm(): Partial<ExtensionSettings> {
       .value as ExtensionSettings["interceptionMode"],
     includePrivateWindows: element<HTMLInputElement>("private").checked,
     eraseDelegatedBrowserEntries: element<HTMLInputElement>("erase").checked,
+    bypassModifierKey: element<HTMLSelectElement>("bypass-key")
+      .value as ExtensionSettings["bypassModifierKey"],
+    interceptExtensions: lines("intercept-extensions"),
+    minInterceptSizeBytes:
+      Number(element<HTMLInputElement>("min-size").value) * 1024 * 1024,
     mediaDetection: element<HTMLInputElement>("media-detection").checked,
     videoOverlays: element<HTMLInputElement>("overlays").checked,
+    imageOverlays: element<HTMLInputElement>("image-overlays").checked,
     overlayMinimumWidth: Number(
       element<HTMLInputElement>("overlay-width").value,
     ),

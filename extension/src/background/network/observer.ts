@@ -23,9 +23,17 @@ interface PendingRequest {
   filename?: string;
 }
 
+// A request that never fires onCompleted/onErrorOccurred (a long-lived
+// SSE/EventSource connection kept open for a page's lifetime, or any request
+// Firefox doesn't cleanly terminate) would otherwise sit in `pending`
+// forever for as long as observation stays enabled.
+const PENDING_TTL_MS = 5 * 60 * 1_000;
+const PENDING_SWEEP_INTERVAL_MS = 60 * 1_000;
+
 export class NetworkObserver {
   private pending = new Map<string, PendingRequest>();
   private registered = false;
+  private sweepTimer: number | null = null;
 
   constructor(private readonly cache: ResourceCache) {}
 
@@ -43,6 +51,9 @@ export class NetworkObserver {
     browser.webRequest.onBeforeRequest.addListener(this.onBeforeRequest, {
       urls: ["<all_urls>"],
     });
+    browser.webRequest.onBeforeRedirect.addListener(this.onBeforeRedirect, {
+      urls: ["<all_urls>"],
+    });
     browser.webRequest.onHeadersReceived.addListener(
       this.onHeadersReceived,
       { urls: ["<all_urls>"] },
@@ -54,16 +65,29 @@ export class NetworkObserver {
     browser.webRequest.onErrorOccurred.addListener(this.onError, {
       urls: ["<all_urls>"],
     });
+    this.sweepTimer = window.setInterval(
+      () => this.sweepPending(),
+      PENDING_SWEEP_INTERVAL_MS,
+    );
     this.registered = true;
   }
 
   private unregister(): void {
     browser.webRequest.onBeforeRequest.removeListener(this.onBeforeRequest);
+    browser.webRequest.onBeforeRedirect.removeListener(this.onBeforeRedirect);
     browser.webRequest.onHeadersReceived.removeListener(this.onHeadersReceived);
     browser.webRequest.onCompleted.removeListener(this.onCompleted);
     browser.webRequest.onErrorOccurred.removeListener(this.onError);
+    if (this.sweepTimer !== null) window.clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     this.pending.clear();
     this.registered = false;
+  }
+
+  private sweepPending(): void {
+    const cutoff = Date.now() - PENDING_TTL_MS;
+    for (const [requestId, request] of this.pending)
+      if (request.startedAt < cutoff) this.pending.delete(requestId);
   }
 
   private readonly onBeforeRequest = (
@@ -81,6 +105,18 @@ export class NetworkObserver {
       requestType: details.type,
       startedAt: Date.now(),
     });
+  };
+
+  private readonly onBeforeRedirect = (
+    details: browser.webRequest._OnBeforeRedirectDetails,
+  ): void => {
+    const request = this.pending.get(details.requestId);
+    if (!request) return;
+    // Catalogue the resource under the URL it actually ended up at — the
+    // original request URL is often a short-lived CDN/signed-URL redirect
+    // that won't resolve to the same content later.
+    const redirected = normalizeUrl(details.redirectUrl);
+    if (redirected) request.url = redirected;
   };
 
   private readonly onHeadersReceived = (
@@ -109,7 +145,15 @@ export class NetworkObserver {
       request.mime,
       request.requestType,
     );
-    if (classification.ignore) return;
+    if (classification.ignore) {
+      // A segment with no manifest in sight (the player fetched the
+      // manifest through a path we can't observe, e.g. a blob: URL) still
+      // means there's a stream here — surface a hint instead of dropping it
+      // entirely, without cluttering the resource list with hundreds of
+      // individual .ts/.m4s entries.
+      if (classification.isSegment) this.cache.markStreamHint(request.tabId);
+      return;
+    }
     const resource: DetectedResource = {
       id: `network:${request.requestId}`,
       url: request.url,

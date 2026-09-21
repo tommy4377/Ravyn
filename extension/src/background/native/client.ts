@@ -1,6 +1,8 @@
 import {
   NATIVE_HOST_NAME,
+  NATIVE_PROTOCOL_MIN,
   NATIVE_PROTOCOL_VERSION,
+  protocolCompatible,
   type ConnectionStatus,
   type NativeCapabilities,
   type NativeCommand,
@@ -11,7 +13,16 @@ import {
 import { RavynExtensionError, toExtensionError } from "../../shared/errors";
 import { logger } from "../../shared/logger";
 
-const REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const COMMAND_TIMEOUT_MS: Partial<Record<NativeCommand, number>> = {
+  ping: 5_000,
+  get_capabilities: 5_000,
+  subscribe_events: 15_000,
+  unsubscribe_events: 15_000,
+  create_download: 60_000,
+  create_batch: 60_000,
+  probe_media: 120_000,
+};
 const RECONNECT_DELAYS_MS = [250, 1_000, 3_000, 10_000, 30_000];
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -28,6 +39,7 @@ export class NativeClient {
   private reconnectAttempt = 0;
   private reconnectTimer: number | null = null;
   private heartbeatTimer: number | null = null;
+  private manualDisconnect = false;
   private statusValue: ConnectionStatus = {
     hostAvailable: false,
     backendConnected: false,
@@ -51,8 +63,14 @@ export class NativeClient {
   }
 
   async connect(): Promise<void> {
+    this.manualDisconnect = false;
     if (this.port) return;
     if (this.connecting) return this.connecting;
+    // A retry is already scheduled after a prior failure — let the backoff
+    // run its course instead of hammering the host every time something
+    // (popup polling, the heartbeat) happens to call connect()/request() in
+    // between. request() surfaces NATIVE_HOST_UNAVAILABLE while this holds.
+    if (this.reconnectTimer !== null) return;
     this.connecting = this.openPort().finally(() => {
       this.connecting = null;
     });
@@ -60,6 +78,7 @@ export class NativeClient {
   }
 
   disconnect(): void {
+    this.manualDisconnect = true;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.stopHeartbeat();
@@ -91,6 +110,8 @@ export class NativeClient {
       payload,
     };
     return new Promise<T>((resolve, reject) => {
+      const timeoutMs =
+        COMMAND_TIMEOUT_MS[command] ?? DEFAULT_REQUEST_TIMEOUT_MS;
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
         reject(
@@ -100,7 +121,7 @@ export class NativeClient {
             true,
           ),
         );
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
@@ -120,6 +141,22 @@ export class NativeClient {
     try {
       const capabilities =
         await this.request<NativeCapabilities>("get_capabilities");
+      // A host outside our protocol window must fail loudly here — its
+      // events would otherwise be dropped silently by isNativeEvent and the
+      // extension would just look broken.
+      if (!protocolCompatible(capabilities)) {
+        this.setStatus({
+          hostAvailable: true,
+          backendConnected: false,
+          capabilities,
+          error: {
+            code: "PROTOCOL_MISMATCH",
+            message: `Ravyn speaks native protocol ${capabilities.protocolVersion} but this extension supports ${NATIVE_PROTOCOL_MIN}–${NATIVE_PROTOCOL_VERSION}. Update Ravyn or the extension.`,
+            retryable: false,
+          },
+        });
+        return this.statusValue;
+      }
       this.setStatus({
         hostAvailable: true,
         backendConnected: capabilities.backendConnected,
@@ -146,8 +183,14 @@ export class NativeClient {
         this.handleMessage(message),
       );
       port.onDisconnect.addListener(() => this.handleDisconnect());
-      this.reconnectAttempt = 0;
       await this.refreshStatus();
+      // Only a confirmed-healthy connection resets the backoff. Firefox's
+      // connectNative doesn't throw for a missing/crashing host — the port
+      // opens and onDisconnect fires moments later — so resetting right
+      // after connectNative would pin every retry at the shortest delay,
+      // re-spawning the host process 4x/second forever instead of backing
+      // off toward the 30s ceiling.
+      if (this.statusValue.hostAvailable) this.reconnectAttempt = 0;
       void this.request("subscribe_events").catch((error) =>
         logger.warn("Backend event subscription is unavailable", error),
       );
@@ -208,13 +251,18 @@ export class NativeClient {
     this.setStatus({
       hostAvailable: false,
       backendConnected: false,
-      error: {
-        code: "NATIVE_DISCONNECTED",
-        message: runtimeError?.message ?? "The Ravyn native connection closed.",
-        retryable: true,
-      },
+      ...(this.manualDisconnect
+        ? {}
+        : {
+            error: {
+              code: "NATIVE_DISCONNECTED",
+              message:
+                runtimeError?.message ?? "The Ravyn native connection closed.",
+              retryable: true,
+            },
+          }),
     });
-    this.scheduleReconnect();
+    if (!this.manualDisconnect) this.scheduleReconnect();
   }
 
   private startHeartbeat(): void {
@@ -265,9 +313,15 @@ function isNativeResponse(value: unknown): value is NativeResponse {
 function isNativeEvent(value: unknown): value is NativeEvent {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  const version = record.protocolVersion;
+  // Accept the negotiated window rather than one exact version; an
+  // out-of-window host is surfaced as PROTOCOL_MISMATCH by refreshStatus,
+  // so dropping its events here is a backstop, not the user-facing signal.
   return (
     record.type === "event" &&
     typeof record.event === "string" &&
-    record.protocolVersion === NATIVE_PROTOCOL_VERSION
+    typeof version === "number" &&
+    version >= NATIVE_PROTOCOL_MIN &&
+    version <= NATIVE_PROTOCOL_VERSION
   );
 }

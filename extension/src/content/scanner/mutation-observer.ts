@@ -11,6 +11,12 @@ export class BoundedMutationScanner {
 
   start(root: Node = document.documentElement): void {
     if (this.observer) return;
+    // A prior run that tripped the maximumMutations cap left this non-zero;
+    // without resetting, the very first mutation batch after any future
+    // start() (e.g. the user re-enabling "Monitor page") would immediately
+    // exceed the already-spent budget and call stop() again — permanently
+    // disabling monitoring for the tab despite the UI showing it re-enabled.
+    this.mutations = 0;
     this.observer = new MutationObserver((records) => {
       this.mutations += records.length;
       if (this.mutations > this.maximumMutations) {

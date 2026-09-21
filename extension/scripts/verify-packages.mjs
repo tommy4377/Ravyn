@@ -42,9 +42,14 @@ async function digest(file) {
 
 function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
-    const executable =
-      process.platform === "win32" && command === "npm" ? "npm.cmd" : command;
-    const child = spawn(executable, args, { cwd, stdio: "inherit" });
+    const isWindows = process.platform === "win32";
+    const child = isWindows
+      ? spawn([command, ...args].join(" "), {
+          cwd,
+          stdio: "inherit",
+          shell: true,
+        })
+      : spawn(command, args, { cwd, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code) =>
       code === 0

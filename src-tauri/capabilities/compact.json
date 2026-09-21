@@ -9,6 +9,7 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-hide",
+    "core:window:allow-set-size",
     "allow-backend-info",
     "allow-focus-main-window",
     "allow-desktop-appearance"

@@ -3,7 +3,24 @@
 
 use super::*;
 
-pub(super) fn append_probe_network_options(command: &mut Command, request: &MediaProbeRequest) {
+pub(super) fn append_probe_network_options(
+    command: &mut Command,
+    request: &MediaProbeRequest,
+) -> Result<()> {
+    if !request.cookies.is_empty() {
+        let value = request
+            .cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        validate_header("Cookie", &value)?;
+        command.arg("--add-header").arg(format!("Cookie:{value}"));
+    }
+    if let Some(value) = request.cookie_header.as_deref() {
+        validate_header("Cookie", value)?;
+        command.arg("--add-header").arg(format!("Cookie:{value}"));
+    }
     if let Some(value) = request.cookies_from_browser.as_deref() {
         command.arg("--cookies-from-browser").arg(value);
     }
@@ -13,6 +30,7 @@ pub(super) fn append_probe_network_options(command: &mut Command, request: &Medi
     if let Some(value) = request.proxy.as_deref() {
         command.arg("--proxy").arg(value);
     }
+    Ok(())
 }
 
 pub(super) fn append_ffmpeg_location(command: &mut Command, ffmpeg: &Path) {
@@ -110,14 +128,24 @@ pub(super) fn append_download_options(
     if let Some(value) = job.options_json.referer.as_deref() {
         command.arg("--referer").arg(value);
     }
-    if !job.options_json.cookies.is_empty() {
-        let value = job
-            .options_json
+    let source_url = url::Url::parse(&job.source).ok();
+    let browser_cookie = source_url.as_ref().and_then(|url| {
+        crate::core::models::browser_cookie_header(&job.options_json.browser_cookies, url)
+    });
+    let legacy_cookie = (!job.options_json.cookies.is_empty()).then(|| {
+        job.options_json
             .cookies
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
-            .join("; ");
+            .join("; ")
+    });
+    let cookie_value = match (legacy_cookie, browser_cookie) {
+        (Some(left), Some(right)) => Some(format!("{left}; {right}")),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    if let Some(value) = cookie_value {
         validate_header("Cookie", &value)?;
         command.arg("--add-header").arg(format!("Cookie:{value}"));
     }

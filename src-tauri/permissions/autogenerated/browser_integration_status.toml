@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-integration-status"
+description = "Enables the browser_integration_status command without any pre-configured scope."
+commands.allow = ["browser_integration_status"]
+
+[[permission]]
+identifier = "deny-browser-integration-status"
+description = "Denies the browser_integration_status command without any pre-configured scope."
+commands.deny = ["browser_integration_status"]

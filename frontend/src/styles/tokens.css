@@ -184,6 +184,7 @@
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; margin: 0; }
 html { background: var(--bg-app); }
+:root[data-native-backdrop="true"]:not([data-material="solid"]):not([data-has-backdrop-image]) { background: transparent; }
 body {
   overflow: hidden;
   font-family: var(--font-family);

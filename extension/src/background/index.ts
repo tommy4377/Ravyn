@@ -1,23 +1,32 @@
 import type {
   BackgroundRequest,
-  CookieValue,
-  CreateBatchPayload,
-  CreateDownloadPayload,
   DetectedResource,
+  DownloadPreset,
   DownloadSummary,
   SourceContext,
 } from "../shared/contracts";
 import { toExtensionError } from "../shared/errors";
+import { originPattern } from "../shared/urls";
 import {
   clearExtensionData,
   loadSettings,
   saveSettings,
 } from "../shared/settings";
-import { originPattern } from "../shared/urls";
 import {
   validateBatchPayload,
   validateDownloadPayload,
 } from "../shared/validation";
+import { BypassRegistry } from "./downloads/bypass";
+import { createBatchSafely } from "./downloads/batch";
+import { enrichDownload, enrichProbe } from "./downloads/browser-context";
+import {
+  clearTrackedDownloads,
+  downloadLabel,
+  handleCompletionEvent,
+  reconcileCompletions,
+  trackBatchResult,
+  trackDownload,
+} from "./downloads/completion";
 import { DelegationRegistry } from "./downloads/delegation";
 import { DownloadInterceptor } from "./downloads/interceptor";
 import { registerMenuHandlers } from "./menus/handlers";
@@ -32,10 +41,12 @@ const native = new NativeClient();
 const resources = new ResourceCache();
 const rules = new RuleCache(native);
 const network = new NetworkObserver(resources);
+const bypass = new BypassRegistry();
 const interceptor = new DownloadInterceptor(
   native,
   rules,
   new DelegationRegistry(),
+  bypass,
 );
 
 void initialize();
@@ -44,15 +55,43 @@ async function initialize(): Promise<void> {
   const settings = await loadSettings();
   await registerMenus();
   registerMenuHandlers(native, resources);
-  interceptor.register();
+  interceptor.register(settings);
   await network.synchronize(settings);
-  native.subscribeStatus(() => clearBadge());
+  await browser.action
+    .setBadgeBackgroundColor({ color: "#0f6cbd" })
+    .catch(() => undefined);
   native.subscribeEvents((event) => {
-    if (event.event.startsWith("rule.")) rules.invalidate();
+    // The native host now proxies the backend's real SSE stream (rather
+    // than the old request-refresh stub), so this fires the moment a rule
+    // actually changes instead of waiting out the 10-minute cache TTL.
+    if (event.event === "rule_changed") rules.invalidate();
+    if (event.event === "resync_required") {
+      rules.invalidate();
+      void reconcileCompletions(native);
+    }
+    void handleCompletionEvent(event);
     void broadcast({ type: "ravyn-native-event", event });
+  });
+  // The native bridge replays backend SSE events with Last-Event-ID. A full
+  // reconciliation is still useful when the browser event page or native
+  // port was unavailable long enough to fall outside the backend replay buffer.
+  let backendWasConnected = false;
+  native.subscribeStatus((status) => {
+    if (status.backendConnected && !backendWasConnected) {
+      void reconcileCompletions(native);
+    }
+    backendWasConnected = status.backendConnected;
   });
   void native.connect().catch(() => undefined);
   browser.tabs.onRemoved.addListener((tabId) => resources.clear(tabId));
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    // A top-level navigation invalidates the previous page's detected media
+    // — clear the count so the badge doesn't show stale results.
+    if (changeInfo.url) {
+      resources.clear(tabId);
+      void updateBadge(tabId);
+    }
+  });
   browser.commands.onCommand.addListener((command) => {
     if (command === "open-popup") void openResourcePopup();
     if (command === "download-current-page") void downloadCurrentPage();
@@ -78,22 +117,26 @@ async function handleMessage(
   switch (request.type) {
     case "connection-status":
       return native.refreshStatus();
-    case "download-url":
-      return native.request(
-        "create_download",
-        await enrichDownload(
-          validateDownloadPayload(request.payload),
-          sender.tab,
-        ),
+    case "download-url": {
+      const payload = await enrichDownload(
+        validateDownloadPayload(request.payload),
+        sender.tab,
       );
+      const job = await native.request<{ id?: string }>(
+        "create_download",
+        payload,
+      );
+      void trackDownload(job?.id, downloadLabel(payload));
+      return job;
+    }
     case "download-batch": {
       const batch = validateBatchPayload(request.payload);
       const downloads = await Promise.all(
         batch.downloads.map((download) => enrichDownload(download, sender.tab)),
       );
-      return native.request("create_batch", {
-        downloads,
-      } satisfies CreateBatchPayload);
+      const result = await createBatchSafely(native, downloads);
+      trackBatchResult(result, downloads);
+      return result;
     }
     case "probe-media":
       return native.request(
@@ -113,16 +156,24 @@ async function handleMessage(
       const detected = (await browser.tabs
         .sendMessage(tabId, { type: "scan-page" })
         .catch(() => [])) as DetectedResource[];
-      return resources.merge(
+      const merged = resources.merge(
         tabId,
         detected,
         (await loadSettings()).maxResourcesPerTab,
       );
+      void updateBadge(tabId);
+      return merged;
     }
     case "get-tab-resources": {
       const tabId = request.tabId ?? sender.tab?.id ?? (await activeTab())?.id;
       return tabId === undefined ? [] : resources.list(tabId);
     }
+    case "get-stream-hint": {
+      const tabId = request.tabId ?? sender.tab?.id ?? (await activeTab())?.id;
+      return tabId !== undefined && resources.hasStreamHint(tabId);
+    }
+    case "get-presets":
+      return native.request<DownloadPreset[]>("list_presets");
     case "resources-detected": {
       const tabId = request.tabId ?? sender.tab?.id;
       if (tabId === undefined) return [];
@@ -131,6 +182,7 @@ async function handleMessage(
         request.resources,
         (await loadSettings()).maxResourcesPerTab,
       );
+      void updateBadge(tabId);
       await broadcast({ type: "ravyn-resources-updated", tabId });
       return merged;
     }
@@ -145,9 +197,11 @@ async function handleMessage(
     case "get-settings":
       return loadSettings();
     case "save-settings": {
+      // No push broadcast needed: browser.storage.local.set fires
+      // storage.onChanged for every context (content scripts included),
+      // which is what content/index.ts listens on directly.
       const next = await saveSettings(request.settings);
       await network.synchronize(next);
-      await broadcast({ type: "update-settings", settings: next });
       return next;
     }
     case "request-site-permissions":
@@ -158,11 +212,15 @@ async function handleMessage(
       );
     case "clear-extension-data":
       await clearExtensionData();
+      await clearTrackedDownloads();
       resources.clearAll();
       await removeOptionalPermissions();
       return loadSettings();
     case "confirmation-result":
       interceptor.resolveConfirmation(request.requestId, request.accepted);
+      return null;
+    case "bypass-download":
+      await bypass.arm(request.url);
       return null;
     case "monitor-tab":
       resources.setMonitored(request.tabId, request.enabled);
@@ -205,96 +263,49 @@ async function downloadMediaElement(
               resource.type === "audio",
           ));
   if (direct) {
-    return native.request(
-      "create_download",
-      await enrichDownload(
-        {
-          url: direct.url,
-          kind: direct.type === "manifest" ? "media" : "http",
-          referer: pageUrl,
-          sourceContext,
-        },
-        tab,
-      ),
+    const payload = await enrichDownload(
+      {
+        url: direct.url,
+        kind: direct.type === "manifest" ? "media" : "http",
+        referer: pageUrl,
+        sourceContext,
+      },
+      tab,
     );
+    const job = await native.request<{ id?: string }>(
+      "create_download",
+      payload,
+    );
+    void trackDownload(
+      job?.id,
+      downloadLabel({ url: direct.url, filename: direct.filename }),
+    );
+    return job;
   }
-  return native.request(
-    "probe_media",
-    await enrichProbe(pageUrl, sourceContext, tab),
+  // No direct media URL was found on the element — the common case is a
+  // JS-driven player (YouTube and effectively every site with custom
+  // controls) whose <video> src is a blob: URL that collectMediaSources()
+  // already excludes as unusable. Hand the *page* itself to yt-dlp, exactly
+  // like the "Download page with yt-dlp" context-menu item does. This used
+  // to call probe_media instead — which only returns format metadata and
+  // never creates a job — so the overlay button showed a success checkmark
+  // on every such click while nothing was ever actually queued.
+  const job = await native.request<{ id?: string }>(
+    "create_download",
+    await enrichDownload(
+      {
+        url: pageUrl,
+        kind: "media",
+        sourceContext,
+      },
+      tab,
+    ),
   );
-}
-
-async function enrichDownload(
-  payload: CreateDownloadPayload,
-  tab?: browser.tabs.Tab,
-): Promise<CreateDownloadPayload> {
-  const sourceContext: SourceContext = {
-    ...payload.sourceContext,
-    browser: "firefox",
-    containerId: payload.sourceContext.containerId ?? tab?.cookieStoreId,
-    incognito: payload.sourceContext.incognito || tab?.incognito === true,
-    pageUrl: payload.sourceContext.pageUrl ?? tab?.url,
-    pageTitle: payload.sourceContext.pageTitle ?? tab?.title,
-    tabId: payload.sourceContext.tabId ?? tab?.id,
-  };
-  const cookies = await cookiesForUrl(payload.url, sourceContext.containerId);
-  return {
-    ...payload,
-    sourceContext,
-    cookies: cookies.length ? cookies : payload.cookies,
-  };
-}
-
-async function enrichProbe(
-  url: string,
-  sourceContext: SourceContext,
-  tab?: browser.tabs.Tab,
-): Promise<Record<string, unknown>> {
-  const context = {
-    ...sourceContext,
-    containerId: sourceContext.containerId ?? tab?.cookieStoreId,
-    incognito: sourceContext.incognito || tab?.incognito === true,
-  };
-  return {
-    url,
-    sourceContext: context,
-    cookies: await cookiesForUrl(url, context.containerId),
-  };
-}
-
-async function cookiesForUrl(
-  url: string,
-  cookieStoreId?: string,
-): Promise<CookieValue[]> {
-  const settings = await loadSettings();
-  let origin: string;
-  try {
-    origin = new URL(url).origin;
-  } catch {
-    return [];
-  }
-  if (!settings.allowCookiesByOrigin.includes(origin)) return [];
-  const pattern = originPattern(url);
-  if (
-    !pattern ||
-    !(await browser.permissions.contains({
-      permissions: ["cookies"],
-      origins: [pattern],
-    }))
-  )
-    return [];
-  const cookies = await browser.cookies
-    .getAll({ url, storeId: cookieStoreId })
-    .catch(() => []);
-  return cookies.slice(0, 500).map((cookie) => ({
-    name: cookie.name,
-    value: cookie.value,
-    domain: cookie.domain,
-    path: cookie.path,
-    secure: cookie.secure,
-    httpOnly: cookie.httpOnly,
-    sameSite: cookie.sameSite,
-  }));
+  void trackDownload(
+    job?.id,
+    sourceContext.pageTitle ?? downloadLabel({ url: pageUrl }),
+  );
+  return job;
 }
 
 async function requestSitePermissions(
@@ -330,25 +341,39 @@ async function activeTab(): Promise<browser.tabs.Tab | undefined> {
 async function downloadCurrentPage(): Promise<void> {
   const tab = await activeTab();
   if (!tab?.url) return;
-  await native.request("create_download", {
-    url: tab.url,
-    kind: "media",
-    sourceContext: {
-      browser: "firefox",
-      containerId: tab.cookieStoreId,
-      incognito: tab.incognito,
-      pageUrl: tab.url,
-      pageTitle: tab.title,
-      tabId: tab.id,
-    },
-  });
+  const job = await native.request<{ id?: string }>(
+    "create_download",
+    await enrichDownload(
+      {
+        url: tab.url,
+        kind: "media",
+        sourceContext: {
+          browser: "firefox",
+          containerId: tab.cookieStoreId,
+          incognito: tab.incognito,
+          pageUrl: tab.url,
+          pageTitle: tab.title,
+          tabId: tab.id,
+        },
+      },
+      tab,
+    ),
+  );
+  void trackDownload(job?.id, tab.title ?? downloadLabel({ url: tab.url }));
 }
 
-function clearBadge(): void {
-  // The toolbar icon stays badge-free: transient reconnect windows made the
-  // "!" marker flash misleadingly while Ravyn was perfectly healthy. The
-  // popup itself reports the live connection state instead.
-  void browser.action.setBadgeText({ text: "" });
+async function updateBadge(tabId: number): Promise<void> {
+  const count = resources
+    .list(tabId)
+    .filter(
+      (resource) =>
+        resource.type === "video" ||
+        resource.type === "audio" ||
+        resource.type === "manifest",
+    ).length;
+  await browser.action
+    .setBadgeText({ tabId, text: count > 0 ? String(count) : "" })
+    .catch(() => undefined);
 }
 
 async function broadcast(message: unknown): Promise<void> {

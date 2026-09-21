@@ -87,6 +87,7 @@ export interface IntegrationReport {
   installed_sha256: string | null;
   integration_completed: boolean;
   integration_errors: string[];
+  integration_warnings: string[];
 }
 
 /** Wait for the embedded backend and return its base URL. */
@@ -151,6 +152,10 @@ export function installAppUpdateNow(): Promise<void> {
 export interface BrowserIntegrationStatus {
   supported: boolean;
   registered: boolean;
+  /** A registration exists but points at a missing or outdated executable. */
+  stale: boolean;
+  /** Executable path the registered manifest currently points at. */
+  registered_executable: string | null;
   host_name: string;
   extension_id: string;
   manifest_path: string | null;
@@ -160,6 +165,7 @@ export interface BrowserIntegrationStatus {
 }
 
 export interface BrowserAction {
+  intent: "navigate" | "add_download" | "create_schedule" | "scan_page" | null;
   section: string | null;
   source_url: string | null;
 }
@@ -178,6 +184,28 @@ export function removeBrowserIntegration(): Promise<BrowserIntegrationStatus> {
 
 export function takeBrowserAction(): Promise<BrowserAction | null> {
   return invoke<BrowserAction | null>("take_browser_action");
+}
+
+export async function drainBrowserActions(
+  handler: (action: BrowserAction) => void,
+): Promise<void> {
+  // Bound the drain so a corrupted or continuously refilled queue cannot keep
+  // the frontend in an infinite IPC loop.
+  for (let index = 0; index < 100; index += 1) {
+    const action = await takeBrowserAction();
+    if (!action) return;
+    handler(action);
+  }
+}
+
+export function onBrowserAction(
+  handler: (action: BrowserAction) => void,
+): Promise<UnlistenFn> {
+  // The native event is only an availability signal. Drain the authoritative
+  // queue so bursts of browser actions cannot overwrite or strand older ones.
+  return listen<BrowserAction>("ravyn://browser-action", () => {
+    void drainBrowserActions(handler).catch(() => undefined);
+  });
 }
 
 /** Native folder picker; returns the chosen absolute path or null. */
@@ -210,6 +238,8 @@ export type WallpaperPosition = "center" | "tile" | "stretch" | "fit" | "fill" |
 
 export interface DesktopAppearance {
   supported: boolean;
+  /** True when the window carries a native compositor backdrop (Windows 11 22H2+). */
+  native_backdrop: boolean;
   wallpaper_path: string | null;
   wallpaper_revision: string | null;
   wallpaper_position: WallpaperPosition;

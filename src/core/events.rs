@@ -29,6 +29,9 @@ pub enum Event {
         message: Option<String>,
     },
     QueueChanged,
+    /// A browser-interception rule was created, updated, or deleted —
+    /// consumers (the Firefox extension's rule cache) should refetch.
+    RuleChanged,
     ResyncRequired {
         oldest_available: u64,
         newest_available: u64,

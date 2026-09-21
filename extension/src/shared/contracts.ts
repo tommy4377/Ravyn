@@ -1,12 +1,30 @@
 export const NATIVE_HOST_NAME = "com.ravyn.download_manager";
 export const EXTENSION_ID = "firefox-extension@ravyn.app";
-export const NATIVE_PROTOCOL_VERSION = 1 as const;
+export const NATIVE_PROTOCOL_VERSION = 2 as const;
+/** Oldest host protocol this extension still understands. */
+export const NATIVE_PROTOCOL_MIN = 2 as const;
+
+/**
+ * Whether the host's advertised protocol window overlaps ours. The extension
+ * and the desktop application update on independent cadences, so an
+ * out-of-window host must surface an explicit "update required" state
+ * instead of silently dropping traffic.
+ */
+export function protocolCompatible(capabilities: {
+  protocolVersion: number;
+  minProtocolVersion?: number;
+}): boolean {
+  const hostMax = capabilities.protocolVersion;
+  const hostMin = capabilities.minProtocolVersion ?? hostMax;
+  return hostMin <= NATIVE_PROTOCOL_VERSION && NATIVE_PROTOCOL_MIN <= hostMax;
+}
 export const MAX_RESOURCE_BATCH = 1_000;
 export const MAX_RESOURCES_PER_TAB = 2_000;
 export const RESOURCE_MAX_AGE_MS = 30 * 60 * 1_000;
 
 export type InterceptionMode =
   "disabled" | "rules-only" | "ask" | "all-compatible";
+export type BypassModifierKey = "alt" | "shift" | "ctrl" | "none";
 export type ResourceKind =
   "image" | "video" | "audio" | "manifest" | "document" | "archive" | "other";
 export type ResourceSource =
@@ -25,6 +43,7 @@ export type NativeCommand =
   | "pause_all"
   | "resume_all"
   | "get_rules"
+  | "list_presets"
   | "evaluate_url"
   | "open_ravyn"
   | "subscribe_events"
@@ -52,13 +71,16 @@ export interface NativeResponse<T = unknown> {
 
 export interface NativeEvent {
   type: "event";
-  protocolVersion: typeof NATIVE_PROTOCOL_VERSION;
+  /** Host protocol version; any value inside the negotiated window is accepted. */
+  protocolVersion: number;
   event: string;
   payload: unknown;
 }
 
 export interface NativeCapabilities {
   protocolVersion: number;
+  /** Oldest protocol the host accepts; absent on hosts predating negotiation. */
+  minProtocolVersion?: number;
   hostVersion: string;
   backendConnected: boolean;
   features: string[];
@@ -82,6 +104,7 @@ export interface CookieValue {
   secure: boolean;
   httpOnly: boolean;
   sameSite: string;
+  hostOnly?: boolean;
 }
 
 export interface CreateDownloadPayload {
@@ -158,6 +181,32 @@ export interface RuleSnapshot {
   rules: BrowserRule[];
 }
 
+export interface DownloadPreset {
+  id: string;
+  name: string;
+}
+
+export interface MediaFormat {
+  formatId: string;
+  extension?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  bitrateKbps?: number;
+  audioBitrateKbps?: number;
+  filesize?: number;
+  protocol?: string;
+  note?: string;
+}
+
+export interface MediaProbeResult {
+  title?: string;
+  duration?: number;
+  formats: MediaFormat[];
+}
+
 export interface DownloadSummary {
   active: number;
   queued: number;
@@ -182,8 +231,10 @@ export type BackgroundRequest =
       pageUrl: string;
       sourceContext: SourceContext;
     }
-  | { type: "scan-tab"; tabId?: number; fresh?: boolean }
+  | { type: "scan-tab"; tabId?: number }
   | { type: "get-tab-resources"; tabId?: number }
+  | { type: "get-stream-hint"; tabId?: number }
+  | { type: "get-presets" }
   | {
       type: "resources-detected";
       tabId?: number;
@@ -203,14 +254,19 @@ export type BackgroundRequest =
     }
   | { type: "clear-extension-data" }
   | { type: "confirmation-result"; requestId: string; accepted: boolean }
-  | { type: "monitor-tab"; tabId: number; enabled: boolean };
+  | { type: "monitor-tab"; tabId: number; enabled: boolean }
+  | { type: "bypass-download"; url: string };
 
 export interface ExtensionSettings {
   interceptionMode: InterceptionMode;
   automaticInterception: boolean;
+  bypassModifierKey: BypassModifierKey;
+  interceptExtensions: string[];
+  minInterceptSizeBytes: number;
   mediaDetection: boolean;
   networkObservation: boolean;
   videoOverlays: boolean;
+  imageOverlays: boolean;
   overlayMinimumWidth: number;
   overlayMinimumHeight: number;
   includePrivateWindows: boolean;

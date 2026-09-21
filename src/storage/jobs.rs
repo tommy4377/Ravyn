@@ -80,6 +80,56 @@ impl Repository {
         Ok(())
     }
 
+    /// Atomically reserves an idempotency key. Existing reservations are
+    /// returned unchanged so a process restart can continue with the same
+    /// deterministic resource UUID.
+    pub async fn reserve_idempotent_resource(
+        &self,
+        scope: &str,
+        key: &str,
+        request_hash: &str,
+        reserved_id: Uuid,
+    ) -> Result<(String, String)> {
+        sqlx::query(
+            "INSERT INTO idempotency_keys(scope,key,request_hash,resource_id,created_at) VALUES(?,?,?,?,?) ON CONFLICT(scope,key) DO NOTHING",
+        )
+        .bind(scope)
+        .bind(key)
+        .bind(request_hash)
+        .bind(reserved_id.to_string())
+        .bind(Utc::now())
+        .execute(self.pool())
+        .await?;
+        self.get_idempotent_resource(scope, key)
+            .await?
+            .ok_or_else(|| RavynError::Internal("idempotency reservation disappeared".into()))
+    }
+
+    pub async fn update_idempotent_resource(
+        &self,
+        scope: &str,
+        key: &str,
+        request_hash: &str,
+        resource_id: Uuid,
+    ) -> Result<()> {
+        let changed = sqlx::query(
+            "UPDATE idempotency_keys SET resource_id=? WHERE scope=? AND key=? AND request_hash=?",
+        )
+        .bind(resource_id.to_string())
+        .bind(scope)
+        .bind(key)
+        .bind(request_hash)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RavynError::Conflict(
+                "idempotency reservation changed while creating the resource".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn begin_job_action(
         &self,
         job_id: Uuid,
@@ -229,12 +279,34 @@ impl Repository {
     }
     pub async fn insert_job(
         &self,
+        request: CreateJob,
+        default_destination: PathBuf,
+    ) -> Result<Job> {
+        self.insert_job_with_tags(request, default_destination, &[]).await
+    }
+
+    /// Inserts the job row and its initial tag associations in one SQLite
+    /// transaction. A caller never observes a half-created job when tag
+    /// persistence fails.
+    pub async fn insert_job_with_tags(
+        &self,
+        request: CreateJob,
+        default_destination: PathBuf,
+        tags: &[String],
+    ) -> Result<Job> {
+        self.insert_job_with_tags_id(request, default_destination, tags, Uuid::new_v4())
+            .await
+    }
+
+    pub async fn insert_job_with_tags_id(
+        &self,
         mut request: CreateJob,
         default_destination: PathBuf,
+        tags: &[String],
+        id: Uuid,
     ) -> Result<Job> {
         let started = std::time::Instant::now();
         let now = Utc::now();
-        let id = Uuid::new_v4();
         let speed_limit_bps = request
             .speed_limit_bps
             .map(i64::try_from)
@@ -250,14 +322,50 @@ impl Repository {
         } else {
             JobStatus::Queued
         };
-        // This is an instruction for creation, not persistent transfer metadata.
         request.options.initially_paused = false;
+
+        let mut normalized = tags
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        normalized.sort_by_key(|value| value.to_ascii_lowercase());
+        normalized.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        if normalized.len() > 64 || normalized.iter().any(|tag| tag.len() > 80) {
+            return Err(RavynError::Invalid("invalid initial job tags".into()));
+        }
+
+        let mut tx = self.pool().begin().await?;
         sqlx::query("INSERT INTO jobs(id,kind,source,destination,filename,status,priority,speed_limit_bps,expected_sha256,options_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(id.to_string()).bind(kind_text(request.kind)).bind(request.source).bind(destination).bind(request.filename)
-            .bind(status_text(initial_status)).bind(request.priority).bind(speed_limit_bps)
-            .bind(request.expected_sha256).bind(serde_json::to_string(&request.options)?).bind(now).bind(now).execute(self.pool()).await?;
+            .bind(id.to_string())
+            .bind(kind_text(request.kind))
+            .bind(request.source)
+            .bind(destination)
+            .bind(request.filename)
+            .bind(status_text(initial_status))
+            .bind(request.priority)
+            .bind(speed_limit_bps)
+            .bind(request.expected_sha256)
+            .bind(serde_json::to_string(&request.options)?)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        for tag in &normalized {
+            sqlx::query("INSERT INTO tags(name) VALUES(?) ON CONFLICT(name) DO NOTHING")
+                .bind(tag)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO job_tags(job_id,tag_id) SELECT ?,id FROM tags WHERE name=? COLLATE NOCASE ON CONFLICT DO NOTHING")
+                .bind(id.to_string())
+                .bind(tag)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         let job = self.get_job(id).await;
-        self.observe_query("insert_job", started);
+        self.observe_query("insert_job_with_tags", started);
         job
     }
 
@@ -319,6 +427,52 @@ impl Repository {
             .into_iter()
             .map(row_to_job)
             .collect()
+    }
+
+    pub async fn list_job_ids_by_statuses(&self, statuses: &[JobStatus]) -> Result<Vec<Uuid>> {
+        if statuses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut query = QueryBuilder::<Sqlite>::new("SELECT id FROM jobs WHERE status IN (");
+        {
+            let mut separated = query.separated(", ");
+            for status in statuses {
+                separated.push_bind(status_text(*status));
+            }
+        }
+        query.push(") ORDER BY created_at DESC");
+        query
+            .build()
+            .fetch_all(self.pool())
+            .await?
+            .into_iter()
+            .map(|row| row_uuid(&row, "id"))
+            .collect()
+    }
+
+    pub async fn count_jobs(&self) -> Result<u64> {
+        let row = sqlx::query("SELECT COUNT(*) AS count FROM jobs")
+            .fetch_one(self.pool())
+            .await?;
+        let count: i64 = row.try_get("count")?;
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    pub async fn count_jobs_by_statuses(&self, statuses: &[JobStatus]) -> Result<u64> {
+        if statuses.is_empty() {
+            return Ok(0);
+        }
+        let mut query = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) AS count FROM jobs WHERE status IN (");
+        {
+            let mut separated = query.separated(", ");
+            for status in statuses {
+                separated.push_bind(status_text(*status));
+            }
+        }
+        query.push(")");
+        let row = query.build().fetch_one(self.pool()).await?;
+        let count: i64 = row.try_get("count")?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
     pub async fn list_jobs_page(&self, filter: JobListFilter) -> Result<Vec<Job>> {
         let limit = filter.limit.clamp(1, 200);
@@ -528,6 +682,82 @@ impl Repository {
         Ok(())
     }
 
+    /// Attempts an atomic lifecycle transition and reports whether this caller
+    /// won the state change. This is used by workers so a concurrent pause or
+    /// cancellation cannot be overwritten by a stale execution task.
+    pub async fn try_transition_status(
+        &self,
+        id: Uuid,
+        allowed_from: &[JobStatus],
+        target: JobStatus,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        if allowed_from.is_empty() {
+            return Ok(false);
+        }
+        let allowed = allowed_from
+            .iter()
+            .map(|status| status_text(*status))
+            .collect::<Vec<_>>();
+        let placeholders = std::iter::repeat_n("?", allowed.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE jobs SET status=?,error=?,available_at=CASE WHEN ?='queued' THEN NULL ELSE available_at END,updated_at=?,started_at=CASE WHEN ?='downloading' AND started_at IS NULL THEN ? ELSE started_at END,completed_at=CASE WHEN ?='completed' THEN ? ELSE completed_at END WHERE id=? AND status IN ({placeholders})"
+        );
+        let now = Utc::now();
+        let mut query = sqlx::query(&sql)
+            .bind(status_text(target))
+            .bind(error)
+            .bind(status_text(target))
+            .bind(now)
+            .bind(status_text(target))
+            .bind(now)
+            .bind(status_text(target))
+            .bind(now)
+            .bind(id.to_string());
+        for status in allowed {
+            query = query.bind(status);
+        }
+        Ok(query.execute(self.pool()).await?.rows_affected() == 1)
+    }
+
+    /// Atomically returns an execution-owned job to the queue after a transient
+    /// failure without overwriting a concurrent pause or cancellation.
+    pub async fn try_defer_job(
+        &self,
+        id: Uuid,
+        allowed_from: &[JobStatus],
+        delay: std::time::Duration,
+        reason: &str,
+    ) -> Result<bool> {
+        if allowed_from.is_empty() {
+            return Ok(false);
+        }
+        let available_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|error| RavynError::Internal(error.to_string()))?;
+        let allowed = allowed_from
+            .iter()
+            .map(|status| status_text(*status))
+            .collect::<Vec<_>>();
+        let placeholders = std::iter::repeat_n("?", allowed.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE jobs SET status='queued',available_at=?,error=?,updated_at=? WHERE id=? AND status IN ({placeholders})"
+        );
+        let mut query = sqlx::query(&sql)
+            .bind(available_at)
+            .bind(reason)
+            .bind(Utc::now())
+            .bind(id.to_string());
+        for status in allowed {
+            query = query.bind(status);
+        }
+        Ok(query.execute(self.pool()).await?.rows_affected() == 1)
+    }
+
     /// Performs a guarded state transition and rejects invalid lifecycle changes.
     pub async fn transition_status(
         &self,
@@ -576,16 +806,32 @@ impl Repository {
     }
 
     pub async fn find_duplicate(&self, source: &str, destination: &str) -> Result<Option<Job>> {
+        Ok(self
+            .find_duplicate_candidates(source, destination, 1)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    pub async fn find_duplicate_candidates(
+        &self,
+        source: &str,
+        destination: &str,
+        limit: usize,
+    ) -> Result<Vec<Job>> {
+        let limit = limit.clamp(1, 100);
         sqlx::query(
             &(JOB_SELECT.to_owned()
-                + " WHERE source=? AND destination=? ORDER BY created_at DESC LIMIT 1"),
+                + " WHERE source=? AND destination=? AND status NOT IN ('failed','cancelled') ORDER BY created_at DESC LIMIT ?"),
         )
         .bind(source)
         .bind(destination)
-        .fetch_optional(self.pool())
+        .bind(limit as i64)
+        .fetch_all(self.pool())
         .await?
+        .into_iter()
         .map(row_to_job)
-        .transpose()
+        .collect()
     }
 
     pub async fn recover_interrupted(&self) -> Result<()> {

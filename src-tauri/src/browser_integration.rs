@@ -5,18 +5,26 @@
 //! desktop process owns the authenticated loopback backend.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const HOST_NAME: &str = "com.ravyn.download_manager";
 pub const EXTENSION_ID: &str = "firefox-extension@ravyn.app";
 pub const HOST_MANIFEST_FILE: &str = "com.ravyn.download_manager.json";
-const ACTION_FILE: &str = "browser-action.json";
+const ACTION_DIRECTORY: &str = "browser-actions";
+pub const BROWSER_ACTION_EVENT: &str = "ravyn://browser-action";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserIntegrationStatus {
     pub supported: bool,
     pub registered: bool,
+    /// A registration exists but Firefox would spawn a missing executable
+    /// (or, in installed mode, a different one than the running app) — the
+    /// stale-after-update state that silently breaks the extension.
+    pub stale: bool,
+    /// Executable path the registered manifest currently points at.
+    pub registered_executable: Option<String>,
     pub host_name: String,
     pub extension_id: String,
     pub manifest_path: Option<String>,
@@ -28,17 +36,20 @@ pub struct BrowserIntegrationStatus {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct BrowserAction {
+    /// Semantic action requested by the browser. Older queued actions may not
+    /// contain this field, so the frontend still falls back to section/source.
+    pub intent: Option<String>,
     pub section: Option<String>,
     pub source_url: Option<String>,
 }
 
 #[derive(Default)]
-pub struct BrowserActionState(Mutex<Option<BrowserAction>>);
+pub struct BrowserActionState(Mutex<VecDeque<BrowserAction>>);
 
 impl BrowserActionState {
     pub fn replace(&self, action: BrowserAction) {
         if let Ok(mut pending) = self.0.lock() {
-            *pending = Some(action);
+            pending.push_back(action);
         }
     }
 
@@ -46,72 +57,69 @@ impl BrowserActionState {
         self.0
             .lock()
             .ok()
-            .and_then(|mut pending| pending.take())
+            .and_then(|mut pending| pending.pop_front())
             .or_else(take_published_action)
     }
 }
 
-pub fn publish_action(action: &BrowserAction) -> Result<(), String> {
-    let path = action_path();
-    let parent = path
-        .parent()
-        .ok_or_else(|| "the browser action path has no parent directory".to_owned())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create the browser action directory: {error}"))?;
-    let bytes = serde_json::to_vec(action)
-        .map_err(|error| format!("failed to serialize the browser action: {error}"))?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("failed to write the browser action: {error}"))?;
-    restrict_action_file(&temporary)?;
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|error| format!("failed to replace the browser action: {error}"))?;
-    }
-    std::fs::rename(&temporary, &path)
-        .map_err(|error| format!("failed to publish the browser action: {error}"))
-}
-
 fn take_published_action() -> Option<BrowserAction> {
-    let path = action_path();
-    let bytes = std::fs::read(&path).ok()?;
-    let _ = std::fs::remove_file(path);
-    serde_json::from_slice(&bytes).ok()
+    let directory = action_directory();
+    if !directory.exists() {
+        return None;
+    }
+    crate::native_messaging::restrict_directory_to_current_user(&directory).ok()?;
+    let mut entries = std::fs::read_dir(&directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let _ = std::fs::remove_file(&path);
+        if let Ok(action) = serde_json::from_slice::<BrowserAction>(&bytes) {
+            let intent = action.intent.as_deref().and_then(sanitize_intent);
+            let section = action.section.as_deref().map(sanitize_section);
+            let source_url = action
+                .source_url
+                .as_deref()
+                .and_then(sanitize_source_url);
+            return Some(BrowserAction {
+                intent,
+                section,
+                source_url,
+            });
+        }
+    }
+    None
 }
 
-fn action_path() -> PathBuf {
+fn action_directory() -> PathBuf {
     crate::backend::resolve_data_dir()
         .join("runtime")
-        .join(ACTION_FILE)
-}
-
-#[cfg(unix)]
-fn restrict_action_file(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("failed to restrict the browser action file: {error}"))
-}
-
-#[cfg(not(unix))]
-fn restrict_action_file(_path: &Path) -> Result<(), String> {
-    Ok(())
+        .join(ACTION_DIRECTORY)
 }
 
 /// Handles explicit installer lifecycle commands without starting Tauri.
-pub fn try_handle_command_line() -> bool {
+pub fn try_handle_command_line() -> Option<i32> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    let Some(register_requested) = integration_command(&arguments) else {
-        return false;
-    };
+    let register_requested = integration_command(&arguments)?;
     let result = if register_requested {
         repair_for_current_executable().map(|_| ())
     } else {
         unregister().map(|_| ())
     };
-    if let Err(error) = result {
-        eprintln!("Ravyn Firefox integration command failed: {error}");
+    match result {
+        Ok(()) => Some(0),
+        Err(error) => {
+            eprintln!("Ravyn Firefox integration command failed: {error}");
+            Some(1)
+        }
     }
-    true
 }
 
 fn integration_command(arguments: &[std::ffi::OsString]) -> Option<bool> {
@@ -131,11 +139,18 @@ fn integration_command(arguments: &[std::ffi::OsString]) -> Option<bool> {
 
 pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
     let requested = arguments.iter().any(|argument| {
-        argument == "--browser-action" || argument.starts_with("--browser-section=")
+        argument == "--browser-action"
+            || argument.starts_with("--browser-intent=")
+            || argument.starts_with("--browser-section=")
     });
     if !requested {
         return None;
     }
+    let intent = arguments.iter().find_map(|argument| {
+        argument
+            .strip_prefix("--browser-intent=")
+            .and_then(sanitize_intent)
+    });
     let section = arguments.iter().find_map(|argument| {
         argument
             .strip_prefix("--browser-section=")
@@ -148,6 +163,7 @@ pub fn parse_browser_action(arguments: &[String]) -> Option<BrowserAction> {
             .and_then(sanitize_source_url)
     });
     Some(BrowserAction {
+        intent,
         section,
         source_url,
     })
@@ -169,9 +185,19 @@ pub fn parse_torrent_association_action(arguments: &[String]) -> Option<BrowserA
         .then(|| path.display().to_string())
     })?;
     Some(BrowserAction {
+        intent: Some("add_download".into()),
         section: Some("torrents".into()),
         source_url: Some(source_url),
     })
+}
+
+fn sanitize_intent(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "navigate" | "add_download" | "create_schedule" | "scan_page" => {
+            Some(value.trim().to_ascii_lowercase())
+        }
+        _ => None,
+    }
 }
 
 fn sanitize_section(value: &str) -> String {
@@ -195,12 +221,27 @@ pub fn status() -> BrowserIntegrationStatus {
     let executable = std::env::current_exe().ok();
     let manifest = manifest_path();
     let installed_mode = crate::installation::current_executable_is_installed();
+    let registered_target = registered_manifest_target();
+    // A registration whose target executable no longer exists is broken for
+    // every Ravyn; a target that differs from the running executable is only
+    // wrong when the running executable is the installed one (a portable
+    // copy running next to a healthy installed registration is fine).
+    let stale = registered_target.as_ref().is_some_and(|target| {
+        !target.is_file()
+            || (installed_mode
+                && executable
+                    .as_ref()
+                    .is_some_and(|exe| !same_path(target, exe)))
+    });
+    let registered_executable = registered_target.map(|path| path.display().to_string());
     match (&manifest, &executable) {
         (Some(manifest), Some(executable)) => {
             let registered = registration_matches(manifest, executable).unwrap_or(false);
             BrowserIntegrationStatus {
                 supported: true,
                 registered,
+                stale,
+                registered_executable,
                 host_name: HOST_NAME.into(),
                 extension_id: EXTENSION_ID.into(),
                 manifest_path: Some(manifest.display().to_string()),
@@ -212,6 +253,8 @@ pub fn status() -> BrowserIntegrationStatus {
         _ => BrowserIntegrationStatus {
             supported: false,
             registered: false,
+            stale,
+            registered_executable,
             host_name: HOST_NAME.into(),
             extension_id: EXTENSION_ID.into(),
             manifest_path: manifest.map(|path| path.display().to_string()),
@@ -222,6 +265,37 @@ pub fn status() -> BrowserIntegrationStatus {
             ),
         },
     }
+}
+
+/// The executable path Firefox would actually spawn: resolved through the
+/// registered manifest location (the registry on Windows), not the path this
+/// build would register — after an update or a moved install the two differ.
+fn registered_manifest_target() -> Option<PathBuf> {
+    let manifest = registered_manifest_path()?;
+    let bytes = std::fs::read(manifest).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn registered_manifest_path() -> Option<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(format!(
+            r"Software\Mozilla\NativeMessagingHosts\{HOST_NAME}"
+        ))
+        .ok()?;
+    let value: String = key.get_value("").ok()?;
+    Some(PathBuf::from(value))
+}
+
+#[cfg(not(windows))]
+fn registered_manifest_path() -> Option<PathBuf> {
+    manifest_path().filter(|path| path.is_file())
 }
 
 pub fn repair_for_current_executable() -> Result<BrowserIntegrationStatus, String> {
@@ -336,7 +410,7 @@ fn registration_matches(manifest: &Path, executable: &Path) -> Result<bool, Stri
     Ok(body_matches && registration_location_matches(manifest)?)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => left
@@ -430,6 +504,19 @@ mod tests {
     }
 
     #[test]
+    fn browser_action_accepts_known_intent() {
+        let action = parse_browser_action(&[
+            "Ravyn".into(),
+            "--browser-action".into(),
+            "--browser-intent=create_schedule".into(),
+            "--browser-section=automation".into(),
+        ])
+        .unwrap();
+        assert_eq!(action.intent.as_deref(), Some("create_schedule"));
+        assert_eq!(action.section.as_deref(), Some("automation"));
+    }
+
+    #[test]
     fn browser_action_accepts_http_source() {
         let action = parse_browser_action(&[
             "Ravyn".into(),
@@ -451,5 +538,6 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(action.section.as_deref(), Some("torrents"));
+        assert_eq!(action.intent.as_deref(), Some("add_download"));
     }
 }

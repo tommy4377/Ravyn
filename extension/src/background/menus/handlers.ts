@@ -3,7 +3,18 @@ import type {
   DetectedResource,
   SourceContext,
 } from "../../shared/contracts";
+import { toExtensionError } from "../../shared/errors";
+import { logger } from "../../shared/logger";
+import { loadSettings } from "../../shared/settings";
 import { normalizeUrl } from "../../shared/urls";
+import {
+  downloadLabel,
+  trackBatchResult,
+  trackDownload,
+} from "../downloads/completion";
+import { createBatchSafely } from "../downloads/batch";
+import { enrichDownload, enrichProbe } from "../downloads/browser-context";
+import { notify } from "../notifications";
 import type { NativeClient } from "../native/client";
 import type { ResourceCache } from "../network/cache";
 import { openResourcePopup } from "../popup";
@@ -14,7 +25,15 @@ export function registerMenuHandlers(
   cache: ResourceCache,
 ): void {
   browser.menus.onClicked.addListener((info, tab) => {
-    void handle(info, tab, native, cache);
+    void handle(info, tab, native, cache).catch(async (error) => {
+      logger.error("Ravyn menu action failed", error);
+      const settings = await loadSettings().catch(() => undefined);
+      if (settings?.notifications)
+        await notify(
+          "Ravyn action failed",
+          toExtensionError(error).message,
+        ).catch(() => undefined);
+    });
   });
 }
 
@@ -26,13 +45,19 @@ async function handle(
 ): Promise<void> {
   const tabId = tab?.id;
   const sourceContext = contextFor(tab, info.frameId);
-  const directUrl = info.linkUrl ?? info.srcUrl;
+  // Prefer the media/image source over an enclosing link's href — image and
+  // video menu items only ever fire in an "image"/"video"/"audio" context,
+  // but Firefox still populates linkUrl when the element sits inside an
+  // <a> (e.g. a gallery thumbnail), which previously downloaded the page.
+  const directUrl = info.srcUrl ?? info.linkUrl;
+  const createDownload = (payload: CreateDownloadPayload) =>
+    create(native, payload, tab);
   switch (info.menuItemId) {
     case MenuId.linkDownload:
     case MenuId.imageDownload:
     case MenuId.mediaDownload:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           referer: info.pageUrl,
           sourceContext,
@@ -40,13 +65,15 @@ async function handle(
       break;
     case MenuId.imageOriginal: {
       const context =
-        tabId === undefined ? null : await collectContext(tabId, "image");
+        tabId === undefined
+          ? null
+          : await collectContext(tabId, "image", info.frameId);
       const original =
         stringArray(context?.sources)[0] ??
         stringValue(context?.currentSrc) ??
         directUrl;
       if (original)
-        await create(native, {
+        await createDownload({
           url: original,
           referer: info.pageUrl,
           sourceContext,
@@ -61,7 +88,7 @@ async function handle(
       break;
     case MenuId.linkPaused:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           paused: true,
           referer: info.pageUrl,
@@ -71,11 +98,14 @@ async function handle(
     case MenuId.linkAnalyze:
     case MenuId.mediaAnalyze:
       if (directUrl)
-        await native.request("probe_media", { url: directUrl, sourceContext });
+        await native.request(
+          "probe_media",
+          await enrichProbe(directUrl, sourceContext, tab),
+        );
       break;
     case MenuId.imageConvert:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           referer: info.pageUrl,
           postProcessingPreset: "image-webp",
@@ -84,7 +114,7 @@ async function handle(
       break;
     case MenuId.mediaAudio:
       if (directUrl)
-        await create(native, {
+        await createDownload({
           url: directUrl,
           kind: "media",
           referer: info.pageUrl,
@@ -92,16 +122,20 @@ async function handle(
           sourceContext,
         });
       break;
-    case MenuId.mediaSubtitles:
-      await create(native, {
-        url: info.pageUrl ?? directUrl ?? "",
-        kind: "media",
-        media: { writeSubtitles: true, subtitleLanguages: ["all"] },
-        sourceContext,
-      });
+    case MenuId.mediaSubtitles: {
+      const subtitleUrl = info.pageUrl ?? directUrl;
+      if (subtitleUrl)
+        await createDownload({
+          url: subtitleUrl,
+          kind: "media",
+          media: { writeSubtitles: true, subtitleLanguages: ["all"] },
+          sourceContext,
+        });
       break;
+    }
     case MenuId.linkSchedule:
       await native.request("open_ravyn", {
+        intent: "create_schedule",
         section: "automation",
         sourceUrl: directUrl,
       });
@@ -116,11 +150,16 @@ async function handle(
         });
       break;
     case MenuId.selectionUrls:
-      await sendSelectionUrls(native, info.selectionText ?? "", sourceContext);
+      await sendSelectionUrls(
+        native,
+        info.selectionText ?? "",
+        sourceContext,
+        tab,
+      );
       break;
     case MenuId.selectionScan:
       if (tabId !== undefined) {
-        const context = await collectContext(tabId, "selection");
+        const context = await collectContext(tabId, "selection", info.frameId);
         const selection =
           stringValue(context?.selectionText) ?? info.selectionText ?? "";
         const resources = urlsFromText(selection).map((url) => ({
@@ -157,7 +196,7 @@ async function handle(
       break;
     case MenuId.pageYtdlp:
       if (info.pageUrl)
-        await create(native, {
+        await createDownload({
           url: info.pageUrl,
           kind: "media",
           sourceContext,
@@ -183,22 +222,35 @@ async function handle(
 async function create(
   native: NativeClient,
   payload: CreateDownloadPayload,
+  tab?: browser.tabs.Tab,
 ): Promise<void> {
   const normalized = normalizeUrl(payload.url);
   if (!normalized) return;
-  await native.request("create_download", { ...payload, url: normalized });
+  const enriched = await enrichDownload({ ...payload, url: normalized }, tab);
+  const job = await native.request<{ id?: string }>(
+    "create_download",
+    enriched,
+  );
+  void trackDownload(
+    job?.id,
+    downloadLabel({ url: normalized, filename: payload.filename }),
+  );
 }
 
 async function sendSelectionUrls(
   native: NativeClient,
   selection: string,
   sourceContext: SourceContext,
+  tab?: browser.tabs.Tab,
 ): Promise<void> {
-  const downloads = urlsFromText(selection).map((url) => ({
-    url,
-    sourceContext,
-  }));
-  if (downloads.length) await native.request("create_batch", { downloads });
+  const downloads = await Promise.all(
+    urlsFromText(selection).map((url) =>
+      enrichDownload({ url, sourceContext }, tab),
+    ),
+  );
+  if (!downloads.length) return;
+  const result = await createBatchSafely(native, downloads);
+  trackBatchResult(result, downloads);
 }
 
 async function scanTab(
@@ -229,9 +281,17 @@ function contextFor(
 async function collectContext(
   tabId: number,
   context: "image" | "selection",
+  frameId?: number,
 ): Promise<Record<string, unknown> | null> {
+  // Target the exact frame the user right-clicked in — the content script
+  // runs in every frame (all_frames: true), and without this the message
+  // can be answered by an unrelated frame (usually the top one).
   const response: unknown = await browser.tabs
-    .sendMessage(tabId, { type: "collect-context", context })
+    .sendMessage(
+      tabId,
+      { type: "collect-context", context },
+      frameId === undefined ? undefined : { frameId },
+    )
     .catch(() => null);
   return response && typeof response === "object"
     ? (response as Record<string, unknown>)

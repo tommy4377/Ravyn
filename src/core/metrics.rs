@@ -193,6 +193,24 @@ impl Metrics {
         *state.jobs_started.entry(engine).or_default() += 1;
     }
 
+    pub fn aggregate_transfer_rate(&self) -> u64 {
+        self.state().rates.values().copied().sum()
+    }
+
+    pub fn transfer_rate(&self, job_id: Uuid) -> Option<u64> {
+        self.state().rates.get(&job_id).copied()
+    }
+
+    /// Remove live transfer gauges when a running attempt is paused or
+    /// force-aborted without recording a terminal job outcome.
+    pub fn job_suspended(&self, job_id: Uuid) {
+        let mut state = self.state();
+        state.active_engines.remove(&job_id);
+        state.last_bytes.remove(&job_id);
+        state.rates.remove(&job_id);
+        state.torrent_telemetry.remove(&job_id);
+    }
+
     pub fn progress(&self, snapshot: &ProgressSnapshot) {
         let mut state = self.state();
         let Some(engine) = state.active_engines.get(&snapshot.job_id).copied() else {

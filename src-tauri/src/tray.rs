@@ -45,7 +45,7 @@ pub fn ensure(app: &AppHandle) -> tauri::Result<()> {
                 if let Err(error) = crate::app_updates::install_pending_on_close(app) {
                     tracing::error!(%error, "failed to schedule the staged app update");
                 }
-                app.exit(0);
+                crate::request_graceful_exit(app, 0);
             }
             _ => {}
         })
