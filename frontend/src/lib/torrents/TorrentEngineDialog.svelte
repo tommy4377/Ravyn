@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { describeError } from "../api/errors";
   import type { TorrentDhtStats, TorrentDhtTable, TorrentEngineList, TorrentGlobalStats } from "../api/types";
   import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
@@ -59,8 +60,13 @@
     }
   }
 
+  // load() reads `loading` synchronously (its own re-entrancy guard) and
+  // writes it after the awaited requests settle; without untrack that read
+  // makes this effect depend on `loading`, so every completed load flipped
+  // it back to false and re-triggered the effect — an unbroken refresh loop
+  // for as long as the dialog stayed open.
   $effect(() => {
-    if (open) void load();
+    if (open) untrack(() => void load());
   });
 
   async function copyDht(): Promise<void> {

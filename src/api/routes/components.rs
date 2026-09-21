@@ -87,9 +87,8 @@ pub(super) async fn list_components(
             .await;
         let record = records.get(&component);
         let configured_path = component_config_path(component, &s.configured_config);
-        let custom_path = (configured_path
-            != std::path::Path::new(component.default_command()))
-        .then(|| configured_path.clone());
+        let custom_path = (configured_path != std::path::Path::new(component.default_command()))
+            .then(|| configured_path.clone());
         let managed_version = manager
             .installed_version(component)
             .await
@@ -211,7 +210,10 @@ async fn start_component_installation(
     if state.is_operational() && !force {
         return Ok(StatusCode::NO_CONTENT);
     }
-    if matches!(state, ComponentState::CustomPath | ComponentState::CustomPathInvalid) {
+    if matches!(
+        state,
+        ComponentState::CustomPath | ComponentState::CustomPathInvalid
+    ) {
         return Err(crate::error::RavynError::Conflict(format!(
             "component {} uses a custom path; reset it to the default command before installing a managed version",
             component.engine_name()
@@ -491,8 +493,12 @@ pub(super) async fn verify_component(
         s.component_manifest.clone(),
         tokio_util::sync::CancellationToken::new(),
     );
+    // Runtime verification must use the active engine configuration. Managed
+    // rqbit replaces the persisted default endpoint with its supervised
+    // ephemeral loopback URL during bootstrap; checking configured_config
+    // would incorrectly probe the inactive 127.0.0.1:3030 default.
     let health = manager
-        .health_check(component, &s.configured_config, &records)
+        .health_check(component, &s.manager.config, &records)
         .await;
     let now = chrono::Utc::now();
     let configured_path = component_config_path(component, &s.configured_config);

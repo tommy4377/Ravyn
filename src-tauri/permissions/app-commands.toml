@@ -57,3 +57,38 @@ commands.allow = ["open_native_path"]
 identifier = "allow-reveal-native-path"
 description = "Allows the main Ravyn window to reveal an existing absolute local path in Windows Explorer."
 commands.allow = ["reveal_native_path"]
+
+[[permission]]
+identifier = "allow-cancel-app-update"
+description = "Allows the main Ravyn window to cancel an active update operation or discard a staged installer."
+commands.allow = ["cancel_app_update"]
+
+[[permission]]
+identifier = "allow-install-app-update-now"
+description = "Allows the main Ravyn window to apply a verified staged update immediately and restart through the detached helper."
+commands.allow = ["install_app_update_now"]
+
+[[permission]]
+identifier = "allow-browser-integration-status"
+description = "Allows the main Ravyn window to inspect the Firefox native-messaging registration."
+commands.allow = ["browser_integration_status"]
+
+[[permission]]
+identifier = "allow-repair-browser-integration"
+description = "Allows the main Ravyn window to repair the current-user Firefox native-messaging registration."
+commands.allow = ["repair_browser_integration"]
+
+[[permission]]
+identifier = "allow-remove-browser-integration"
+description = "Allows the main Ravyn window to remove the current-user Firefox native-messaging registration."
+commands.allow = ["remove_browser_integration"]
+
+[[permission]]
+identifier = "allow-take-browser-action"
+description = "Allows the main Ravyn window to consume a pending action delivered by the Firefox extension."
+commands.allow = ["take_browser_action"]
+
+[[permission]]
+identifier = "allow-prompt-torrent-default-app"
+description = "Allows the main Ravyn window to register Ravyn as a torrent handler and open Windows Default Apps for an explicit user choice."
+commands.allow = ["prompt_torrent_default_app"]

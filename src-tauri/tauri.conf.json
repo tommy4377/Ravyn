@@ -15,7 +15,8 @@
     "security": {
       "capabilities": [
         "setup-capability",
-        "main-capability"
+        "main-capability",
+        "compact-capability"
       ],
       "csp": {
         "default-src": "'self' customprotocol: asset:",
@@ -38,20 +39,12 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": [
-      "nsis",
-      "msi"
-    ],
+    "active": false,
+    "targets": [],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser"
-      }
-    }
+    ]
   },
   "mainBinaryName": "Ravyn"
 }

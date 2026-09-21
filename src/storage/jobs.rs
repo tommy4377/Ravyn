@@ -229,7 +229,7 @@ impl Repository {
     }
     pub async fn insert_job(
         &self,
-        request: CreateJob,
+        mut request: CreateJob,
         default_destination: PathBuf,
     ) -> Result<Job> {
         let started = std::time::Instant::now();
@@ -245,9 +245,16 @@ impl Repository {
             .unwrap_or(default_destination)
             .to_string_lossy()
             .to_string();
+        let initial_status = if request.options.initially_paused {
+            JobStatus::Paused
+        } else {
+            JobStatus::Queued
+        };
+        // This is an instruction for creation, not persistent transfer metadata.
+        request.options.initially_paused = false;
         sqlx::query("INSERT INTO jobs(id,kind,source,destination,filename,status,priority,speed_limit_bps,expected_sha256,options_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(id.to_string()).bind(kind_text(request.kind)).bind(request.source).bind(destination).bind(request.filename)
-            .bind(status_text(JobStatus::Queued)).bind(request.priority).bind(speed_limit_bps)
+            .bind(status_text(initial_status)).bind(request.priority).bind(speed_limit_bps)
             .bind(request.expected_sha256).bind(serde_json::to_string(&request.options)?).bind(now).bind(now).execute(self.pool()).await?;
         let job = self.get_job(id).await;
         self.observe_query("insert_job", started);
@@ -370,7 +377,7 @@ impl Repository {
         let started = std::time::Instant::now();
         let now = Utc::now();
         let sql = format!(
-            "UPDATE jobs SET status='downloading', available_at=NULL, started_at=COALESCE(started_at, ?), updated_at=? WHERE id=(SELECT id FROM jobs WHERE status='queued' AND (available_at IS NULL OR available_at<=?) ORDER BY priority DESC, created_at ASC LIMIT 1) AND status='queued' RETURNING {}",
+            "UPDATE jobs SET status='downloading', available_at=NULL, started_at=COALESCE(started_at, ?), updated_at=? WHERE id=(SELECT id FROM jobs WHERE status='queued' AND (available_at IS NULL OR available_at<=?) AND NOT EXISTS (SELECT 1 FROM library_move_transactions WHERE state IN ('running','cancelling','restart_required')) ORDER BY priority DESC, created_at ASC LIMIT 1) AND status='queued' RETURNING {}",
             JOB_COLUMNS
         );
         let result = sqlx::query(&sql)

@@ -4,7 +4,11 @@
 /// caller must exit instead of starting the Tauri application.
 pub fn try_handle_command_line() -> bool {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    if !arguments.iter().skip(1).any(|argument| argument == "--uninstall") {
+    if !arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--uninstall")
+    {
         return false;
     }
     let purge_data = arguments
@@ -24,6 +28,7 @@ fn uninstall(purge_data: bool) -> Result<(), String> {
 
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let _ = crate::browser_integration::unregister();
     let _ = hkcu.delete_subkey_all(crate::installation::UNINSTALL_KEY);
     if let Ok(run) = hkcu.open_subkey_with_flags(
         r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -77,16 +82,16 @@ fn schedule_self_delete(executable: &std::path::Path) -> Result<(), String> {
     let script = format!(
         "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue"
     );
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            &script,
-        ])
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        &script,
+    ]);
+    crate::silent_command::hide_console_window(&mut command);
+    command.spawn().map_err(|error| error.to_string())?;
     Ok(())
 }

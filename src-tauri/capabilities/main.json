@@ -13,8 +13,19 @@
     "allow-app-update-status",
     "allow-check-app-update",
     "allow-repair-application",
+    "allow-install-app-update-now",
+    "allow-cancel-app-update",
     "allow-desktop-appearance",
     "allow-open-native-path",
-    "allow-reveal-native-path"
+    "allow-reveal-native-path",
+    "allow-browser-integration-status",
+    "allow-repair-browser-integration",
+    "allow-remove-browser-integration",
+    "allow-take-browser-action",
+    "allow-prompt-torrent-default-app",
+    "allow-notify-native",
+    "allow-open-compact-window",
+    "allow-focus-main-window",
+    "notification:default"
   ]
 }

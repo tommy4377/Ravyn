@@ -6,6 +6,7 @@ pub mod config;
 pub mod core;
 pub mod download;
 pub mod error;
+pub mod native_protocol;
 pub mod postprocess;
 pub mod services;
 pub mod storage;
@@ -30,7 +31,8 @@ pub struct Ravyn {
     pub manager: Arc<JobManager>,
     pub provisioning_cancellation: services::components::ProvisioningCancellation,
     pub component_manifest: Arc<dyn services::components::ManifestProvider>,
-    pub component_manifest_refresh: Option<Arc<services::manifest_refresh::RemoteManifestRefresher>>,
+    pub component_manifest_refresh:
+        Option<Arc<services::manifest_refresh::RemoteManifestRefresher>>,
     _rqbit_process: Option<services::rqbit_process::RqbitProcessManager>,
 }
 
@@ -62,6 +64,18 @@ impl Ravyn {
                 }
             }
         };
+        // Resume or finalize durable Library relocation transactions before
+        // persistent settings are applied. A restart-required transaction was
+        // committed by the previous process; an interrupted running copy can
+        // be safely resumed because source files are retained until activation.
+        if let Err(error) =
+            services::library::recover_interrupted_library_move(&config, &repository).await
+        {
+            tracing::error!(%error, "failed to recover interrupted Library move");
+        }
+        if let Err(error) = services::library::finalize_activated_library_move(&repository).await {
+            tracing::error!(%error, "failed to finalize activated Library move");
+        }
         let base_config = Arc::new(config.clone());
         if let Some(settings) = repository.load_persistent_settings().await? {
             settings.apply_to(&mut config)?;
@@ -77,7 +91,7 @@ impl Ravyn {
         // engine activation replaces built-in command-name defaults.
         let configured_config = Arc::new(config.clone());
         apply_managed_engine_paths(&mut config).await?;
-        let rqbit_process = start_managed_rqbit_if_required(&mut config, &repository).await?;
+        let rqbit_process = start_managed_rqbit_if_available(&mut config).await?;
         let provisioning_cancellation = services::components::ProvisioningCancellation::new();
         let config = Arc::new(config);
         let manager = Arc::new(JobManager::new(config.clone(), repository.clone()).await?);
@@ -127,19 +141,15 @@ impl Ravyn {
     }
 }
 
-/// Starts rqbit only when a verified Ravyn-managed binary is active and the
-/// persisted feature selection requires torrent support. Custom rqbit paths
-/// and remote endpoints remain operator-owned and are never spawned here.
-async fn start_managed_rqbit_if_required(
+/// Starts rqbit whenever a verified Ravyn-managed binary is active. A managed
+/// component can be installed after setup, so the original setup feature
+/// selection is not a reliable indication of whether torrent support is
+/// currently available. Custom rqbit paths and non-default API endpoints
+/// remain operator-owned and are never spawned here.
+async fn start_managed_rqbit_if_available(
     config: &mut Config,
-    repository: &Repository,
 ) -> Result<Option<services::rqbit_process::RqbitProcessManager>> {
-    use services::components::{FeatureId, effective_feature_set};
-
-    let Some((profile, selections)) = repository.load_feature_selections().await? else {
-        return Ok(None);
-    };
-    if !effective_feature_set(profile, &selections)?.contains(&FeatureId::TorrentSupport) {
+    if !uses_default_rqbit_endpoint(&config.rqbit_api) {
         return Ok(None);
     }
     let engines = services::engines::EngineManager::new(&config.data_dir);
@@ -153,6 +163,10 @@ async fn start_managed_rqbit_if_required(
     let process = services::rqbit_process::RqbitProcessManager::new(&config.data_dir);
     process.start(&managed, config).await?;
     Ok(Some(process))
+}
+
+fn uses_default_rqbit_endpoint(value: &str) -> bool {
+    value.trim().trim_end_matches('/') == "http://127.0.0.1:3030"
 }
 
 /// Prefer a verified managed binary only when the operator left the matching
@@ -202,7 +216,11 @@ async fn reconcile_interrupted_component_operations(
         let state = manager
             .component_state(component, &config, &records, false)
             .await;
-        let active = manager.active_managed_component(component).await.ok().flatten();
+        let active = manager
+            .active_managed_component(component)
+            .await
+            .ok()
+            .flatten();
         let custom_path = component_config_path(component, &config);
         let custom = custom_path != std::path::Path::new(component.default_command());
         let now = chrono::Utc::now();
@@ -210,15 +228,13 @@ async fn reconcile_interrupted_component_operations(
             .save_component_record(&PersistedComponent {
                 component,
                 state,
-                managed_version: active
-                    .as_ref()
-                    .map(|installed| installed.version.clone()),
+                managed_version: active.as_ref().map(|installed| installed.version.clone()),
                 detected_version: previous.detected_version.clone(),
-                managed_path: active
-                    .as_ref()
-                    .map(|installed| installed.path.clone()),
+                managed_path: active.as_ref().map(|installed| installed.path.clone()),
                 custom_path: custom.then(|| custom_path.clone()),
-                error_message: Some("component operation was interrupted by a previous shutdown".into()),
+                error_message: Some(
+                    "component operation was interrupted by a previous shutdown".into(),
+                ),
                 last_checked_at: Some(now),
                 verified_at: previous.verified_at,
                 install_started_at: previous.install_started_at,
@@ -558,7 +574,10 @@ async fn provision_component(
     result
 }
 
-fn component_config_path(component: services::components::ComponentId, config: &Config) -> &std::path::PathBuf {
+fn component_config_path(
+    component: services::components::ComponentId,
+    config: &Config,
+) -> &std::path::PathBuf {
     match component {
         services::components::ComponentId::Ytdlp => &config.ytdlp,
         services::components::ComponentId::Ffmpeg => &config.ffmpeg,
@@ -620,10 +639,12 @@ mod managed_engine_tests {
             url: "https://example.test/yt-dlp".into(),
             sha256: hex::encode(Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
+            max_size_bytes: None,
             filename: "yt-dlp.exe".into(),
             capabilities: Vec::new(),
             archive_member: None,
             member_sha256: None,
+            installer: None,
         };
         let installed = services::engines::EngineManager::new(temporary.path())
             .install_verified(&artifact, bytes)
@@ -634,5 +655,13 @@ mod managed_engine_tests {
 
         assert_eq!(config.ytdlp, installed);
         assert_eq!(config.ffmpeg, std::path::Path::new("custom-ffmpeg"));
+    }
+
+    #[test]
+    fn managed_rqbit_only_owns_the_builtin_endpoint() {
+        assert!(uses_default_rqbit_endpoint("http://127.0.0.1:3030"));
+        assert!(uses_default_rqbit_endpoint(" http://127.0.0.1:3030/ "));
+        assert!(!uses_default_rqbit_endpoint("https://torrent.example.test"));
+        assert!(!uses_default_rqbit_endpoint("http://127.0.0.1:4040"));
     }
 }

@@ -72,6 +72,9 @@ pub async fn serve_with_listener(app: Ravyn, listener: tokio::net::TcpListener) 
         library_import_status: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::services::library::LibraryImportStatus::default(),
         )),
+        library_import_cancellation: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        library_move_cancellation: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        library_maintenance_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         provisioning_cancellation: app.provisioning_cancellation.clone(),
     };
     let router = routes::router(state)
@@ -333,6 +336,10 @@ struct AuthState {
     repository: crate::storage::Repository,
 }
 
+fn is_public_health_path(path: &str) -> bool {
+    matches!(path, "/health" | "/health/live" | "/health/ready")
+}
+
 async fn require_token(
     State(state): State<AuthState>,
     mut request: Request<axum::body::Body>,
@@ -340,7 +347,7 @@ async fn require_token(
 ) -> Response {
     let path = request.uri().path().to_owned();
     let method = request.method().clone();
-    if matches!(path.as_str(), "/health" | "/health/live") {
+    if is_public_health_path(&path) {
         return next.run(request).await;
     }
     let request_id = request
@@ -564,6 +571,14 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_health_probes_are_public_but_other_routes_are_not() {
+        for path in ["/health", "/health/live", "/health/ready"] {
+            assert!(is_public_health_path(path));
+        }
+        assert!(!is_public_health_path("/v1/settings"));
+    }
+
     use super::*;
 
     #[test]

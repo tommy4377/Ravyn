@@ -10,8 +10,7 @@ use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use ravyn::services::{
     app_updates::{
-        APP_UPDATE_SCHEMA_VERSION, AppUpdateArtifact, AppUpdateManifest,
-        SignedAppUpdateManifest,
+        APP_UPDATE_SCHEMA_VERSION, AppUpdateArtifact, AppUpdateManifest, SignedAppUpdateManifest,
     },
     engines::{EngineManifest, SignedEngineManifest},
 };
@@ -208,7 +207,7 @@ fn verify(
     Ok(())
 }
 
-
+#[allow(clippy::too_many_arguments)] // Mirrors the explicit fields of the `sign-app-update` CLI command.
 fn sign_app_update(
     version: &str,
     published_at: &str,
@@ -242,9 +241,7 @@ fn sign_app_update(
     let payload = manifest.payload()?;
     let key_hex = key
         .or_else(|| std::env::var("RAVYN_APP_UPDATE_PRIVATE_KEY").ok())
-        .ok_or(
-            "no private key: pass --key or set RAVYN_APP_UPDATE_PRIVATE_KEY",
-        )?;
+        .ok_or("no private key: pass --key or set RAVYN_APP_UPDATE_PRIVATE_KEY")?;
     let key_bytes: [u8; 32] = hex::decode(key_hex.trim())?
         .try_into()
         .map_err(|_| "private key must be exactly 32 bytes (64 hex characters)")?;
@@ -269,8 +266,7 @@ fn verify_app_update(
     artifact_path: Option<&std::path::Path>,
     public_key_hex: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signed: SignedAppUpdateManifest =
-        serde_json::from_slice(&std::fs::read(signed_path)?)?;
+    let signed: SignedAppUpdateManifest = serde_json::from_slice(&std::fs::read(signed_path)?)?;
     let public_key: [u8; 32] = hex::decode(public_key_hex.trim())?
         .try_into()
         .map_err(|_| "public key must be exactly 32 bytes (64 hex characters)")?;

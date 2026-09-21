@@ -356,21 +356,35 @@ impl JobManager {
                     outcome.artifacts
                 };
                 let mut registered = Vec::with_capacity(produced.len());
+                let mut produced_bytes: u64 = 0;
                 for produced_artifact in produced {
                     let path = produced_artifact.path;
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        produced_bytes = produced_bytes.saturating_add(metadata.len());
+                    }
                     let is_primary = primary_path.as_deref() == Some(path.as_path());
-                    let artifact = self
+                    // A retried job can complete again over artifacts that an
+                    // earlier attempt already registered; reuse those rows so
+                    // history does not accumulate duplicate outputs.
+                    let existing = self
                         .repository
-                        .register_output_with_metadata(
-                            &job,
-                            &path,
-                            produced_artifact
-                                .output_type
-                                .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
-                            output_source(job.kind),
-                            produced_artifact.metadata,
-                        )
+                        .find_job_output_by_path(job.id, &path)
                         .await?;
+                    let artifact = if let Some(existing) = existing {
+                        existing
+                    } else {
+                        self.repository
+                            .register_output_with_metadata(
+                                &job,
+                                &path,
+                                produced_artifact
+                                    .output_type
+                                    .unwrap_or_else(|| output_type(job.kind, &path, is_primary)),
+                                output_source(job.kind),
+                                produced_artifact.metadata,
+                            )
+                            .await?
+                    };
                     if is_primary {
                         if let Some(value) = verified_primary_checksum.as_deref() {
                             self.repository
@@ -401,6 +415,30 @@ impl JobManager {
                     if produced_artifact.postprocess {
                         registered.push((artifact.id, path));
                     }
+                }
+                if job.kind == JobKind::Media && produced_bytes > 0 {
+                    // yt-dlp progress is per file, so the last downloaded file
+                    // (often a tiny subtitle) would otherwise define the job
+                    // size. Report the real on-disk output total instead.
+                    self.repository
+                        .update_progress(job.id, produced_bytes, Some(produced_bytes))
+                        .await?;
+                    self.events
+                        .publish(Event::Progress(crate::core::models::ProgressSnapshot {
+                            job_id: job.id,
+                            downloaded_bytes: produced_bytes,
+                            total_bytes: Some(produced_bytes),
+                            bytes_per_second: 0,
+                        }));
+                }
+                if let Some(filename) = inferred_completed_filename(
+                    job.kind,
+                    job.filename.as_deref(),
+                    primary_path.as_deref(),
+                ) {
+                    self.repository
+                        .update_job_fields(job.id, None, None, None, Some(&filename), None)
+                        .await?;
                 }
                 if !registered.is_empty() && !job.options_json.post_actions.is_empty() {
                     let _ = self
@@ -610,6 +648,47 @@ impl JobManager {
                     status: final_status,
                     error: result_terminal_message.clone(),
                 });
+                if final_status == JobStatus::Completed {
+                    // Progress flushes are periodic, so the last persisted
+                    // byte counter usually lags the finished transfer and a
+                    // reloaded UI would render a forever-94% bar. Snap the
+                    // stored counters (and live listeners) to the final size.
+                    let final_total = match self.repository.get_job(job.id).await {
+                        Ok(latest) => latest
+                            .total_bytes
+                            .and_then(|bytes| u64::try_from(bytes).ok()),
+                        Err(_) => None,
+                    };
+                    let final_total = match final_total {
+                        Some(total) => Some(total),
+                        None => self
+                            .repository
+                            .list_job_outputs(job.id)
+                            .await
+                            .ok()
+                            .and_then(|outputs| {
+                                outputs
+                                    .iter()
+                                    .find(|output| output.output_type == OutputType::Primary)
+                                    .or_else(|| outputs.first())
+                                    .and_then(|output| output.size_bytes)
+                            }),
+                    };
+                    if let Some(total) = final_total {
+                        let _ = self
+                            .repository
+                            .update_progress(job.id, total, Some(total))
+                            .await;
+                        self.events.publish(Event::Progress(
+                            crate::core::models::ProgressSnapshot {
+                                job_id: job.id,
+                                downloaded_bytes: total,
+                                total_bytes: Some(total),
+                                bytes_per_second: 0,
+                            },
+                        ));
+                    }
+                }
                 let (severity, code, message) = if final_status == JobStatus::Partial {
                     (
                         "warning",
@@ -746,6 +825,19 @@ fn path_with_numeric_suffix(path: &Path, suffix: u32) -> crate::error::Result<Pa
     Ok(path.with_file_name(filename))
 }
 
+fn inferred_completed_filename(
+    kind: JobKind,
+    existing: Option<&str>,
+    primary_path: Option<&Path>,
+) -> Option<String> {
+    if kind != JobKind::Media || existing.is_some() {
+        return None;
+    }
+    primary_path?
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 async fn move_regular_file_without_replacement(
     source: &Path,
     destination: &Path,
@@ -812,4 +904,34 @@ async fn move_regular_file_without_replacement(
         return Err(error.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_media_uses_the_real_output_name_when_no_name_was_requested() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                None,
+                Some(Path::new("C:/Videos/Me at the zoo [jNQXAC9IVRw].mkv")),
+            )
+            .as_deref(),
+            Some("Me at the zoo [jNQXAC9IVRw].mkv")
+        );
+    }
+
+    #[test]
+    fn completed_media_preserves_an_explicit_requested_name() {
+        assert_eq!(
+            inferred_completed_filename(
+                JobKind::Media,
+                Some("custom.mkv"),
+                Some(Path::new("C:/Videos/generated.mkv")),
+            ),
+            None
+        );
+    }
 }

@@ -22,7 +22,23 @@ fn validate_existing_path(value: &str) -> Result<PathBuf, String> {
         return Err("Ravyn can only open absolute local paths".into());
     }
     path.canonicalize()
+        .map(|canonical| strip_verbatim_prefix(&canonical))
         .map_err(|error| format!("the requested path is unavailable: {error}"))
+}
+
+/// `canonicalize` on Windows returns `\\?\C:\...` verbatim paths, which
+/// `explorer.exe /select,` does not understand — Explorer then silently
+/// falls back to opening the default (Documents) folder. Strip the prefix
+/// so shell integrations receive a regular Win32 path.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -36,6 +52,7 @@ fn platform_open(path: &Path) -> Result<(), String> {
         command.arg("url.dll,FileProtocolHandler").arg(path);
         command
     };
+    crate::silent_command::hide_console_window(&mut command);
     command
         .spawn()
         .map(|_| ())
@@ -44,16 +61,32 @@ fn platform_open(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn platform_reveal(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let mut command = std::process::Command::new("explorer.exe");
     if path.is_dir() {
         command.arg(path);
     } else {
-        command.arg(format!("/select,{}", path.display()));
+        // std::process quotes any argument containing spaces, turning
+        // `/select,C:\dir\my file.bin` into `"/select,C:\dir\my file.bin"`.
+        // Explorer does not understand that fully quoted form and silently
+        // opens the default (Documents) folder instead, so pass the
+        // documented `/select,"<path>"` shape verbatim.
+        command.raw_arg(reveal_select_argument(path));
     }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Windows Explorer could not reveal {}: {error}", path.display()))
+    crate::silent_command::hide_console_window(&mut command);
+    command.spawn().map(|_| ()).map_err(|error| {
+        format!(
+            "Windows Explorer could not reveal {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Builds the exact `explorer.exe` argument for revealing a file. Only the
+/// path is quoted — quoting the whole `/select,...` argument (std's default
+/// for arguments containing spaces) makes Explorer fall back to Documents.
+fn reveal_select_argument(path: &Path) -> String {
+    format!("/select,\"{}\"", path.display())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -78,5 +111,29 @@ mod tests {
     #[test]
     fn rejects_empty_paths() {
         assert!(validate_existing_path("  ").is_err());
+    }
+
+    #[test]
+    fn quotes_only_the_path_in_the_select_argument() {
+        assert_eq!(
+            reveal_select_argument(Path::new(r"C:\Users\demo\Downloads\file (4).bin")),
+            r#"/select,"C:\Users\demo\Downloads\file (4).bin""#
+        );
+    }
+
+    #[test]
+    fn strips_verbatim_prefixes_for_explorer() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\demo\file.bin")),
+            PathBuf::from(r"C:\Users\demo\file.bin")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\file.bin")),
+            PathBuf::from(r"\\server\share\file.bin")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\plain\path")),
+            PathBuf::from(r"C:\plain\path")
+        );
     }
 }

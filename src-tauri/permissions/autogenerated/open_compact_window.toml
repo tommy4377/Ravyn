@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-compact-window"
+description = "Enables the open_compact_window command without any pre-configured scope."
+commands.allow = ["open_compact_window"]
+
+[[permission]]
+identifier = "deny-open-compact-window"
+description = "Denies the open_compact_window command without any pre-configured scope."
+commands.deny = ["open_compact_window"]

@@ -1,0 +1,30 @@
+body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+}
+main {
+  width: min(420px, calc(100% - 24px));
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  text-align: center;
+}
+img {
+  width: 44px;
+  height: 44px;
+}
+h1 {
+  margin: 0;
+  font-size: 18px;
+}
+#filename,
+#url {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row {
+  margin-top: 6px;
+}

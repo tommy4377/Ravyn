@@ -1,32 +1,27 @@
 # Ravyn
 
-Ravyn is a Rust download manager with a native Windows desktop application built with Tauri 2 and Svelte 5.
-
-## Product surfaces
-
-- **Rust backend** — transfers, queueing, engines, automation, library and HTTP API.
-- **Tauri desktop** — native setup, lifecycle and Windows integration.
-- **Svelte frontend** — downloads, library, media, torrents, automation and settings.
+Ravyn is a native Windows download manager with a Rust backend, a Svelte/Tauri desktop client and Firefox integration.
 
 ## Highlights
 
-- Resumable segmented transfers with persistent recovery.
-- Managed yt-dlp, FFmpeg and rqbit engines.
-- Organized download library, presets, templates and basket workflows.
-- Native Windows setup and application integration.
-- Fluent-inspired desktop interface with responsive list/detail layouts.
-- REST API and replayable server-sent events.
+- Segmented HTTP transfers, resume, retries and bandwidth controls.
+- yt-dlp media downloads, rqbit torrents and FFmpeg post-processing.
+- Persistent organized library with automation, presets and schedules.
+- Native Windows desktop shell and self-installing single-executable distribution.
+- Firefox Manifest V3 extension with Native Messaging.
+- Resource discovery, download interception and context-menu actions.
+- Loopback API with authenticated integrations, events, metrics and readiness checks.
 
-## Build
+## Windows distribution
+
+Ravyn is distributed as a single `Ravyn.exe`. The executable can install per-user under `%LOCALAPPDATA%\Ravyn` or run portably.
+
+## Firefox extension
 
 ```bash
-npm ci --prefix frontend
-npm run check --prefix frontend
-npm test --prefix frontend
-npm run build --prefix frontend
-
-cargo test --locked --workspace --all-targets
-cargo build --locked -p ravyn-desktop
+npm ci --prefix extension
+npm run check --prefix extension
+npm run package:verify --prefix extension
 ```
 
 ## Maintainer

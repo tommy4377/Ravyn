@@ -6,11 +6,17 @@
 mod app_updates;
 mod appearance;
 mod backend;
+mod browser_integration;
 mod installation;
 mod integration;
+mod native_messaging;
 mod setup_guard;
 mod shell_paths;
+mod silent_command;
+mod torrent_association;
+mod tray;
 mod uninstall;
+mod webview_runtime;
 
 use tauri::Manager;
 
@@ -104,9 +110,9 @@ async fn require_backend_integration_consent(
     {
         return Err("Windows integration has already been verified for this setup".into());
     }
-    let consent = setup
-        .integration_consent
-        .ok_or_else(|| "installation preferences must be confirmed before Windows integration".to_owned())?;
+    let consent = setup.integration_consent.ok_or_else(|| {
+        "installation preferences must be confirmed before Windows integration".to_owned()
+    })?;
     if consent.installation_mode != "installed"
         || consent.install_application != request.install_application
         || consent.register_installed_app != request.register_installed_app
@@ -177,7 +183,7 @@ async fn finish_setup_handoff(
     require_backend_setup_state(&backend, true).await?;
     guard.begin_handoff()?;
 
-    let result = prepare_setup_handoff(&app, installed_exe, launch_after_setup);
+    let result = prepare_setup_handoff(installed_exe, launch_after_setup);
     guard.finish_handoff(result.is_ok())?;
     let should_exit = result?;
     if should_exit {
@@ -189,7 +195,6 @@ async fn finish_setup_handoff(
 /// Prepare the setup handoff and report whether the current process should
 /// exit after the guard has committed the transition.
 fn prepare_setup_handoff(
-    app: &tauri::AppHandle,
     installed_exe: Option<String>,
     launch_after_setup: bool,
 ) -> Result<bool, String> {
@@ -217,11 +222,20 @@ fn prepare_setup_handoff(
         return Ok(true);
     }
 
-    // Portable/development mode remains in the current process.
-    if app.get_webview_window("main").is_none() {
-        create_main_window(app, false).map_err(|error| error.to_string())?;
-    }
-    Ok(false)
+    // Managed component paths are resolved when the backend starts. Portable
+    // and development setups therefore need the same fresh-process handoff as
+    // installed setups; otherwise newly provisioned media and torrent engines
+    // remain unavailable until the user happens to restart manually.
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve the Ravyn executable: {error}"))?;
+    let working_directory = executable
+        .parent()
+        .ok_or_else(|| "Ravyn executable has no parent directory".to_owned())?;
+    std::process::Command::new(&executable)
+        .current_dir(working_directory)
+        .spawn()
+        .map_err(|error| format!("failed to launch the refreshed Ravyn process: {error}"))?;
+    Ok(true)
 }
 
 fn require_window(window: &tauri::WebviewWindow, expected: &str) -> Result<(), String> {
@@ -276,14 +290,60 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     }
 }
 
+/// Return the current Firefox native-messaging registration state.
+#[tauri::command]
+fn browser_integration_status(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    Ok(browser_integration::status())
+}
 
+/// Repair the per-user Firefox native-messaging manifest and registry entry.
+#[tauri::command]
+async fn repair_browser_integration(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(browser_integration::repair_for_current_executable)
+        .await
+        .map_err(|error| format!("the browser integration worker failed: {error}"))?
+}
+
+/// Remove the Firefox native-messaging registration for the current user.
+#[tauri::command]
+async fn remove_browser_integration(
+    window: tauri::WebviewWindow,
+) -> Result<browser_integration::BrowserIntegrationStatus, String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(browser_integration::unregister)
+        .await
+        .map_err(|error| format!("the browser integration worker failed: {error}"))?
+}
+
+/// Consume a browser action delivered before the main webview was ready.
+#[tauri::command]
+fn take_browser_action(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, browser_integration::BrowserActionState>,
+) -> Result<Option<browser_integration::BrowserAction>, String> {
+    require_window(&window, "main")?;
+    Ok(state.take())
+}
+
+/// Register Ravyn as a candidate for torrent files and let Windows ask the
+/// user to choose the default application.
+#[tauri::command]
+async fn prompt_torrent_default_app(window: tauri::WebviewWindow) -> Result<(), String> {
+    require_window(&window, "main")?;
+    tauri::async_runtime::spawn_blocking(torrent_association::register_and_prompt)
+        .await
+        .map_err(|error| format!("the torrent association worker failed: {error}"))?
+}
 
 /// Open an existing file in its Windows default application or open a folder.
 #[tauri::command]
-async fn open_native_path(
-    window: tauri::WebviewWindow,
-    path: String,
-) -> Result<(), String> {
+async fn open_native_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
     require_window(&window, "main")?;
     tauri::async_runtime::spawn_blocking(move || shell_paths::open(&path))
         .await
@@ -292,10 +352,7 @@ async fn open_native_path(
 
 /// Reveal an existing file in Explorer, or open the directory itself.
 #[tauri::command]
-async fn reveal_native_path(
-    window: tauri::WebviewWindow,
-    path: String,
-) -> Result<(), String> {
+async fn reveal_native_path(window: tauri::WebviewWindow, path: String) -> Result<(), String> {
     require_window(&window, "main")?;
     tauri::async_runtime::spawn_blocking(move || shell_paths::reveal(&path))
         .await
@@ -308,7 +365,9 @@ async fn desktop_appearance(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<appearance::DesktopAppearance, String> {
-    require_window(&window, "main")?;
+    if !matches!(window.label(), "main" | "setup" | "compact") {
+        return Err("command is not available from this window".into());
+    }
     appearance::read(app, window).await
 }
 
@@ -343,6 +402,36 @@ async fn repair_application(
     app_updates::repair_now(app).await
 }
 
+/// Cancel an active update check/download or discard the staged installer.
+#[tauri::command]
+fn cancel_app_update(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<app_updates::AppUpdateStatus, String> {
+    require_window(&window, "main")?;
+    app_updates::cancel(&app)
+}
+
+/// Apply the staged installer immediately using the same detached helper that
+/// normally runs after a regular close.
+#[tauri::command]
+fn install_app_update_now(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    if !app_updates::install_pending_on_close(&app)? {
+        return Err("no verified application update is ready to install".into());
+    }
+    // Return the IPC response before terminating the webview so the frontend
+    // does not misreport the intentional restart as a command failure.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        app.exit(0);
+    });
+    Ok(())
+}
+
 /// Called by the main window frontend once it has verified the backend
 /// connection. Shows the main window, focuses it, then closes setup.
 #[tauri::command]
@@ -359,9 +448,75 @@ async fn main_window_ready(
     if let Some(setup) = app.get_webview_window("setup") {
         setup.close().map_err(|e| e.to_string())?;
     }
+    if let Err(error) = tray::ensure(&app) {
+        tracing::warn!(%error, "failed to create the system tray icon");
+    }
     app_updates::confirm_update_readiness(&app)?;
     app_updates::start_background_check(app);
     Ok(())
+}
+
+/// Opens (or focuses) the compact download progress window. Called by the
+/// main window when a transfer starts while Ravyn is minimized or unfocused.
+///
+/// Must be async: creating a webview from a synchronous command deadlocks
+/// WebView2 initialization on Windows (wry#583), leaving a blank window and
+/// stalling IPC for every other webview.
+#[tauri::command]
+async fn open_compact_window(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    if let Some(existing) = app.get_webview_window("compact") {
+        existing.show().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "compact", tauri::WebviewUrl::App("index.html".into()))
+        .title("Ravyn downloads")
+        .inner_size(380.0, 190.0)
+        .min_inner_size(320.0, 150.0)
+        .maximizable(false)
+        .minimizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .decorations(false)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Brings the main window to the foreground; used by the compact window.
+#[tauri::command]
+fn focus_main_window(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "compact") {
+        return Err("command is not available from this window".into());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window does not exist".to_owned())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.unminimize().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Show a native desktop notification for a download event. The message
+/// content is provided by the main window, which owns the job metadata.
+#[tauri::command]
+fn notify_native(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    title: String,
+    body: Option<String>,
+) -> Result<(), String> {
+    require_window(&window, "main")?;
+    use tauri_plugin_notification::NotificationExt;
+    let mut builder = app.notification().builder().title(title);
+    if let Some(body) = body {
+        builder = builder.body(body);
+    }
+    builder.show().map_err(|error| error.to_string())
 }
 
 fn create_setup_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -389,7 +544,16 @@ fn create_main_window(
 }
 
 pub fn run() {
+    if native_messaging::try_handle_command_line() {
+        return;
+    }
+    if browser_integration::try_handle_command_line() {
+        return;
+    }
     if uninstall::try_handle_command_line() {
+        return;
+    }
+    if !webview_runtime::ensure_available() {
         return;
     }
     tracing_subscriber::fmt()
@@ -399,11 +563,22 @@ pub fn run() {
         )
         .init();
 
+    let initial_arguments = std::env::args().collect::<Vec<_>>();
+    let initial_browser_action = browser_integration::parse_browser_action(&initial_arguments)
+        .or_else(|| browser_integration::parse_torrent_association_action(&initial_arguments));
+    let browser_action_state = browser_integration::BrowserActionState::default();
+    if let Some(action) = initial_browser_action {
+        browser_action_state.replace(action);
+    }
+
     let (handle, _receiver) = backend::start();
 
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
-    // MCP automation bridge for development-time testing only, loopback-bound.
-    #[cfg(debug_assertions)]
+    #[allow(unused_mut)] // Mutable only when the debug-only MCP bridge is enabled.
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init());
+    // MCP automation bridge for explicitly enabled development-time testing only.
+    #[cfg(all(debug_assertions, feature = "mcp-automation"))]
     {
         builder = builder.plugin(
             tauri_plugin_mcp_bridge::Builder::new()
@@ -414,6 +589,7 @@ pub fn run() {
 
     builder
         .manage(handle.clone())
+        .manage(browser_action_state)
         .manage(setup_guard::SetupCommandGuard::default())
         .manage(app_updates::AppUpdateState::default())
         .invoke_handler(tauri::generate_handler![
@@ -426,9 +602,19 @@ pub fn run() {
             app_update_status,
             check_app_update,
             repair_application,
+            cancel_app_update,
+            install_app_update_now,
             desktop_appearance,
+            browser_integration_status,
+            repair_browser_integration,
+            remove_browser_integration,
+            take_browser_action,
+            prompt_torrent_default_app,
             open_native_path,
             reveal_native_path,
+            notify_native,
+            open_compact_window,
+            focus_main_window,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -448,6 +634,13 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            if crate::installation::current_executable_is_installed() {
+                tauri::async_runtime::spawn_blocking(|| {
+                    if let Err(error) = crate::browser_integration::repair_for_current_executable() {
+                        tracing::warn!(%error, "failed to repair Firefox browser integration at startup");
+                    }
+                });
+            }
             let app_handle = app.handle().clone();
             let backend = handle.clone();
             // Open the correct first window once the backend reports state.

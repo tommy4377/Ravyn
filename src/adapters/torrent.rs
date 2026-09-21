@@ -575,12 +575,32 @@ impl TorrentAdapter {
 
     pub async fn update_files(&self, torrent_id: &str, files: &[usize]) -> Result<()> {
         validate_engine_id(torrent_id)?;
-        self.post_json(
-            &format!("torrents/{torrent_id}/update_only_files"),
-            &json!({ "only_files": files }),
-            "update torrent files",
-        )
-        .await
+        // rqbit finishes creating a torrent's internal file layout shortly
+        // after accepting it; a file-selection update sent in that window
+        // is rejected with "can't update initializing torrent". Retry
+        // briefly instead of surfacing that race as a job failure.
+        const MAX_ATTEMPTS: u32 = 6;
+        const RETRY_DELAY: Duration = Duration::from_millis(300);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let result = self
+                .post_json(
+                    &format!("torrents/{torrent_id}/update_only_files"),
+                    &json!({ "only_files": files }),
+                    "update torrent files",
+                )
+                .await;
+            match result {
+                Err(RavynError::Protocol(message)) if is_initializing_torrent(&message) => {
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(RavynError::Protocol(message));
+                    }
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     pub async fn pause_torrent(&self, torrent_id: &str) -> Result<()> {
@@ -1005,9 +1025,34 @@ impl DownloadAdapter for TorrentAdapter {
     }
 }
 
+/// True for rqbit's transient "torrent still initializing" rejection of a
+/// file-selection update, as opposed to any other protocol failure.
+fn is_initializing_torrent(message: &str) -> bool {
+    message.contains("can't update initializing torrent")
+}
+
 mod wire;
 
 use self::wire::*;
+
+#[cfg(test)]
+mod initializing_retry_tests {
+    use super::is_initializing_torrent;
+
+    #[test]
+    fn recognizes_the_rqbit_initializing_torrent_message() {
+        assert!(is_initializing_torrent(
+            "update torrent files failed with HTTP 500 Internal Server Error: {\"error_kind\":\"internal_error\",\"human_readable\":\"error updating only_files: can't update initializing torrent\",\"status\":500,\"status_text\":\"500 Internal Server Error\"}"
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_protocol_errors() {
+        assert!(!is_initializing_torrent(
+            "update torrent files failed with HTTP 404 Not Found: torrent not found"
+        ));
+    }
+}
 
 #[cfg(test)]
 mod restart_tests {

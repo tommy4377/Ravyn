@@ -42,6 +42,9 @@ import type {
   LibraryEntry,
   LibraryImportRequest,
   LibraryImportStatus,
+  LibraryMovePreflight,
+  LibraryMoveRequest,
+  LibraryMoveStatus,
   LibraryListParams,
   LibraryRelocationRequest,
   MediaArchiveRecord,
@@ -54,6 +57,7 @@ import type {
   Page,
   PageQueryParams,
   PersistentSettingsPatch,
+  PersonalStatistics,
   PutDownloadPreset,
   PutUserProfile,
   PrepareLibraryResult,
@@ -345,6 +349,10 @@ export class RavynClient {
     return this.request("GET", "/v1/library/import", undefined, signal);
   }
 
+  cancelLibraryImport(): Promise<LibraryImportStatus> {
+    return this.request("DELETE", "/v1/library/import");
+  }
+
   verifyLibrary(): Promise<VerifyLibraryReport> {
     return this.request("POST", "/v1/library/verify");
   }
@@ -355,6 +363,22 @@ export class RavynClient {
       max_entries: request.max_entries,
       max_depth: request.max_depth,
     });
+  }
+
+  preflightLibraryMove(request: LibraryMoveRequest): Promise<LibraryMovePreflight> {
+    return this.request("POST", "/v1/library/move/preflight", request);
+  }
+
+  getLibraryMoveStatus(signal?: AbortSignal): Promise<LibraryMoveStatus> {
+    return this.request("GET", "/v1/library/move", undefined, signal);
+  }
+
+  startLibraryMove(request: LibraryMoveRequest): Promise<LibraryMoveStatus> {
+    return this.request("POST", "/v1/library/move", request);
+  }
+
+  cancelLibraryMove(): Promise<LibraryMoveStatus> {
+    return this.request("DELETE", "/v1/library/move");
   }
 
   findLibraryDuplicates(params: { sha256?: string; size_bytes?: number; filename?: string; limit?: number }, signal?: AbortSignal): Promise<DuplicateCandidate[]> {
@@ -373,7 +397,7 @@ export class RavynClient {
     return this.request("POST", "/v1/system/cleanup");
   }
 
-  getStatistics(signal?: AbortSignal): Promise<Record<string, unknown>> {
+  getStatistics(signal?: AbortSignal): Promise<PersonalStatistics> {
     return this.request("GET", "/v1/statistics", undefined, signal);
   }
 
@@ -580,7 +604,9 @@ export class RavynClient {
   }
 
   setScheduleEnabled(id: string, enabled: boolean): Promise<ScheduleRecord> {
-    return this.request("POST", `/v1/schedules/${id}/${enabled ? "enable" : "disable"}`);
+    return enabled
+      ? this.request("POST", `/v1/schedules/${id}/enable`)
+      : this.request("POST", `/v1/schedules/${id}/disable`);
   }
 
   deleteSchedule(id: string): Promise<void> {

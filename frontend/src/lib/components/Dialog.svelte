@@ -1,3 +1,12 @@
+<script module lang="ts">
+  let dialogSequence = 0;
+
+  function nextDialogTitleId(): string {
+    dialogSequence += 1;
+    return `ravyn-dialog-title-${dialogSequence}`;
+  }
+</script>
+
 <script lang="ts">
   import { tick, type Snippet } from "svelte";
   import IconButton from "./IconButton.svelte";
@@ -21,7 +30,9 @@
   } = $props();
 
   let dialogEl = $state<HTMLDivElement | null>(null);
+  let backdropEl = $state<HTMLDivElement | null>(null);
   let returnFocusEl: HTMLElement | null = null;
+  const titleId = nextDialogTitleId();
 
   function focusableElements(): HTMLElement[] {
     if (!dialogEl) return [];
@@ -56,8 +67,16 @@
   }
 
   $effect(() => {
-    if (!open) return;
+    if (!open || !backdropEl) return;
     returnFocusEl = document.activeElement as HTMLElement | null;
+    if (typeof backdropEl.showPopover === "function") {
+      backdropEl.setAttribute("popover", "manual");
+      try {
+        backdropEl.showPopover();
+      } catch {
+        // A reactive update can run while the modal layer is already open.
+      }
+    }
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     void tick().then(() => {
@@ -75,18 +94,18 @@
 </script>
 
 {#if open}
-  <div class="backdrop" role="presentation" onpointerdown={() => !preventClose && onClose()}>
+  <div bind:this={backdropEl} class="backdrop" role="presentation" onpointerdown={() => !preventClose && onClose()}>
     <div
       bind:this={dialogEl}
       class="dialog {size}"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="dialog-title"
+      aria-labelledby={titleId}
       tabindex="-1"
       onpointerdown={(event) => event.stopPropagation()}
     >
       <header class="dialog-header">
-        <h2 id="dialog-title">{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <IconButton icon="close" label="Close" variant="subtle" onclick={() => onClose()} />
       </header>
       <div class="dialog-body">
@@ -105,13 +124,17 @@
   .backdrop {
     position: fixed;
     inset: 0;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: var(--space-6);
+    border: 0;
     z-index: 300;
     display: grid;
     place-items: center;
     background: color-mix(in srgb, #000 38%, transparent);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
-    padding: var(--space-6);
   }
   .dialog {
     display: flex;

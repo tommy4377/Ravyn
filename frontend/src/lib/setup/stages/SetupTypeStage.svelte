@@ -15,7 +15,7 @@
       value: "recommended",
       label: "Recommended",
       description:
-        "Standard downloads, video, media processing, and archive extraction.",
+        "Standard downloads, video, torrents, media processing, and archive extraction.",
     },
     {
       value: "minimal",

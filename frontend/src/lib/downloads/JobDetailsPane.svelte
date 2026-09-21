@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describeError } from "../api/errors";
-  import type { BulkJobAction, JobActionRecord, JobLogRecord, JobOutput, TrustReport } from "../api/types";
+  import type { BulkJobAction, JobActionRecord, JobLogRecord, JobOutput, SegmentRecord, TrustReport } from "../api/types";
   import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
@@ -40,8 +40,16 @@
   let logs = $state<JobLogRecord[] | null>(null);
   let activityError = $state<string | null>(null);
   let activityLoading = false;
-  let segmentSummary = $state<string | null>(null);
+  let segments = $state<SegmentRecord[] | null>(null);
+  let segmentsError = $state<string | null>(null);
   let segmentsLoading = false;
+  const segmentSummaryText = $derived.by(() => {
+    if (!segments) return null;
+    if (segments.length === 0) return "No segment data for this download.";
+    const byState = new Map<string, number>();
+    for (const segment of segments) byState.set(segment.state, (byState.get(segment.state) ?? 0) + 1);
+    return [...byState.entries()].map(([state, count]) => `${count} ${state}`).join(", ");
+  });
   let actionBusy = $state(false);
   let trust = $state<TrustReport | null>(null);
   let trustError = $state<string | null>(null);
@@ -65,7 +73,8 @@
       logs = null;
       activityError = null;
       activityLoading = false;
-      segmentSummary = null;
+      segments = null;
+      segmentsError = null;
       segmentsLoading = false;
       trust = null;
       trustError = null;
@@ -118,19 +127,12 @@
           .catch((error) => (trustError = describeError(error)))
           .finally(() => (trustLoading = false));
       }
-      if (segmentSummary === null && !segmentsLoading) {
+      if (segments === null && segmentsError === null && !segmentsLoading) {
         segmentsLoading = true;
         service
           .segments(jobId)
-          .then((page) => {
-            const byState = new Map<string, number>();
-            for (const segment of page.items) byState.set(segment.state, (byState.get(segment.state) ?? 0) + 1);
-            segmentSummary =
-              page.items.length === 0
-                ? "No segment data for this download."
-                : [...byState.entries()].map(([state, count]) => `${count} ${state}`).join(", ");
-          })
-          .catch(() => (segmentSummary = "Segment data unavailable."))
+          .then((page) => (segments = page.items))
+          .catch((error) => (segmentsError = describeError(error)))
           .finally(() => (segmentsLoading = false));
       }
     }
@@ -206,6 +208,17 @@
     activityError = null;
     actions = null;
     logs = null;
+  }
+
+  function retrySegments(): void {
+    segmentsError = null;
+    segments = null;
+  }
+
+  function segmentProgress(segment: SegmentRecord): number {
+    const span = segment.end_byte - segment.start_byte + 1;
+    if (span <= 0) return 0;
+    return Math.min(100, Math.max(0, (segment.downloaded_bytes / span) * 100));
   }
 </script>
 
@@ -360,10 +373,29 @@
             <dt>Download type</dt><dd>{job.kind}</dd>
             <dt>Priority</dt><dd>{job.priority}</dd>
             <dt>Transfer mode</dt><dd>{job.transfer_mode}</dd>
-            <dt>Segments</dt><dd>{segmentSummary ?? "Loading…"}</dd>
             {#if job.speed_limit_bps}<dt>Speed limit</dt><dd>{formatSpeed(job.speed_limit_bps)}</dd>{/if}
             {#if job.expected_sha256}<dt>Expected SHA-256</dt><dd class="wrap mono">{job.expected_sha256}</dd>{/if}
           </dl>
+
+          <div class="segments-block">
+            <h3 class="subheading">Segments</h3>
+            {#if segmentsError}
+              <InlineError title="Couldn't load segment data" message={segmentsError} retry={retrySegments} />
+            {:else if segments === null}
+              <Skeleton height="24px" />
+            {:else if segments.length === 0}
+              <p class="muted">No segment data for this download.</p>
+            {:else}
+              <div class="seg-lane" role="img" aria-label={`Segment progress: ${segmentSummaryText}`}>
+                {#each segments as segment (segment.id)}
+                  <div class="seg-track" title={`Segment ${segment.index} · ${segment.state} · ${Math.round(segmentProgress(segment))}%`}>
+                    <span class="seg-fill" class:seg-done={segmentProgress(segment) >= 100} style:width={`${segmentProgress(segment)}%`}></span>
+                  </div>
+                {/each}
+              </div>
+              <p class="muted seg-summary">{segmentSummaryText}</p>
+            {/if}
+          </div>
         </AdvancedDisclosure>
 
         <AdvancedDisclosure title="Raw options" description="Backend request options for troubleshooting">
@@ -429,6 +461,12 @@
   .factor-label { font-weight: 600; }
   .factor-explanation { color: var(--text-tertiary); }
   .technical-details { margin: var(--space-2) 0 0; }
+  .segments-block { margin-top: var(--space-3); }
+  .seg-lane { display: flex; gap: 2px; height: 14px; }
+  .seg-track { flex: 1; min-width: 2px; height: 100%; overflow: hidden; border-radius: 2px; background: var(--bg-subtle); }
+  .seg-fill { display: block; height: 100%; background: var(--accent-default); }
+  .seg-fill.seg-done { background: var(--status-success); }
+  .seg-summary { margin: var(--space-2) 0 0; font-family: var(--font-family-mono); font-size: var(--text-caption); }
   .json { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; border: 1px solid var(--stroke-divider); border-radius: var(--radius-control); background: var(--bg-subtle); white-space: pre-wrap; word-break: break-word; font-size: var(--text-caption); }
   @media (max-width: 420px) {
     .transfer-summary { grid-template-columns: 1fr; }

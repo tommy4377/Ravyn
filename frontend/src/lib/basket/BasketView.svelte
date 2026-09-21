@@ -19,6 +19,8 @@
   import { notifications } from "../stores/notifications.svelte";
   import { formatAbsoluteTime } from "../util/format";
 
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let items = $state<BasketItem[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -190,18 +192,28 @@
 </script>
 
 <div class="page">
+  {#if !embedded}
   <PageHeader title="Basket" description="Prepare a group of downloads, review it, then start everything together.">
     {#snippet actions()}
       {#if items.length}<Button onclick={() => (clearOpen = true)}><Icon name="trash" size={16} /> Clear</Button>{/if}
       <Button variant="accent" disabled={startBusy || items.length === 0} onclick={() => void startBasket()}><Icon name="play" size={16} /> {startBusy ? "Starting…" : `Start ${items.length || "basket"}`}</Button>
     {/snippet}
   </PageHeader>
+  {/if}
 
   <div class="content">
     <Surface padding="none" class="basket-surface">
       <div class="basket-toolbar">
-        <div><strong>{items.length} queued item{items.length === 1 ? "" : "s"}</strong><span>Items remain editable until the basket is started.</span></div>
-        <Button onclick={() => (addOpen = true)}><Icon name="add" size={16} /> Add to basket</Button>
+        <div class="basket-summary"><strong>{items.length} queued item{items.length === 1 ? "" : "s"}</strong><span>Items remain editable until the basket is started.</span></div>
+        <div class="basket-actions">
+          {#if embedded}
+            {#if items.length}<Button onclick={() => (clearOpen = true)}><Icon name="trash" size={16} /> Clear</Button>{/if}
+            <Button onclick={() => (addOpen = true)}><Icon name="add" size={16} /> Add</Button>
+            <Button variant="accent" disabled={startBusy || items.length === 0} onclick={() => void startBasket()}><Icon name="play" size={16} /> {startBusy ? "Startingâ€¦" : `Start ${items.length || "basket"}`}</Button>
+          {:else}
+            <Button onclick={() => (addOpen = true)}><Icon name="add" size={16} /> Add to basket</Button>
+          {/if}
+        </div>
       </div>
 
       {#if error}
@@ -280,7 +292,8 @@
   .content { flex: 1; min-height: 0; padding: 0 var(--page-padding) var(--page-padding); }
   :global(.basket-surface) { height: 100%; display: flex; flex-direction: column; }
   .basket-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4); border-bottom: 1px solid var(--stroke-divider); }
-  .basket-toolbar > div { display: flex; flex-direction: column; }
+  .basket-summary { display: flex; flex-direction: column; }
+  .basket-actions { display: flex; align-items: center; gap: var(--space-2); }
   .basket-toolbar span, .muted { color: var(--text-secondary); }
   .state { padding: var(--space-6); }
   .basket-list { min-height: 0; overflow: auto; }

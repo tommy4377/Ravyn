@@ -1,5 +1,6 @@
 <script lang="ts">
   import AdvancedDisclosure from "../components/AdvancedDisclosure.svelte";
+  import BandwidthScheduleEditor from "./BandwidthScheduleEditor.svelte";
   import PathPicker from "../components/PathPicker.svelte";
   import Surface from "../components/Surface.svelte";
   import TextField from "../components/TextField.svelte";
@@ -19,9 +20,14 @@
   <AdvancedDisclosure title="Transfer tuning" description="Advanced concurrency and retry controls.">
     <div class="grid advanced-grid">
       <TextField bind:value={controller.maxSegments} label="Maximum segments" inputmode="numeric" />
+      <TextField bind:value={controller.segmentThresholdMib} label="Segment threshold (MiB)" inputmode="numeric" hint="Files below this size use a single connection." />
       <TextField bind:value={controller.maxConnections} label="Connections per host" inputmode="numeric" />
       <TextField bind:value={controller.maxRetries} label="Maximum retries" inputmode="numeric" />
+      <TextField bind:value={controller.maxBatchUrls} label="Maximum URLs per batch" inputmode="numeric" />
     </div>
+  </AdvancedDisclosure>
+  <AdvancedDisclosure title="Scheduled bandwidth" description="Apply different speed limits by weekday and local time.">
+    <BandwidthScheduleEditor {controller} />
   </AdvancedDisclosure>
 </Surface>
 

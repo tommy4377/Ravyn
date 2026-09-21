@@ -272,5 +272,4 @@ mod tests {
         assert_eq!(record.detected_version.as_deref(), Some("2026.07.04"));
         assert_eq!(record.verified_at, Some(now));
     }
-
 }

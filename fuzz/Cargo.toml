@@ -91,5 +91,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "native_message"
+path = "fuzz_targets/native_message.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -1,8 +1,10 @@
 //! Silent, signed application updates for installed Windows builds.
 //!
-//! Ravyn downloads and verifies an installer in the background, then starts a
-//! detached helper when the main window closes. The helper waits for Ravyn to
-//! exit, runs the current-user NSIS installer silently, and relaunches the app.
+//! Ravyn downloads and verifies the new application executable in the
+//! background, then starts a detached helper when the main window closes. The
+//! helper waits for Ravyn to exit, replaces the installed binary in place
+//! (binaries-only, because the install directory doubles as the data
+//! directory), refreshes the Installed Apps version, and relaunches the app.
 
 use std::{
     io::{BufReader, Read},
@@ -18,9 +20,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 const METADATA_LIMIT: u64 = 512 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AUTOMATIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const AUTOMATIC_RETRY_BASE: Duration = Duration::from_secs(15 * 60);
+const AUTOMATIC_RETRY_MAX: Duration = Duration::from_secs(2 * 60 * 60);
+const UPDATE_CANCELLED_ERROR: &str = "application update cancelled";
 const UPDATE_FILENAME: &str = "ravyn-pending-update.exe";
 const UPDATE_PENDING_STATE_FILENAME: &str = "ravyn-pending-update.json";
 const UPDATE_TRANSACTION_FILENAME: &str = "ravyn-update-transaction.json";
@@ -47,11 +54,12 @@ pub enum AppUpdatePhase {
     Checking,
     UpToDate,
     Downloading,
+    Cancelling,
+    Cancelled,
     Ready,
     Installing,
     Error,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppUpdateResult {
@@ -76,6 +84,9 @@ pub struct AppUpdateStatus {
     pub install_on_exit: bool,
     pub repair_mode: bool,
     pub last_result: Option<AppUpdateResult>,
+    pub last_checked_at_unix_ms: Option<u64>,
+    pub next_check_at_unix_ms: Option<u64>,
+    pub automatic_check_interval_secs: Option<u64>,
 }
 
 impl AppUpdateStatus {
@@ -93,6 +104,9 @@ impl AppUpdateStatus {
             install_on_exit: false,
             repair_mode: false,
             last_result: None,
+            last_checked_at_unix_ms: None,
+            next_check_at_unix_ms: None,
+            automatic_check_interval_secs: None,
         }
     }
 
@@ -110,6 +124,9 @@ impl AppUpdateStatus {
             install_on_exit: false,
             repair_mode: false,
             last_result: None,
+            last_checked_at_unix_ms: None,
+            next_check_at_unix_ms: None,
+            automatic_check_interval_secs: Some(AUTOMATIC_CHECK_INTERVAL.as_secs()),
         }
     }
 }
@@ -174,6 +191,8 @@ struct Inner {
     status: AppUpdateStatus,
     pending: Option<PendingUpdate>,
     in_flight: bool,
+    cancellation: Option<CancellationToken>,
+    scheduler_started: bool,
 }
 
 pub struct AppUpdateState(Mutex<Inner>);
@@ -182,15 +201,17 @@ impl Default for AppUpdateState {
     fn default() -> Self {
         let status = match configuration() {
             Ok(Some(_)) => AppUpdateStatus::idle(),
-            Ok(None) => AppUpdateStatus::disabled(
-                "application updates are not configured for this build",
-            ),
+            Ok(None) => {
+                AppUpdateStatus::disabled("application updates are not configured for this build")
+            }
             Err(error) => AppUpdateStatus::disabled(error),
         };
         Self(Mutex::new(Inner {
             status,
             pending: None,
             in_flight: false,
+            cancellation: None,
+            scheduler_started: false,
         }))
     }
 }
@@ -213,8 +234,7 @@ fn configuration() -> Result<Option<UpdateConfiguration>, String> {
     }
     if endpoint.is_empty() || public_key.is_empty() {
         return Err(
-            "both RAVYN_APP_UPDATE_ENDPOINT and RAVYN_APP_UPDATE_PUBLIC_KEY are required"
-                .into(),
+            "both RAVYN_APP_UPDATE_ENDPOINT and RAVYN_APP_UPDATE_PUBLIC_KEY are required".into(),
         );
     }
     let endpoint = url::Url::parse(endpoint)
@@ -362,9 +382,9 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
     let journal_phase = std::fs::read_to_string(update_dir.join(UPDATE_JOURNAL_FILENAME))
         .map(|phase| phase.trim().to_owned())
         .unwrap_or_default();
-    let action = transaction.as_ref().map_or(
-        RecoveryAction::CleanupFailed,
-        |transaction| {
+    let action = transaction
+        .as_ref()
+        .map_or(RecoveryAction::CleanupFailed, |transaction| {
             plan_recovery(
                 transaction.schema,
                 &transaction.to_version,
@@ -372,8 +392,7 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 env!("CARGO_PKG_VERSION"),
                 unix_timestamp_ms(),
             )
-        },
-    );
+        });
     match action {
         RecoveryAction::LeaveAlone => Ok(()),
         RecoveryAction::FinalizeSucceeded => {
@@ -385,7 +404,11 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 completed_at_unix_ms: unix_timestamp_ms(),
                 message: format!(
                     "The update installed, but its helper was interrupted (last phase: {}). Ravyn finalized it on startup.",
-                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                    if journal_phase.is_empty() {
+                        "unknown"
+                    } else {
+                        &journal_phase
+                    },
                 ),
             };
             write_json_atomic_sync(&transaction.result_path, &result)?;
@@ -413,7 +436,11 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
                 completed_at_unix_ms: unix_timestamp_ms(),
                 message: format!(
                     "The update helper was interrupted (last phase: {}) and the update did not complete. Use Check now to retry, or Repair to reinstall the current version.",
-                    if journal_phase.is_empty() { "unknown" } else { &journal_phase },
+                    if journal_phase.is_empty() {
+                        "unknown"
+                    } else {
+                        &journal_phase
+                    },
                 ),
             };
             write_json_atomic_sync(&update_dir.join(UPDATE_RESULT_FILENAME), &result)?;
@@ -424,24 +451,55 @@ pub fn recover_interrupted_update(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+fn automatic_retry_delay(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return AUTOMATIC_CHECK_INTERVAL;
+    }
+    let exponent = consecutive_failures.saturating_sub(1).min(3);
+    AUTOMATIC_RETRY_BASE
+        .checked_mul(1_u32 << exponent)
+        .unwrap_or(AUTOMATIC_RETRY_MAX)
+        .min(AUTOMATIC_RETRY_MAX)
+}
+
+fn schedule_next_check(app: &AppHandle, delay: Duration) {
+    if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
+        inner.status.next_check_at_unix_ms = Some(
+            unix_timestamp_ms().saturating_add(delay.as_millis().try_into().unwrap_or(u64::MAX)),
+        );
+    }
+}
+
 pub fn start_background_check(app: AppHandle) {
     let installation = crate::installation::detect();
     let installed_build =
         installation.installed && !installation.portable && !installation.development;
-    let mut automatic = false;
-    if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
-        automatic = installed_build && inner.status.configured;
+    let automatic = {
+        let state = app.state::<AppUpdateState>();
+        let Ok(mut inner) = state.0.lock() else {
+            return;
+        };
+        let automatic = installed_build && inner.status.configured;
         inner.status.automatic = automatic;
+        inner.status.automatic_check_interval_secs =
+            automatic.then_some(AUTOMATIC_CHECK_INTERVAL.as_secs());
         if !installed_build && inner.status.configured {
             inner.status.phase = AppUpdatePhase::Disabled;
             inner.status.last_error = Some(
                 "automatic application updates are available only for installed builds".into(),
             );
         }
-    }
+        if !automatic || inner.scheduler_started {
+            false
+        } else {
+            inner.scheduler_started = true;
+            true
+        }
+    };
     if !automatic {
         return;
     }
+
     tauri::async_runtime::spawn(async move {
         let configuration = match configuration() {
             Ok(Some(configuration)) => configuration,
@@ -454,15 +512,36 @@ pub fn start_background_check(app: AppHandle) {
         if let Err(error) = recover_interrupted_update(&app) {
             tracing::warn!(%error, "failed to recover an interrupted app update");
         }
-        match restore_pending_update(&app, &configuration) {
-            Ok(true) => return,
-            Ok(false) => {}
+        let restored = match restore_pending_update(&app, &configuration) {
+            Ok(restored) => restored,
             Err(error) => {
                 tracing::warn!(%error, "discarded an invalid persisted app update");
+                false
+            }
+        };
+
+        let mut consecutive_failures = 0_u32;
+        if !restored {
+            match check_and_stage(app.clone(), false, false).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(error) => {
+                    consecutive_failures = 1;
+                    set_error(&app, error);
+                }
             }
         }
-        if let Err(error) = check_and_stage(app.clone(), false, false).await {
-            set_error(&app, error);
+
+        loop {
+            let delay = automatic_retry_delay(consecutive_failures);
+            schedule_next_check(&app, delay);
+            tokio::time::sleep(delay).await;
+            match check_and_stage(app.clone(), false, false).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    set_error(&app, error);
+                }
+            }
         }
     });
 }
@@ -473,9 +552,8 @@ pub async fn check_now(app: AppHandle) -> Result<AppUpdateStatus, String> {
         if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
             inner.status.automatic = false;
             inner.status.phase = AppUpdatePhase::Disabled;
-            inner.status.last_error = Some(
-                "application updates are available only for installed Windows builds".into(),
-            );
+            inner.status.last_error =
+                Some("application updates are available only for installed Windows builds".into());
         }
         return status(&app);
     }
@@ -505,6 +583,54 @@ pub async fn repair_now(app: AppHandle) -> Result<AppUpdateStatus, String> {
     }
 }
 
+/// Requests cancellation of an active metadata/download operation, or removes
+/// an already verified installer that was waiting for the next close.
+pub fn cancel(app: &AppHandle) -> Result<AppUpdateStatus, String> {
+    let (cancellation, clear_staged, changed) = {
+        let state = app.state::<AppUpdateState>();
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "application update state is unavailable".to_owned())?;
+        if inner.in_flight {
+            inner.status.phase = AppUpdatePhase::Cancelling;
+            inner.status.last_error = None;
+            (inner.cancellation.clone(), false, true)
+        } else if inner.pending.take().is_some() || inner.status.phase == AppUpdatePhase::Ready {
+            inner.status.phase = AppUpdatePhase::Cancelled;
+            inner.status.available_version = None;
+            inner.status.downloaded_bytes = 0;
+            inner.status.total_bytes = None;
+            inner.status.notes = None;
+            inner.status.last_error = None;
+            inner.status.install_on_exit = false;
+            inner.status.repair_mode = false;
+            (None, true, true)
+        } else {
+            (None, false, false)
+        }
+    };
+
+    if !changed {
+        return status(app);
+    }
+    if let Some(cancellation) = cancellation {
+        cancellation.cancel();
+    }
+    if clear_staged {
+        clear_persisted_pending(app)?;
+    }
+    status(app)
+}
+
+fn ensure_update_not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err(UPDATE_CANCELLED_ERROR.into())
+    } else {
+        Ok(())
+    }
+}
+
 async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<(), String> {
     let Some(configuration) = configuration()? else {
         return Err("application updates are not configured for this build".into());
@@ -514,6 +640,7 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
         tracing::warn!(%error, "failed to recover an interrupted app update");
     }
 
+    let cancellation = CancellationToken::new();
     let clear_existing = {
         let state = app.state::<AppUpdateState>();
         let mut inner = state
@@ -527,6 +654,7 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
             return Ok(());
         }
         inner.in_flight = true;
+        inner.cancellation = Some(cancellation.clone());
         inner.status.configured = true;
         inner.status.phase = AppUpdatePhase::Checking;
         inner.status.last_error = None;
@@ -546,17 +674,40 @@ async fn check_and_stage(app: AppHandle, force: bool, repair: bool) -> Result<()
         if let Err(error) = clear_persisted_pending(&app) {
             if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
                 inner.in_flight = false;
+                inner.cancellation = None;
             }
             return Err(error);
         }
     }
 
-    let result = perform_check_and_stage(&app, &configuration, force, repair).await;
+    let result = perform_check_and_stage(&app, &configuration, force, repair, &cancellation).await;
+    let cancelled = cancellation.is_cancelled()
+        || result
+            .as_ref()
+            .is_err_and(|error| error == UPDATE_CANCELLED_ERROR);
+    if cancelled {
+        let _ = clear_persisted_pending(&app);
+    }
+
     let state = app.state::<AppUpdateState>();
     if let Ok(mut inner) = state.0.lock() {
         inner.in_flight = false;
+        inner.cancellation = None;
+        inner.status.last_checked_at_unix_ms = Some(unix_timestamp_ms());
+        if cancelled {
+            inner.pending = None;
+            inner.status.phase = AppUpdatePhase::Cancelled;
+            inner.status.available_version = None;
+            inner.status.downloaded_bytes = 0;
+            inner.status.total_bytes = None;
+            inner.status.notes = None;
+            inner.status.last_error = None;
+            inner.status.install_on_exit = false;
+            inner.status.repair_mode = false;
+        }
     }
-    result
+
+    if cancelled { Ok(()) } else { result }
 }
 
 async fn perform_check_and_stage(
@@ -564,6 +715,7 @@ async fn perform_check_and_stage(
     configuration: &UpdateConfiguration,
     force: bool,
     repair: bool,
+    cancellation: &CancellationToken,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .user_agent(format!("Ravyn/{}", env!("CARGO_PKG_VERSION")))
@@ -582,17 +734,27 @@ async fn perform_check_and_stage(
         .build()
         .map_err(|error| format!("failed to initialize the app update client: {error}"))?;
 
-    let response = client
-        .get(configuration.endpoint.clone())
-        .send()
-        .await
-        .map_err(|error| format!("failed to check for an app update: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("the app update service returned an error: {error}"))?;
-    if response.content_length().is_some_and(|size| size > METADATA_LIMIT) {
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+        response = client.get(configuration.endpoint.clone()).send() => {
+            response.map_err(|error| format!("failed to check for an app update: {error}"))?
+        }
+    }
+    .error_for_status()
+    .map_err(|error| format!("the app update service returned an error: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > METADATA_LIMIT)
+    {
         return Err("app update metadata exceeds the maximum size".into());
     }
-    let metadata = read_response_bounded(response, METADATA_LIMIT, "app update metadata").await?;
+    let metadata = read_response_bounded(
+        response,
+        METADATA_LIMIT,
+        "app update metadata",
+        cancellation,
+    )
+    .await?;
     let signed: SignedAppUpdateManifest = serde_json::from_slice(&metadata)
         .map_err(|error| format!("app update metadata is invalid: {error}"))?;
     let manifest = signed
@@ -640,13 +802,15 @@ async fn perform_check_and_stage(
         return Ok(());
     }
 
-    let response = client
-        .get(&manifest.artifact.url)
-        .send()
-        .await
-        .map_err(|error| format!("failed to download Ravyn {}: {error}", manifest.version))?
-        .error_for_status()
-        .map_err(|error| format!("the app update download returned an error: {error}"))?;
+    ensure_update_not_cancelled(cancellation)?;
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+        response = client.get(&manifest.artifact.url).send() => {
+            response.map_err(|error| format!("failed to download Ravyn {}: {error}", manifest.version))?
+        }
+    }
+    .error_for_status()
+    .map_err(|error| format!("the app update download returned an error: {error}"))?;
     if response
         .content_length()
         .is_some_and(|size| size != manifest.artifact.size_bytes)
@@ -688,18 +852,34 @@ async fn perform_check_and_stage(
     let mut stream = response.bytes_stream();
     let mut digest = Sha256::new();
     let mut downloaded = 0_u64;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation.cancelled() => {
+                drop(output);
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return Err(UPDATE_CANCELLED_ERROR.into());
+            }
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| format!("app update download failed: {error}"))?;
         downloaded = downloaded
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| "app update size overflow".to_owned())?;
         if downloaded > manifest.artifact.size_bytes {
+            let _ = tokio::fs::remove_file(&partial_path).await;
             return Err("app update download exceeded the signed installer size".into());
         }
-        output
-            .write_all(&chunk)
-            .await
-            .map_err(|error| format!("failed to write the staged app update: {error}"))?;
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                drop(output);
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return Err(UPDATE_CANCELLED_ERROR.into());
+            }
+            result = output.write_all(&chunk) => {
+                result.map_err(|error| format!("failed to write the staged app update: {error}"))?;
+            }
+        }
         digest.update(&chunk);
         if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
             inner.status.downloaded_bytes = downloaded;
@@ -727,6 +907,7 @@ async fn perform_check_and_stage(
         let _ = tokio::fs::remove_file(&partial_path).await;
         return Err("app update SHA-256 verification failed".into());
     }
+    ensure_update_not_cancelled(cancellation)?;
     let _ = tokio::fs::remove_file(&final_path).await;
     tokio::fs::rename(&partial_path, &final_path)
         .await
@@ -736,12 +917,21 @@ async fn perform_check_and_stage(
         let _ = tokio::fs::remove_file(&final_path).await;
         return Err(error);
     }
+    if let Err(error) = ensure_update_not_cancelled(cancellation) {
+        let _ = clear_persisted_pending(app);
+        return Err(error);
+    }
 
     let state = app.state::<AppUpdateState>();
     let mut inner = state
         .0
         .lock()
         .map_err(|_| "application update state is unavailable".to_owned())?;
+    if cancellation.is_cancelled() {
+        drop(inner);
+        let _ = clear_persisted_pending(app);
+        return Err(UPDATE_CANCELLED_ERROR.into());
+    }
     inner.pending = Some(PendingUpdate {
         manifest: manifest.clone(),
         installer_path: final_path,
@@ -890,6 +1080,8 @@ fn set_error(app: &AppHandle, error: String) {
     tracing::warn!(%error, "application update check failed");
     if let Ok(mut inner) = app.state::<AppUpdateState>().0.lock() {
         inner.in_flight = false;
+        inner.cancellation = None;
+        inner.status.last_checked_at_unix_ms = Some(unix_timestamp_ms());
         inner.status.phase = AppUpdatePhase::Error;
         inner.status.last_error = Some(error);
         inner.status.install_on_exit = inner.pending.is_some();
@@ -914,8 +1106,8 @@ pub fn install_pending_on_close(app: &AppHandle) -> Result<bool, String> {
         pending
     };
 
-    let transaction = verify_staged_installer(&pending)
-        .and_then(|()| prepare_update_transaction(app, &pending));
+    let transaction =
+        verify_staged_installer(&pending).and_then(|()| prepare_update_transaction(app, &pending));
     let install_result = transaction
         .as_ref()
         .map_err(|error| error.clone())
@@ -992,7 +1184,9 @@ fn prepare_update_transaction(
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("failed to resolve the running Ravyn executable: {error}"))?;
     if !same_path(&current_exe, &installed_exe) {
-        return Err("application updates can only start from the installed Ravyn executable".into());
+        return Err(
+            "application updates can only start from the installed Ravyn executable".into(),
+        );
     }
 
     let update_dir = update_directory(app)?;
@@ -1000,9 +1194,7 @@ fn prepare_update_transaction(
         .map_err(|error| format!("failed to create the update state directory: {error}"))?;
     let transaction_path = update_dir.join(UPDATE_TRANSACTION_FILENAME);
     if transaction_path.exists() {
-        return Err(
-            "a previous application update transaction is still awaiting recovery".into(),
-        );
+        return Err("a previous application update transaction is still awaiting recovery".into());
     }
     let token = uuid::Uuid::new_v4().simple().to_string();
     let transaction = PendingUpdateTransaction {
@@ -1070,6 +1262,14 @@ fn build_installer_helper_script(
     transaction: &PendingUpdateTransaction,
     parent_pid: u32,
 ) -> String {
+    build_installer_helper_script_with_timeout(transaction, parent_pid, READINESS_TIMEOUT_SECS)
+}
+
+fn build_installer_helper_script_with_timeout(
+    transaction: &PendingUpdateTransaction,
+    parent_pid: u32,
+    readiness_timeout_secs: u64,
+) -> String {
     use std::fmt::Write as _;
 
     let shortcuts = transaction
@@ -1116,7 +1316,7 @@ fn build_installer_helper_script(
         powershell_string(&transaction.to_version)
     )
     .unwrap();
-    writeln!(&mut script, "$timeoutSeconds={READINESS_TIMEOUT_SECS};").unwrap();
+    writeln!(&mut script, "$timeoutSeconds={readiness_timeout_secs};").unwrap();
     writeln!(
         &mut script,
         "$regUninstallKey={};",
@@ -1170,8 +1370,8 @@ fn build_installer_helper_script(
              $i++;\n\
            };\n\
            Write-Journal 'install';\n\
-           $setup=Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru;\n\
-           if ($setup.ExitCode -ne 0) { throw \"installer exited with code $($setup.ExitCode)\" };\n\
+           Copy-Item -LiteralPath $installer -Destination $installed -Force;\n\
+           if (Test-Path 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn') { Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Ravyn' -Name 'DisplayVersion' -Value $toVersion -ErrorAction SilentlyContinue };\n\
            Write-Journal 'verify';\n\
            $launched=Start-Process -FilePath $installed -PassThru;\n\
            $deadline=(Get-Date).AddSeconds($timeoutSeconds);\n\
@@ -1277,10 +1477,16 @@ async fn read_response_bounded(
     response: reqwest::Response,
     limit: u64,
     label: &str,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, String> {
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation.cancelled() => return Err(UPDATE_CANCELLED_ERROR.into()),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| format!("failed to read {label}: {error}"))?;
         let next_len = bytes.len().saturating_add(chunk.len());
         if u64::try_from(next_len).unwrap_or(u64::MAX) > limit {
@@ -1382,6 +1588,19 @@ mod tests {
     }
 
     #[test]
+    fn helper_script_replaces_the_binary_in_place_without_an_installer() {
+        let script = build_installer_helper_script(&sample_transaction(), 42);
+        assert!(
+            script.contains("Copy-Item -LiteralPath $installer -Destination $installed -Force")
+        );
+        assert!(script.contains("-Name 'DisplayVersion' -Value $toVersion"));
+        assert!(
+            !script.contains("-ArgumentList '/S'"),
+            "the update must not depend on a bundled NSIS installer"
+        );
+    }
+
+    #[test]
     fn helper_script_backs_up_binaries_registry_and_shortcuts() {
         let script = build_installer_helper_script(&sample_transaction(), 42);
         // Only application binaries: the install dir doubles as the data dir.
@@ -1393,7 +1612,13 @@ mod tests {
         assert!(script.contains("Remove-ItemProperty"));
         assert!(script.contains(r"Desktop\Ravyn.lnk"));
         // Journal phases are advanced before every state-changing step.
-        for phase in ["'backup'", "'install'", "'verify'", "'rollback'", "'finalize'"] {
+        for phase in [
+            "'backup'",
+            "'install'",
+            "'verify'",
+            "'rollback'",
+            "'finalize'",
+        ] {
             assert!(
                 script.contains(&format!("Write-Journal {phase}")),
                 "missing journal phase {phase}"
@@ -1407,13 +1632,25 @@ mod tests {
     fn recovery_leaves_fresh_transactions_alone() {
         let now = 1_000_000_000_000_u64;
         assert_eq!(
-            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "0.3.0", now - 60_000, "0.2.0", now),
+            plan_recovery(
+                UPDATE_TRANSACTION_SCHEMA,
+                "0.3.0",
+                now - 60_000,
+                "0.2.0",
+                now
+            ),
             RecoveryAction::LeaveAlone
         );
         // Freshly installed target version: the helper is still waiting for
         // the readiness marker; recovery must not race it.
         assert_eq!(
-            plan_recovery(UPDATE_TRANSACTION_SCHEMA, "v0.3.0", now - 60_000, "0.3.0", now),
+            plan_recovery(
+                UPDATE_TRANSACTION_SCHEMA,
+                "v0.3.0",
+                now - 60_000,
+                "0.3.0",
+                now
+            ),
             RecoveryAction::LeaveAlone
         );
     }
@@ -1475,12 +1712,62 @@ mod tests {
         assert!(!should_block_automatic_retry(None, "0.3.0"));
     }
 
+    #[test]
+    fn automatic_update_retries_back_off_and_remain_bounded() {
+        assert_eq!(automatic_retry_delay(0), AUTOMATIC_CHECK_INTERVAL);
+        assert_eq!(automatic_retry_delay(1), Duration::from_secs(15 * 60));
+        assert_eq!(automatic_retry_delay(2), Duration::from_secs(30 * 60));
+        assert_eq!(automatic_retry_delay(3), Duration::from_secs(60 * 60));
+        assert_eq!(automatic_retry_delay(4), AUTOMATIC_RETRY_MAX);
+        assert_eq!(automatic_retry_delay(u32::MAX), AUTOMATIC_RETRY_MAX);
+    }
+
+    #[test]
+    fn cancellation_tokens_are_reported_without_update_errors() {
+        let token = CancellationToken::new();
+        assert!(ensure_update_not_cancelled(&token).is_ok());
+        token.cancel();
+        assert_eq!(
+            ensure_update_not_cancelled(&token).unwrap_err(),
+            UPDATE_CANCELLED_ERROR,
+        );
+    }
+
     /// Writes the generated helper script to a file so CI or a developer can
     /// validate it with the real PowerShell parser (run with `-- --ignored`).
     #[test]
     #[ignore]
     fn dump_helper_script_for_parser_validation() {
-        let script = build_installer_helper_script(&sample_transaction(), 42);
-        std::fs::write(std::env::temp_dir().join("ravyn-helper-script.ps1"), script).unwrap();
+        let output = std::env::temp_dir().join("ravyn-helper-script.ps1");
+        let script = if let Some(root) = std::env::var_os("RAVYN_HELPER_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let install_dir = root.join("install");
+            let transaction = PendingUpdateTransaction {
+                schema: UPDATE_TRANSACTION_SCHEMA,
+                token: "lifecycle-test".into(),
+                from_version: std::env::var("RAVYN_HELPER_FROM_VERSION")
+                    .unwrap_or_else(|_| "0.2.0".into()),
+                to_version: std::env::var("RAVYN_HELPER_TO_VERSION")
+                    .unwrap_or_else(|_| "0.3.0".into()),
+                install_dir: install_dir.clone(),
+                installed_exe: install_dir.join("Ravyn.exe"),
+                backup_dir: root.join("backup"),
+                shortcuts_backup_dir: root.join("shortcuts"),
+                registry_uninstall_backup: root.join("uninstall.reg"),
+                registry_run_backup: root.join("run.reg"),
+                shortcuts: Vec::new(),
+                journal_path: root.join("journal.txt"),
+                installer_path: root.join("update.exe"),
+                readiness_marker: root.join("ready.marker"),
+                pending_state_path: root.join("pending.json"),
+                transaction_path: root.join("transaction.json"),
+                result_path: root.join("result.json"),
+                created_at_unix_ms: 1,
+            };
+            build_installer_helper_script_with_timeout(&transaction, i32::MAX as u32, 3)
+        } else {
+            build_installer_helper_script(&sample_transaction(), 42)
+        };
+        std::fs::write(output, script).unwrap();
     }
 }

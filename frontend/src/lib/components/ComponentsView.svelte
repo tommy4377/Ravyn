@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { describeError } from "../api/errors";
   import type {
     ComponentId,
@@ -28,6 +29,7 @@
   let manifestRefreshing = $state(false);
   let error = $state<string | null>(null);
   let busy = $state<Partial<Record<ComponentId, string>>>({});
+  let restartRequired = $state(false);
   let removeTarget = $state<ComponentStatus | null>(null);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
@@ -42,7 +44,7 @@
     ytdlp: "Extracts media information and downloads from supported sites.",
     ffmpeg: "Merges, converts, probes, and post-processes audio and video.",
     rqbit: "Provides the managed BitTorrent engine and seeding controls.",
-    seven_zip: "Uses an existing 7z or 7za executable for verified archive extraction.",
+    seven_zip: "Installs or uses 7-Zip for verified archive listing, testing, and extraction.",
   };
   const icons: Record<ComponentId, IconName> = { ytdlp: "video", ffmpeg: "components", rqbit: "torrent", seven_zip: "archive" };
   const featureNames: Record<FeatureId, string> = {
@@ -68,9 +70,6 @@
   }
 
   function componentDescription(component: ComponentStatus): string {
-    if (component.component === "seven_zip" && component.state === "unsupported") {
-      return "Managed installation is intentionally unavailable in Ravyn 0.2. Select an existing 7z.exe or 7za.exe in Settings.";
-    }
     return descriptions[component.component];
   }
 
@@ -97,7 +96,9 @@
 
   async function load(): Promise<void> {
     if (!connection.client) return;
-    loading = true;
+    // Only block the view before the first successful load; later refreshes
+    // update the cards in place so operations don't flash the whole page.
+    if (overview === null) loading = true;
     error = null;
     try {
       [overview, manifestStatus] = await Promise.all([
@@ -111,7 +112,15 @@
     }
   }
 
-  $effect(() => { void load(); });
+  // load() reads `overview` synchronously (to decide whether to show the
+  // blocking spinner) and later writes it; without untrack that read makes
+  // this mount effect depend on `overview`, so every successful load
+  // re-triggered the effect and re-fetched in an unbroken loop — visible as
+  // continuous flicker and, once enough concurrent requests piled up, an
+  // aborted fetch surfaced as a spurious "couldn't load components" error.
+  $effect(() => {
+    if (connection.client) untrack(() => void load());
+  });
 
   async function refreshCatalog(): Promise<void> {
     if (!connection.client || !manifestStatus?.configured) return;
@@ -138,16 +147,23 @@
     try {
       if (operation === "install") {
         await connection.client.installComponent(component.component);
-        notifications.success(`${names[component.component]} installation started`);
+        const completed = await waitForComponent(component.component);
+        if (completed.state !== "installed" && completed.state !== "custom_path") throw new Error(completed.error_message ?? `${names[component.component]} installation did not complete.`);
+        restartRequired = true;
+        notifications.success(`${names[component.component]} installed`, "Restart Ravyn before using the new version.");
       } else if (operation === "update") {
         await connection.client.updateComponent(component.component);
-        notifications.success(`${names[component.component]} update started`);
+        const completed = await waitForComponent(component.component);
+        if (completed.state !== "installed" && completed.state !== "custom_path") throw new Error(completed.error_message ?? `${names[component.component]} update did not complete.`);
+        restartRequired = true;
+        notifications.success(`${names[component.component]} updated`, "Restart Ravyn before using the new version.");
       } else if (operation === "verify") {
         const health = await connection.client.verifyComponent(component.component);
         if (health.healthy) notifications.success(`${names[component.component]} verified`, health.version ?? undefined);
         else notifications.error(`${names[component.component]} verification failed`, health.message ?? undefined);
       } else if (operation === "rollback") {
         await connection.client.rollbackComponent(component.component);
+        restartRequired = true;
         notifications.success(`${names[component.component]} rolled back`);
       } else {
         const report = await connection.client.cleanupComponent(component.component);
@@ -161,6 +177,19 @@
       delete next[component.component];
       busy = next;
     }
+  }
+
+  async function waitForComponent(component: ComponentId): Promise<ComponentStatus> {
+    if (!connection.client) throw new Error("Ravyn is not connected.");
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const next = await connection.client.getComponents();
+      overview = next;
+      const status = next.components.find((item) => item.component === component);
+      if (!status) throw new Error("The component disappeared while it was being updated.");
+      if (!["queued", "downloading", "verifying", "installing"].includes(status.state)) return status;
+    }
+    throw new Error("The component installation timed out. Check its status and retry if needed.");
   }
 
   async function removeComponent(): Promise<void> {
@@ -203,6 +232,12 @@
     {:else if !overview}
       <EmptyState icon="components" title="Component information unavailable" />
     {:else}
+      {#if restartRequired}
+        <Surface padding="small" class="restart-surface">
+          <Icon name="warning" size={18} />
+          <div><strong>Restart Ravyn to activate updated components</strong><p>Media and torrent engines are loaded when the backend starts.</p></div>
+        </Surface>
+      {/if}
       {#if manifestStatus}
         <Surface padding="small" class="catalog-surface">
           <div class="catalog-row">
@@ -293,6 +328,8 @@
   .catalog-title { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
   .catalog-copy p { color: var(--text-secondary); font-size: var(--text-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .catalog-warning { display: block; margin-top: var(--space-1); color: var(--status-warning); }
+  :global(.restart-surface) { display: flex; align-items: flex-start; gap: var(--space-3); color: var(--status-warning); }
+  :global(.restart-surface p) { color: var(--text-secondary); font-size: var(--text-caption); }
   .catalog-expiry { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: var(--text-caption); }
   .catalog-expiry span { color: var(--text-tertiary); }
   .catalog-expiry strong { font-weight: 500; }

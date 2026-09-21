@@ -83,11 +83,16 @@ fn finish_report(
                 .map(|error| format!("{}: {error}", step.step))
         })
         .collect::<Vec<_>>();
+    let native_host_completed = installed_exe.is_none()
+        || steps
+            .iter()
+            .any(|step| step.step == "register_firefox_native_host" && step.applied);
     let integration_completed = installed_exe
         .as_deref()
         .is_some_and(std::path::Path::is_file)
         && installed_sha256.is_some()
-        && registration_completed;
+        && registration_completed
+        && native_host_completed;
 
     IntegrationReport {
         steps,
@@ -169,6 +174,7 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
             ("start_menu_shortcut", request.start_menu_shortcut),
             ("desktop_shortcut", request.desktop_shortcut),
             ("launch_at_startup", request.launch_at_startup),
+            ("register_firefox_native_host", true),
         ] {
             steps.push(skipped(
                 step,
@@ -248,6 +254,20 @@ pub fn apply(request: &IntegrationRequest) -> IntegrationReport {
         steps.push(skipped("launch_at_startup", "not requested"));
     }
 
+    // 6. Firefox native-messaging host. Registration is per-user and safe
+    // even when Firefox is not installed yet; the extension becomes usable as
+    // soon as it is added to the browser.
+    match &effective_exe {
+        Some(exe) => match crate::browser_integration::register(exe) {
+            Ok(()) => steps.push(ok("register_firefox_native_host")),
+            Err(error) => steps.push(failed("register_firefox_native_host", error)),
+        },
+        None => steps.push(failed(
+            "register_firefox_native_host",
+            "no executable to register as the native host".into(),
+        )),
+    }
+
     finish_report(
         steps,
         install_dir,
@@ -266,9 +286,7 @@ fn install_executable(source: &std::path::Path, target: &std::path::Path) -> Res
     // executable but not overwriting it in place).
     let staged = dir.join(".ravyn.install.tmp");
     std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
-    if crate::installation::sha256_file(source)?
-        != crate::installation::sha256_file(&staged)?
-    {
+    if crate::installation::sha256_file(source)? != crate::installation::sha256_file(&staged)? {
         let _ = std::fs::remove_file(&staged);
         return Err("staged executable checksum does not match the source".into());
     }
@@ -414,10 +432,10 @@ fn create_shortcut(target: &std::path::Path, link: &std::path::Path) -> Result<(
                 .unwrap_or_default()
         ),
     );
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut command = std::process::Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    crate::silent_command::hide_console_window(&mut command);
+    let output = command.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(())
     } else {

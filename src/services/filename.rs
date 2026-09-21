@@ -45,12 +45,52 @@ pub fn sanitize(input: &str) -> String {
     name
 }
 
+/// Derives a filename that does not collide with existing files by appending
+/// ` (N)` before the extension, matching common download-manager behavior.
+/// `is_taken` must report whether a candidate name is already in use.
+pub fn next_available(name: &str, mut is_taken: impl FnMut(&str) -> bool) -> String {
+    if !is_taken(name) {
+        return name.to_owned();
+    }
+    let (stem, extension) = match name.rfind('.') {
+        // A leading dot (".gitignore") is a bare name, not an extension.
+        Some(index) if index > 0 => (&name[..index], &name[index..]),
+        _ => (name, ""),
+    };
+    for counter in 1..10_000u32 {
+        let candidate = format!("{stem} ({counter}){extension}");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{stem} ({}){extension}", uuid::Uuid::new_v4())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn removes_unsafe_characters() {
         assert_eq!(sanitize("a:b?.zip"), "a_b_.zip");
+    }
+
+    #[test]
+    fn next_available_keeps_free_names() {
+        assert_eq!(next_available("file.bin", |_| false), "file.bin");
+    }
+
+    #[test]
+    fn next_available_appends_counter_before_extension() {
+        let taken = ["file.bin", "file (1).bin"];
+        assert_eq!(
+            next_available("file.bin", |name| taken.contains(&name)),
+            "file (2).bin"
+        );
+    }
+
+    #[test]
+    fn next_available_handles_names_without_extension() {
+        assert_eq!(next_available("file", |name| name == "file"), "file (1)");
     }
 
     #[test]
