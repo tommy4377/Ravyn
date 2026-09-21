@@ -1,9 +1,13 @@
 //! Verified, versioned installation primitives for managed external engines.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header::LOCATION};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
-    error::{RavynError, Result},
+    error::{ProvisioningErrorCode, RavynError, Result},
     services::security,
 };
 
@@ -23,6 +27,17 @@ const MANIFEST_SCHEMA: u32 = 1;
 pub struct EngineManifest {
     pub schema_version: u32,
     pub channel: String,
+    /// Monotonic release sequence used to prevent remote manifest downgrade
+    /// and replay attacks. Embedded development manifests may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<u64>,
+    /// UTC publication time for remote release manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<DateTime<Utc>>,
+    /// UTC expiry time after which a remote manifest may only be used through
+    /// the explicitly bounded last-known-good grace period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     pub artifacts: Vec<EngineArtifact>,
 }
 
@@ -40,11 +55,25 @@ pub struct EngineArtifact {
     pub version: String,
     pub target: String,
     pub url: String,
+    /// SHA-256 of the downloaded artifact exactly as served by `url` (the
+    /// archive itself when [`Self::archive_member`] is set).
     pub sha256: String,
+    /// Size of the downloaded artifact exactly as served by `url`.
     pub size_bytes: u64,
     pub filename: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// When set, the downloaded artifact is a ZIP archive and this is the
+    /// forward-slash-separated path of the executable to extract from it as
+    /// `filename`. When unset, the downloaded artifact *is* the executable.
+    #[serde(default)]
+    pub archive_member: Option<String>,
+    /// SHA-256 of the extracted [`Self::archive_member`] content. Required
+    /// (and only meaningful) when `archive_member` is set; this, not
+    /// `sha256`, becomes the activation checksum stored for the installed
+    /// executable.
+    #[serde(default)]
+    pub member_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +81,23 @@ struct ActiveEngine {
     version: String,
     filename: String,
     sha256: String,
+}
+
+/// Public, checksum-verified metadata for an active managed engine.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveEngineInfo {
+    pub version: String,
+    pub filename: String,
+    pub sha256: String,
+    pub path: PathBuf,
+}
+
+/// Lifecycle stage reported while activating a managed engine artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineInstallStage {
+    Downloading,
+    Verifying,
+    Installing,
 }
 
 impl ActiveEngine {
@@ -81,15 +127,88 @@ impl EngineManifest {
             )));
         }
         validate_token(&self.channel, "channel")?;
+        match (
+            self.manifest_version,
+            self.generated_at.as_ref(),
+            self.expires_at.as_ref(),
+        ) {
+            (None, None, None) => {}
+            (Some(version), Some(generated_at), Some(expires_at)) => {
+                if version == 0 {
+                    return Err(RavynError::Invalid(
+                        "engine manifest version must be greater than zero".into(),
+                    ));
+                }
+                if expires_at <= generated_at {
+                    return Err(RavynError::Invalid(
+                        "engine manifest expiry must be after its generation time".into(),
+                    ));
+                }
+                if expires_at.signed_duration_since(generated_at.clone())
+                    > ChronoDuration::days(90)
+                {
+                    return Err(RavynError::Invalid(
+                        "engine manifest validity window may not exceed 90 days".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(RavynError::Invalid(
+                    "remote engine manifest metadata must include version, generated_at, and expires_at together".into(),
+                ));
+            }
+        }
         if self.artifacts.len() > 256 {
             return Err(RavynError::Invalid(
                 "engine manifest contains too many artifacts".into(),
             ));
         }
+        let mut identities = std::collections::BTreeSet::new();
         for artifact in &self.artifacts {
             artifact.validate()?;
+            if !identities.insert((&artifact.engine, &artifact.target)) {
+                return Err(RavynError::Invalid(format!(
+                    "engine manifest contains duplicate {} artifact for {}",
+                    artifact.engine, artifact.target
+                )));
+            }
         }
         Ok(())
+    }
+
+    /// Applies the additional freshness and channel rules required for a
+    /// remotely distributed manifest. Embedded manifests intentionally remain
+    /// valid without release metadata so development builds can start offline.
+    pub fn validate_remote(&self, expected_channel: &str, now: DateTime<Utc>) -> Result<()> {
+        self.validate()?;
+        if self.channel != expected_channel {
+            return Err(RavynError::Invalid(format!(
+                "engine manifest channel {} does not match configured channel {expected_channel}",
+                self.channel
+            )));
+        }
+        let (_, generated_at, expires_at) = self.remote_metadata().ok_or_else(|| {
+            RavynError::Invalid(
+                "remote engine manifests require version and validity metadata".into(),
+            )
+        })?;
+        if generated_at > now + ChronoDuration::minutes(10) {
+            return Err(RavynError::Invalid(
+                "engine manifest generation time is unreasonably far in the future".into(),
+            ));
+        }
+        if expires_at <= now {
+            return Err(RavynError::Invalid("engine manifest has expired".into()));
+        }
+        Ok(())
+    }
+
+    pub fn remote_metadata(&self) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
+        Some((
+            self.manifest_version?,
+            self.generated_at.clone()?,
+            self.expires_at.clone()?,
+        ))
     }
 
     pub fn artifact(&self, engine: &str, target: &str) -> Result<&EngineArtifact> {
@@ -98,9 +217,12 @@ impl EngineManifest {
             .iter()
             .find(|artifact| artifact.engine == engine && artifact.target == target)
             .ok_or_else(|| {
-                RavynError::Unavailable(format!(
-                    "no managed {engine} artifact is available for {target}"
-                ))
+                RavynError::provisioning(
+                    ProvisioningErrorCode::PlatformUnsupported,
+                    format!("no managed {engine} artifact is available for {target}"),
+                )
+                .with_component(engine)
+                .with_target(target)
             })
     }
 }
@@ -119,7 +241,10 @@ impl SignedEngineManifest {
             .map_err(|_| RavynError::Invalid("engine manifest public key is invalid".into()))?;
         let payload = serde_json::to_vec(&self.manifest)?;
         key.verify_strict(&payload, &signature).map_err(|_| {
-            RavynError::Protocol("engine manifest signature verification failed".into())
+            RavynError::provisioning(
+                ProvisioningErrorCode::InvalidManifestSignature,
+                "engine manifest signature verification failed",
+            )
         })?;
         self.manifest.validate()?;
         Ok(&self.manifest)
@@ -163,7 +288,47 @@ impl EngineArtifact {
                 "managed engine capabilities are invalid or excessive".into(),
             ));
         }
+        if let Some(member) = &self.archive_member {
+            if member.is_empty()
+                || member.len() > 512
+                || member.starts_with('/')
+                || member.contains('\\')
+                || member.split('/').any(|segment| {
+                    segment.is_empty() || segment == "." || segment == ".."
+                })
+            {
+                return Err(RavynError::Invalid(
+                    "managed engine archive member must be a safe relative forward-slash path"
+                        .into(),
+                ));
+            }
+            let member_sha256 = self.member_sha256.as_deref().ok_or_else(|| {
+                RavynError::Invalid(
+                    "managed engine artifacts with an archive member require member_sha256"
+                        .into(),
+                )
+            })?;
+            if member_sha256.len() != 64
+                || !member_sha256.bytes().all(|value| value.is_ascii_hexdigit())
+            {
+                return Err(RavynError::Invalid(
+                    "managed engine member SHA-256 must contain exactly 64 hexadecimal characters"
+                        .into(),
+                ));
+            }
+        } else if self.member_sha256.is_some() {
+            return Err(RavynError::Invalid(
+                "managed engine member_sha256 requires archive_member to be set".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// The checksum that verifies the *installed executable*: `member_sha256`
+    /// for an extracted archive member, or `sha256` when the downloaded
+    /// artifact is the executable itself.
+    fn activation_sha256(&self) -> &str {
+        self.member_sha256.as_deref().unwrap_or(&self.sha256)
     }
 }
 
@@ -186,17 +351,25 @@ impl EngineManager {
     ) -> Result<PathBuf> {
         artifact.validate()?;
         if bytes.len() as u64 != artifact.size_bytes {
-            return Err(RavynError::Protocol(format!(
-                "managed engine size mismatch: expected {}, received {}",
-                artifact.size_bytes,
-                bytes.len()
-            )));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::DownloadInterrupted,
+                format!(
+                    "managed engine size mismatch: expected {}, received {}",
+                    artifact.size_bytes,
+                    bytes.len()
+                ),
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version));
         }
         let actual = hex::encode(Sha256::digest(bytes));
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
-            return Err(RavynError::Protocol(
-                "managed engine checksum verification failed".into(),
-            ));
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::ChecksumMismatch,
+                "managed engine checksum verification failed",
+            )
+            .with_component(&artifact.engine)
+            .with_expected_version(&artifact.version));
         }
 
         let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
@@ -212,13 +385,31 @@ impl EngineManager {
         file.write_all(bytes).await?;
         file.sync_all().await?;
         drop(file);
-        set_executable(&temporary).await?;
-        atomic_replace(&temporary, &destination).await?;
+        if let Some(member) = &artifact.archive_member {
+            let member_bytes =
+                extract_archive_member(&temporary, member, artifact.activation_sha256()).await?;
+            let extracted = version_dir.join(format!(".{}.extract", artifact.filename));
+            let mut extracted_file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&extracted)
+                .await?;
+            extracted_file.write_all(&member_bytes).await?;
+            extracted_file.sync_all().await?;
+            drop(extracted_file);
+            set_executable(&extracted).await?;
+            atomic_replace(&extracted, &destination).await?;
+            tokio::fs::remove_file(&temporary).await?;
+        } else {
+            set_executable(&temporary).await?;
+            atomic_replace(&temporary, &destination).await?;
+        }
 
         let active = ActiveEngine {
             version: artifact.version.clone(),
             filename: artifact.filename.clone(),
-            sha256: artifact.sha256.to_ascii_lowercase(),
+            sha256: artifact.activation_sha256().to_ascii_lowercase(),
         };
         self.write_active(&artifact.engine, &active).await?;
         Ok(destination)
@@ -229,12 +420,22 @@ impl EngineManager {
         config: &Config,
         artifact: &EngineArtifact,
         cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+        stage: Option<&(dyn Fn(EngineInstallStage) + Send + Sync)>,
     ) -> Result<PathBuf> {
         artifact.validate()?;
+        if let Some(report) = stage {
+            report(EngineInstallStage::Downloading);
+        }
         let version_dir = self.root.join(&artifact.engine).join(&artifact.version);
         tokio::fs::create_dir_all(&version_dir).await?;
         let temporary = version_dir.join(format!(".{}.download", artifact.filename));
         let destination = version_dir.join(&artifact.filename);
+        match tokio::fs::remove_file(&temporary).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let mut current = url::Url::parse(&artifact.url)?;
         let mut visited = std::collections::BTreeSet::new();
         let mut redirects = 0_u8;
@@ -319,17 +520,69 @@ impl EngineManager {
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk).await?;
+                if let Some(report) = progress {
+                    report(received, artifact.size_bytes);
+                }
             }
             file.sync_all().await?;
             drop(file);
-            let actual = hex::encode(hasher.finalize());
-            if received != artifact.size_bytes || !actual.eq_ignore_ascii_case(&artifact.sha256) {
-                return Err(RavynError::Protocol(
-                    "engine download failed size or checksum verification".into(),
-                ));
+            if let Some(report) = stage {
+                report(EngineInstallStage::Verifying);
             }
-            set_executable(&temporary).await?;
-            atomic_replace(&temporary, &destination).await?;
+            let actual = hex::encode(hasher.finalize());
+            if received != artifact.size_bytes {
+                return Err(RavynError::provisioning(
+                    ProvisioningErrorCode::DownloadInterrupted,
+                    format!(
+                        "engine download ended after {received} of {} expected bytes",
+                        artifact.size_bytes
+                    ),
+                )
+                .with_component(&artifact.engine)
+                .with_expected_version(&artifact.version));
+            }
+            if !actual.eq_ignore_ascii_case(&artifact.sha256) {
+                return Err(RavynError::provisioning(
+                    ProvisioningErrorCode::ChecksumMismatch,
+                    "engine download failed checksum verification",
+                )
+                .with_component(&artifact.engine)
+                .with_expected_version(&artifact.version));
+            }
+            if let Some(report) = stage {
+                report(EngineInstallStage::Installing);
+            }
+            if cancellation.is_cancelled() {
+                return Err(RavynError::Cancelled);
+            }
+            if let Some(member) = &artifact.archive_member {
+                let member_bytes =
+                    extract_archive_member(&temporary, member, artifact.activation_sha256())
+                        .await?;
+                let extracted = version_dir.join(format!(".{}.extract", artifact.filename));
+                let mut extracted_file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&extracted)
+                    .await?;
+                extracted_file.write_all(&member_bytes).await?;
+                extracted_file.sync_all().await?;
+                drop(extracted_file);
+                set_executable(&extracted).await?;
+                if cancellation.is_cancelled() {
+                    let _ = tokio::fs::remove_file(&extracted).await;
+                    return Err(RavynError::Cancelled);
+                }
+                atomic_replace(&extracted, &destination).await?;
+                tokio::fs::remove_file(&temporary).await?;
+            } else {
+                set_executable(&temporary).await?;
+                if cancellation.is_cancelled() {
+                    return Err(RavynError::Cancelled);
+                }
+                atomic_replace(&temporary, &destination).await?;
+            }
             Ok(())
         }
         .await;
@@ -337,32 +590,46 @@ impl EngineManager {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(error);
         }
+        if cancellation.is_cancelled() {
+            // Keep an already-active version intact when a forced reinstall
+            // races with cancellation; otherwise this newly activated-but-not-
+            // published file is safe to discard.
+            if self
+                .active_path(&artifact.engine)
+                .await?
+                .is_none_or(|active| active != destination)
+            {
+                let _ = tokio::fs::remove_file(&destination).await;
+            }
+            return Err(RavynError::Cancelled);
+        }
         self.write_active(
             &artifact.engine,
             &ActiveEngine {
                 version: artifact.version.clone(),
                 filename: artifact.filename.clone(),
-                sha256: artifact.sha256.to_ascii_lowercase(),
+                sha256: artifact.activation_sha256().to_ascii_lowercase(),
             },
         )
         .await?;
         Ok(destination)
     }
 
-    pub async fn active_path(&self, engine: &str) -> Result<Option<PathBuf>> {
+    /// Return checksum-verified metadata for the active engine version.
+    pub async fn active_info(&self, engine: &str) -> Result<Option<ActiveEngineInfo>> {
         validate_token(engine, "engine")?;
-        let path = self.root.join(engine).join("active.json");
-        if !tokio::fs::try_exists(&path).await? {
+        let metadata_path = self.root.join(engine).join("active.json");
+        if !tokio::fs::try_exists(&metadata_path).await? {
             return Ok(None);
         }
-        let bytes = read_engine_metadata(&path).await?;
+        let bytes = read_engine_metadata(&metadata_path).await?;
         let active: ActiveEngine = serde_json::from_slice(&bytes)?;
         active.validate()?;
         let executable = self
             .root
             .join(engine)
-            .join(active.version)
-            .join(active.filename);
+            .join(&active.version)
+            .join(&active.filename);
         if !tokio::fs::try_exists(&executable).await? {
             return Err(RavynError::Unavailable(format!(
                 "active managed {engine} executable is missing"
@@ -374,7 +641,33 @@ impl EngineManager {
                 "active managed {engine} executable failed checksum verification"
             )));
         }
-        Ok(Some(executable))
+        Ok(Some(ActiveEngineInfo {
+            version: active.version,
+            filename: active.filename,
+            sha256: active.sha256,
+            path: executable,
+        }))
+    }
+
+    pub async fn active_path(&self, engine: &str) -> Result<Option<PathBuf>> {
+        Ok(self.active_info(engine).await?.map(|info| info.path))
+    }
+
+    /// Remove active activation metadata after a failed first-time health check.
+    /// Versioned files remain available for diagnostics and later cleanup, but
+    /// no managed executable is considered active.
+    pub async fn deactivate(&self, engine: &str) -> Result<()> {
+        validate_token(engine, "engine")?;
+        let engine_dir = self.root.join(engine);
+        for name in ["active.json", ".active.json.tmp"] {
+            let path = engine_dir.join(name);
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     /// Atomically returns to the previously active, checksum-verified version.
@@ -436,6 +729,141 @@ impl EngineManager {
         let temporary = engine_dir.join(".active.json.tmp");
         write_metadata_atomic(&temporary, &destination, active).await
     }
+
+    /// Removes every versioned directory for `engine` except the active
+    /// version and the single previous version kept for rollback/diagnostics,
+    /// and deletes any stale `.download` partial-download temp files left
+    /// behind by an interrupted or failed install (including inside the
+    /// versions that are kept).
+    pub async fn cleanup_versions(&self, engine: &str) -> Result<EngineCleanupReport> {
+        validate_token(engine, "engine")?;
+        let engine_dir = self.root.join(engine);
+        let mut report = EngineCleanupReport::default();
+        if !tokio::fs::try_exists(&engine_dir).await? {
+            return Ok(report);
+        }
+
+        let mut kept = std::collections::BTreeSet::new();
+        for name in ["active.json", "previous.json"] {
+            let path = engine_dir.join(name);
+            if let Ok(bytes) = read_engine_metadata(&path).await {
+                if let Ok(entry) = serde_json::from_slice::<ActiveEngine>(&bytes) {
+                    if entry.validate().is_ok() {
+                        kept.insert(entry.version);
+                    }
+                }
+            }
+        }
+
+        let mut entries = tokio::fs::read_dir(&engine_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if kept.contains(name) {
+                let freed =
+                    remove_download_temp_files(&path, &mut report.removed_temp_files).await?;
+                report.bytes_freed = report.bytes_freed.saturating_add(freed);
+                continue;
+            }
+            report.bytes_freed = report
+                .bytes_freed
+                .saturating_add(directory_size(&path).await.unwrap_or(0));
+            tokio::fs::remove_dir_all(&path).await?;
+            report.removed_versions.push(name.to_owned());
+        }
+        Ok(report)
+    }
+}
+
+/// Summary of what an [`EngineManager::cleanup_versions`] pass removed.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EngineCleanupReport {
+    pub removed_versions: Vec<String>,
+    pub removed_temp_files: Vec<String>,
+    pub bytes_freed: u64,
+}
+
+async fn remove_download_temp_files(dir: &Path, removed: &mut Vec<String>) -> Result<u64> {
+    let mut freed = 0_u64;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with('.') && (name.ends_with(".download") || name.ends_with(".extract")))
+        {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata().await {
+            freed = freed.saturating_add(metadata.len());
+        }
+        tokio::fs::remove_file(&path).await?;
+        removed.push(name.to_owned());
+    }
+    Ok(freed)
+}
+
+/// Reads and verifies a single member out of a downloaded ZIP archive,
+/// bounded to [`MAX_ENGINE_BYTES`]. Runs on a blocking thread since the `zip`
+/// crate is synchronous and decompression is CPU-bound.
+async fn extract_archive_member(
+    archive_path: &Path,
+    member: &str,
+    expected_sha256: &str,
+) -> Result<Vec<u8>> {
+    let archive_path = archive_path.to_owned();
+    let member = member.to_owned();
+    let expected_sha256 = expected_sha256.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let file = std::fs::File::open(&archive_path)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| RavynError::Protocol(format!("invalid engine archive: {error}")))?;
+        let mut entry = archive.by_name(&member).map_err(|error| {
+            RavynError::provisioning(
+                ProvisioningErrorCode::DownloadInterrupted,
+                format!("engine archive is missing expected member {member:?}: {error}"),
+            )
+        })?;
+        if entry.size() > MAX_ENGINE_BYTES {
+            return Err(RavynError::Protocol(
+                "engine archive member exceeds the maximum managed engine size".into(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_ENGINE_BYTES {
+            return Err(RavynError::Protocol(
+                "engine archive member exceeds the maximum managed engine size".into(),
+            ));
+        }
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if !actual.eq_ignore_ascii_case(&expected_sha256) {
+            return Err(RavynError::provisioning(
+                ProvisioningErrorCode::ChecksumMismatch,
+                "engine archive member failed checksum verification",
+            ));
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| RavynError::Internal(format!("archive extraction task failed: {error}")))?
+}
+
+async fn directory_size(dir: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if let Ok(metadata) = entry.metadata().await {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 async fn read_engine_metadata(path: &Path) -> Result<Vec<u8>> {
@@ -598,6 +1026,8 @@ mod tests {
             size_bytes: bytes.len() as u64,
             filename: "ffmpeg.exe".into(),
             capabilities: vec!["transcode".into()],
+            archive_member: None,
+            member_sha256: None,
         }
     }
 
@@ -613,6 +1043,60 @@ mod tests {
         assert_eq!(
             manager.active_path("ffmpeg").await.unwrap(),
             Some(installed)
+        );
+    }
+
+    fn zip_archive_with(member: &str, content: &[u8]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(member, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, content).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn installs_the_verified_member_of_an_archive_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(temp.path());
+        let member_bytes = b"the real ffmpeg binary";
+        let archive_bytes = zip_archive_with("dist/bin/ffmpeg.exe", member_bytes);
+
+        let mut spec = artifact(&archive_bytes);
+        spec.archive_member = Some("dist/bin/ffmpeg.exe".into());
+        spec.member_sha256 = Some(hex::encode(Sha256::digest(member_bytes)));
+
+        let installed = manager.install_verified(&spec, &archive_bytes).await.unwrap();
+        assert_eq!(tokio::fs::read(&installed).await.unwrap(), member_bytes);
+        let info = manager.active_info("ffmpeg").await.unwrap().unwrap();
+        assert_eq!(info.sha256, spec.member_sha256.unwrap());
+
+        // The archive itself must not linger next to the extracted binary.
+        let mut entries = tokio::fs::read_dir(installed.parent().unwrap())
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(names, vec!["ffmpeg.exe".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_archive_member_whose_content_fails_checksum_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(temp.path());
+        let archive_bytes = zip_archive_with("bin/ffmpeg.exe", b"tampered payload");
+
+        let mut spec = artifact(&archive_bytes);
+        spec.archive_member = Some("bin/ffmpeg.exe".into());
+        spec.member_sha256 = Some(hex::encode(Sha256::digest(b"expected payload")));
+
+        assert!(
+            manager
+                .install_verified(&spec, &archive_bytes)
+                .await
+                .is_err()
         );
     }
 
@@ -637,6 +1121,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_validation_rejects_unsafe_urls_and_archive_members() {
+        let bytes = b"test executable";
+        assert!(artifact(bytes).validate().is_ok());
+
+        let mut insecure = artifact(bytes);
+        insecure.url = "http://downloads.example.test/ffmpeg.exe".into();
+        assert!(
+            insecure.validate().is_err(),
+            "a plain-HTTP artifact URL must never validate, even for a mock test server"
+        );
+
+        let mut with_credentials = artifact(bytes);
+        with_credentials.url = "https://user:pass@downloads.example.test/ffmpeg.exe".into();
+        assert!(with_credentials.validate().is_err());
+
+        let mut with_fragment = artifact(bytes);
+        with_fragment.url = "https://downloads.example.test/ffmpeg.exe#frag".into();
+        assert!(with_fragment.validate().is_err());
+
+        let mut traversal_member = artifact(bytes);
+        traversal_member.archive_member = Some("../bin/ffmpeg.exe".into());
+        traversal_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(traversal_member.validate().is_err());
+
+        let mut absolute_member = artifact(bytes);
+        absolute_member.archive_member = Some("/bin/ffmpeg.exe".into());
+        absolute_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(absolute_member.validate().is_err());
+
+        let mut missing_member_sha = artifact(bytes);
+        missing_member_sha.archive_member = Some("bin/ffmpeg.exe".into());
+        assert!(missing_member_sha.validate().is_err());
+
+        let mut orphaned_member_sha = artifact(bytes);
+        orphaned_member_sha.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(orphaned_member_sha.validate().is_err());
+
+        let mut valid_member = artifact(bytes);
+        valid_member.archive_member = Some("bin/ffmpeg.exe".into());
+        valid_member.member_sha256 = Some(hex::encode(Sha256::digest(b"x")));
+        assert!(valid_member.validate().is_ok());
+    }
+
     #[tokio::test]
     async fn activation_can_roll_back_without_trusting_stale_metadata() {
         let temp = tempfile::tempdir().unwrap();
@@ -656,6 +1184,55 @@ mod tests {
 
         assert_eq!(manager.rollback("ffmpeg").await.unwrap(), first);
         assert_eq!(manager.active_path("ffmpeg").await.unwrap(), Some(first));
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_only_the_active_and_previous_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = EngineManager::new(temp.path());
+        manager
+            .install_verified(&artifact(b"v1"), b"v1")
+            .await
+            .unwrap();
+        let mut v2 = artifact(b"v2");
+        v2.version = "7.2.0".into();
+        manager.install_verified(&v2, b"v2").await.unwrap();
+        let mut v3 = artifact(b"v3");
+        v3.version = "7.3.0".into();
+        manager.install_verified(&v3, b"v3").await.unwrap();
+
+        // A stray partial-download temp file left in the still-active
+        // version's directory, as if a prior download attempt crashed.
+        let stale_temp = temp
+            .path()
+            .join("engines")
+            .join("ffmpeg")
+            .join("7.3.0")
+            .join(".ffmpeg.exe.download");
+        tokio::fs::write(&stale_temp, b"partial").await.unwrap();
+
+        let report = manager.cleanup_versions("ffmpeg").await.unwrap();
+        assert_eq!(report.removed_versions, vec!["7.1.0".to_owned()]);
+        assert_eq!(
+            report.removed_temp_files,
+            vec![".ffmpeg.exe.download".to_owned()]
+        );
+        assert!(!tokio::fs::try_exists(&stale_temp).await.unwrap());
+        assert!(
+            !tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.1.0"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.2.0"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::fs::try_exists(temp.path().join("engines").join("ffmpeg").join("7.3.0"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -695,11 +1272,47 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_duplicate_engine_targets() {
+        let item = artifact(b"duplicate engine");
+        let manifest = EngineManifest {
+            schema_version: MANIFEST_SCHEMA,
+            channel: "stable".into(),
+            manifest_version: None,
+            generated_at: None,
+            expires_at: None,
+            artifacts: vec![item.clone(), item],
+        };
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn remote_manifest_requires_complete_fresh_metadata() {
+        let now = Utc::now();
+        let mut manifest = EngineManifest {
+            schema_version: MANIFEST_SCHEMA,
+            channel: "stable".into(),
+            manifest_version: Some(4),
+            generated_at: Some(now - ChronoDuration::hours(1)),
+            expires_at: Some(now + ChronoDuration::days(7)),
+            artifacts: vec![artifact(b"remote engine")],
+        };
+        manifest.validate_remote("stable", now).unwrap();
+        assert!(manifest.validate_remote("beta", now).is_err());
+        manifest.expires_at = Some(now - ChronoDuration::seconds(1));
+        assert!(manifest.validate_remote("stable", now).is_err());
+        manifest.generated_at = None;
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn signed_manifest_rejects_tampering() {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let manifest = EngineManifest {
             schema_version: MANIFEST_SCHEMA,
             channel: "stable".into(),
+            manifest_version: None,
+            generated_at: None,
+            expires_at: None,
             artifacts: vec![artifact(b"signed engine")],
         };
         let signature = signing_key.sign(&serde_json::to_vec(&manifest).unwrap());

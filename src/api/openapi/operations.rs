@@ -1312,6 +1312,28 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         Some("ComponentOverview")
     ),
     op!(
+        "get",
+        "/v1/components/manifest",
+        "getComponentManifestStatus",
+        "Components",
+        "Read signed component catalog refresh and cache status",
+        "200",
+        false,
+        false,
+        Some("ComponentManifestStatus")
+    ),
+    op!(
+        "post",
+        "/v1/components/manifest",
+        "refreshComponentManifest",
+        "Components",
+        "Refresh and verify the remote component catalog",
+        "200",
+        false,
+        false,
+        Some("ComponentManifestStatus")
+    ),
+    op!(
         "post",
         "/v1/components/features",
         "saveFeatureSelections",
@@ -1335,10 +1357,43 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
     ),
     op!(
         "post",
+        "/v1/components/{id}/update",
+        "updateComponent",
+        "Components",
+        "Install the verified manifest version of a managed component",
+        "202",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/verify",
+        "verifyComponent",
+        "Components",
+        "Run a bounded component health and version check",
+        "200",
+        false,
+        false,
+        Some("ComponentHealth")
+    ),
+    op!(
+        "post",
         "/v1/components/{id}/rollback",
         "rollbackComponent",
         "Components",
         "Roll back a component to its previous version",
+        "200",
+        false,
+        false,
+        None
+    ),
+    op!(
+        "post",
+        "/v1/components/{id}/cleanup",
+        "cleanupComponent",
+        "Components",
+        "Delete superseded managed engine versions and stale download temp files",
         "200",
         false,
         false,
@@ -1365,5 +1420,60 @@ pub(super) const OPERATIONS: &[OperationSpec] = &[
         false,
         false,
         None
+    ),
+    op!(
+        "get",
+        "/v1/setup",
+        "getSetupState",
+        "Setup",
+        "Read first-run and setup completion state",
+        "200",
+        false,
+        false,
+        Some("SetupState")
+    ),
+    op!(
+        "post",
+        "/v1/setup/library",
+        "prepareLibrary",
+        "Setup",
+        "Validate a library path and create the Ravyn library layout",
+        "200",
+        false,
+        true,
+        Some("PrepareLibraryResult")
+    ),
+    op!(
+        "post",
+        "/v1/setup/integration-consent",
+        "saveIntegrationConsent",
+        "Setup",
+        "Persist the exact user-approved Windows integration choices",
+        "200",
+        false,
+        true,
+        Some("SetupState")
+    ),
+    op!(
+        "post",
+        "/v1/setup/installation",
+        "reportInstallation",
+        "Setup",
+        "Report the desktop shell's Windows installation/integration result",
+        "200",
+        false,
+        true,
+        Some("SetupState")
+    ),
+    op!(
+        "post",
+        "/v1/setup/complete",
+        "completeSetup",
+        "Setup",
+        "Mark setup as complete",
+        "200",
+        false,
+        false,
+        Some("SetupState")
     ),
 ];

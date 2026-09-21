@@ -461,9 +461,11 @@ pub(super) fn settings_response(
         "bandwidth_schedule",
         "ytdlp",
         "ffmpeg",
+        "rqbit",
         "rqbit_api",
         "rqbit_credentials_secret_id",
         "seven_zip",
+        "auto_provision",
         "max_extract_mib",
         "max_extract_files",
         "max_extract_depth",
@@ -534,9 +536,11 @@ pub(super) fn settings_patch_requires_restart(patch: &PersistentSettingsPatch) -
         || patch.max_connections_per_host.is_some()
         || patch.ytdlp.is_some()
         || patch.ffmpeg.is_some()
+        || patch.rqbit.is_some()
         || patch.rqbit_api.is_some()
         || patch.rqbit_credentials_secret_id.is_some()
         || patch.seven_zip.is_some()
+        || patch.auto_provision.is_some()
         || patch.max_extract_mib.is_some()
         || patch.max_extract_files.is_some()
         || patch.max_extract_depth.is_some()
@@ -637,9 +641,11 @@ fn single_field_patches(
         bandwidth_schedule,
         ytdlp,
         ffmpeg,
+        rqbit,
         rqbit_api,
         rqbit_credentials_secret_id,
         seven_zip,
+        auto_provision,
         max_extract_mib,
         max_extract_files,
         max_extract_depth,
@@ -670,6 +676,29 @@ fn single_field_patches(
 
 /// Validates a settings patch without persisting or applying anything and
 /// returns every failing field instead of only the first error.
+async fn validate_settings_secret_references(
+    repository: &crate::storage::Repository,
+    patch: &PersistentSettingsPatch,
+) -> Vec<SettingsIssue> {
+    let Some(Some(secret_id)) = patch.rqbit_credentials_secret_id else {
+        return Vec::new();
+    };
+    match repository.get_secret_reference(secret_id).await {
+        Ok(reference) if reference.secret_type == "rqbit_credentials" => Vec::new(),
+        Ok(reference) => vec![SettingsIssue {
+            field: "rqbit_credentials_secret_id",
+            message: format!(
+                "secret reference {secret_id} has type {}, expected rqbit_credentials",
+                reference.secret_type
+            ),
+        }],
+        Err(error) => vec![SettingsIssue {
+            field: "rqbit_credentials_secret_id",
+            message: error.to_string(),
+        }],
+    }
+}
+
 pub(super) async fn validate_settings(
     State(s): State<ApiState>,
     Json(patch): Json<PersistentSettingsPatch>,
@@ -679,7 +708,8 @@ pub(super) async fn validate_settings(
         .load_persistent_settings()
         .await?
         .unwrap_or_else(|| PersistentSettings::from_config(&s.manager.config()));
-    let issues = settings_validation_issues(&current, &s.manager.config(), &patch);
+    let mut issues = settings_validation_issues(&current, &s.manager.config(), &patch);
+    issues.extend(validate_settings_secret_references(&s.repository, &patch).await);
     Ok(Json(SettingsValidationResponse {
         valid: issues.is_empty(),
         restart_required: settings_patch_requires_restart(&patch),
@@ -692,6 +722,13 @@ pub(super) async fn patch_settings(
     Json(patch): Json<PersistentSettingsPatch>,
 ) -> Result<Json<SettingsResponse>> {
     let result: Result<SettingsResponse> = async {
+        let secret_issues = validate_settings_secret_references(&s.repository, &patch).await;
+        if let Some(issue) = secret_issues.into_iter().next() {
+            return Err(crate::error::RavynError::Invalid(format!(
+                "{}: {}",
+                issue.field, issue.message
+            )));
+        }
         let restart_required = settings_patch_requires_restart(&patch);
         let mut values = s
             .repository
@@ -858,5 +895,30 @@ mod settings_validation_tests {
         assert!(fields.contains(&"max_torrent_mib"), "{fields:?}");
         assert!(!fields.contains(&"max_retries"), "{fields:?}");
         assert!(issues.iter().all(|issue| !issue.message.trim().is_empty()));
+    }
+
+    #[test]
+    fn rqbit_executable_changes_are_reported_as_restart_required() {
+        let patch = PersistentSettingsPatch {
+            rqbit: Some(std::path::PathBuf::from("custom-rqbit.exe")),
+            auto_provision: Some(false),
+            ..Default::default()
+        };
+        assert!(settings_patch_requires_restart(&patch));
+
+        let config = crate::config::Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            "data",
+            "--download-dir",
+            "downloads",
+        ])
+        .unwrap();
+        let response = settings_response(PersistentSettings::from_config(&config), false);
+        assert_eq!(response.application.get("rqbit"), Some(&"backend_restart"));
+        assert_eq!(
+            response.application.get("auto_provision"),
+            Some(&"backend_restart")
+        );
     }
 }

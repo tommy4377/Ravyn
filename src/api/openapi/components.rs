@@ -453,6 +453,25 @@ pub(super) fn schemas() -> Value {
                 "manifest_provider": {"type": "string"}
             }
         },
+        "ComponentManifestStatus": {
+            "type": "object",
+            "required": ["configured", "phase", "channel", "source", "stale"],
+            "properties": {
+                "configured": {"type": "boolean"},
+                "phase": {"type": "string", "enum": ["disabled", "idle", "checking", "current", "stale", "error"]},
+                "channel": {"type": "string"},
+                "endpoint": {"type": ["string", "null"], "format": "uri"},
+                "source": {"type": "string", "enum": ["built-in", "remote-cache"]},
+                "manifest_version": {"type": ["integer", "null"], "minimum": 1},
+                "generated_at": {"type": ["string", "null"], "format": "date-time"},
+                "expires_at": {"type": ["string", "null"], "format": "date-time"},
+                "stale": {"type": "boolean"},
+                "etag": {"type": ["string", "null"]},
+                "last_checked_at": {"type": ["string", "null"], "format": "date-time"},
+                "last_updated_at": {"type": ["string", "null"], "format": "date-time"},
+                "last_error": {"type": ["string", "null"]}
+            }
+        },
         "FeatureStatus": {
             "type": "object",
             "required": ["feature", "enabled", "satisfied", "required_components"],
@@ -460,22 +479,26 @@ pub(super) fn schemas() -> Value {
                 "feature": {"type": "string", "enum": ["standard_downloads", "video_extraction", "media_merging", "torrent_support", "archive_extraction"]},
                 "enabled": {"type": "boolean"},
                 "satisfied": {"type": "boolean"},
-                "required_components": {"type": "array", "items": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]}}
+                "required_components": {"type": "array", "items": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]}}
             }
         },
         "ComponentStatus": {
             "type": "object",
-            "required": ["component", "state", "enabled"],
+            "required": ["component", "state", "enabled", "rollback_available"],
             "properties": {
-                "component": {"type": "string", "enum": ["yt-dlp", "ffmpeg", "rqbit", "7zip"]},
-                "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "custom_path"]},
+                "component": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]},
+                "state": {"type": "string", "enum": ["not_installed", "queued", "downloading", "verifying", "installing", "installed", "update_available", "failed", "unsupported", "cancelled", "custom_path", "custom_path_invalid"]},
                 "enabled": {"type": "boolean"},
                 "managed_version": {"type": ["string", "null"]},
+                "detected_version": {"type": ["string", "null"]},
                 "managed_path": {"type": ["string", "null"]},
                 "custom_path": {"type": ["string", "null"]},
                 "effective_path": {"type": ["string", "null"]},
+                "available_version": {"type": ["string", "null"]},
+                "rollback_available": {"type": "boolean"},
                 "error_message": {"type": ["string", "null"]},
                 "last_checked_at": {"type": ["string", "null"], "format": "date-time"},
+                "verified_at": {"type": ["string", "null"], "format": "date-time"},
                 "install_started_at": {"type": ["string", "null"], "format": "date-time"},
                 "install_completed_at": {"type": ["string", "null"], "format": "date-time"}
             }
@@ -496,10 +519,94 @@ pub(super) fn schemas() -> Value {
                 "enabled": {"type": "boolean"}
             }
         },
+        "SetupState": {
+            "type": "object",
+            "required": ["completed", "lifecycle", "ready_to_complete", "restart_required", "app_version", "platform", "features_selected", "library_prepared", "data_dir", "integration_consent"],
+            "properties": {
+                "completed": {"type": "boolean"},
+                "lifecycle": {"type": "string", "enum": ["not_started", "in_progress", "restart_required", "ready_to_complete", "completed"]},
+                "ready_to_complete": {"type": "boolean"},
+                "restart_required": {"type": "boolean"},
+                "completed_at": {"type": ["string", "null"], "format": "date-time"},
+                "completed_app_version": {"type": ["string", "null"]},
+                "app_version": {"type": "string"},
+                "platform": {"type": "string"},
+                "setup_profile": {"type": ["string", "null"], "enum": ["minimal", "recommended", "full", "custom", null]},
+                "features_selected": {"type": "boolean"},
+                "library_root": {"type": ["string", "null"]},
+                "library_prepared": {"type": "boolean"},
+                "data_dir": {"type": "string"},
+                "installation": {"type": ["object", "null"], "properties": {
+                    "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                    "installed_exe": {"type": ["string", "null"]},
+                    "installed_version": {"type": ["string", "null"]},
+                    "installed_sha256": {"type": ["string", "null"]},
+                    "integration_completed": {"type": "boolean"},
+                    "integration_errors": {"type": "array", "items": {"type": "string"}},
+                    "relaunch_pending": {"type": "boolean"}
+                }},
+                "integration_consent": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/SetupIntegrationConsent"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        },
+        "SetupIntegrationConsent": {
+            "type": "object",
+            "required": ["id", "installation_mode", "install_application", "register_installed_app", "start_menu_shortcut", "desktop_shortcut", "launch_at_startup", "launch_after_setup", "consented_at"],
+            "properties": {
+                "id": {"type": "string", "format": "uuid"},
+                "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                "install_application": {"type": "boolean"},
+                "register_installed_app": {"type": "boolean"},
+                "start_menu_shortcut": {"type": "boolean"},
+                "desktop_shortcut": {"type": "boolean"},
+                "launch_at_startup": {"type": "boolean"},
+                "launch_after_setup": {"type": "boolean"},
+                "consented_at": {"type": "string", "format": "date-time"}
+            }
+        },
+        "SaveIntegrationConsent": {
+            "type": "object",
+            "required": ["installation_mode", "install_application", "register_installed_app", "start_menu_shortcut", "desktop_shortcut", "launch_at_startup", "launch_after_setup"],
+            "properties": {
+                "installation_mode": {"type": "string", "enum": ["installed", "portable", "development"]},
+                "install_application": {"type": "boolean"},
+                "register_installed_app": {"type": "boolean"},
+                "start_menu_shortcut": {"type": "boolean"},
+                "desktop_shortcut": {"type": "boolean"},
+                "launch_at_startup": {"type": "boolean"},
+                "launch_after_setup": {"type": "boolean"}
+            }
+        },
+        "PrepareLibraryResult": {
+            "type": "object",
+            "required": ["path", "existed", "directories", "restart_required"],
+            "properties": {
+                "path": {"type": "string"},
+                "existed": {"type": "boolean"},
+                "directories": {"type": "array", "items": {"type": "string"}},
+                "available_bytes": {"type": ["integer", "null"], "minimum": 0},
+                "restart_required": {"type": "boolean"}
+            }
+        },
         "InstallComponentRequest": {
             "type": "object",
             "properties": {
                 "force": {"type": "boolean", "default": false}
+            }
+        },
+        "ComponentHealth": {
+            "type": "object",
+            "required": ["component", "healthy"],
+            "properties": {
+                "component": {"type": "string", "enum": ["ytdlp", "ffmpeg", "rqbit", "seven_zip"]},
+                "healthy": {"type": "boolean"},
+                "path": {"type": ["string", "null"]},
+                "version": {"type": ["string", "null"]},
+                "message": {"type": ["string", "null"]}
             }
         }
     })

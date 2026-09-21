@@ -17,7 +17,12 @@ pub struct Config {
     /// Optional root for the organized Ravyn library.
     #[arg(long, env = "RAVYN_LIBRARY_ROOT")]
     pub library_root: Option<PathBuf>,
-    #[arg(long, env = "RAVYN_LIBRARY_AUTO_ORGANIZE", default_value_t = true)]
+    #[arg(
+        long,
+        env = "RAVYN_LIBRARY_AUTO_ORGANIZE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
     pub library_auto_organize: bool,
     /// Persistent extension-to-category overrides loaded from runtime settings.
     #[arg(skip)]
@@ -115,8 +120,35 @@ pub struct Config {
     #[arg(long, env = "RAVYN_7Z", default_value = "7z")]
     pub seven_zip: PathBuf,
     /// Automatically download managed engine binaries for enabled features at startup.
-    #[arg(long, env = "RAVYN_AUTO_PROVISION", default_value_t = true)]
+    #[arg(
+        long,
+        env = "RAVYN_AUTO_PROVISION",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
     pub auto_provision: bool,
+    /// Optional HTTPS endpoint serving a signed component manifest. Release
+    /// builds may also provide RAVYN_COMPONENT_MANIFEST_ENDPOINT at compile time.
+    #[arg(long, env = "RAVYN_COMPONENT_MANIFEST_ENDPOINT")]
+    pub component_manifest_endpoint: Option<String>,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_CHANNEL",
+        default_value = "stable"
+    )]
+    pub component_manifest_channel: String,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_REFRESH_SECS",
+        default_value_t = 21_600
+    )]
+    pub component_manifest_refresh_secs: u64,
+    #[arg(
+        long,
+        env = "RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS",
+        default_value_t = 604_800
+    )]
+    pub component_manifest_stale_grace_secs: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_MIB", default_value_t = 10_240)]
     pub max_extract_mib: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_FILES", default_value_t = 100_000)]
@@ -160,6 +192,17 @@ impl Config {
     }
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs)
+    }
+    pub fn effective_component_manifest_endpoint(&self) -> Option<&str> {
+        self.component_manifest_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                option_env!("RAVYN_COMPONENT_MANIFEST_ENDPOINT")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
     }
     pub fn effective_cookie_dir(&self) -> PathBuf {
         self.cookie_dir
@@ -309,6 +352,36 @@ impl Config {
             return Err(crate::error::RavynError::Invalid(
                 "RAVYN_HOST_CIRCUIT_COOLDOWN_SECS must be between 1 and 86400".into(),
             ));
+        }
+        if self.component_manifest_channel != "stable" {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_CHANNEL currently supports only stable".into(),
+            ));
+        }
+        if self.component_manifest_refresh_secs < 300
+            || self.component_manifest_refresh_secs > 604_800
+        {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_REFRESH_SECS must be between 300 and 604800".into(),
+            ));
+        }
+        if self.component_manifest_stale_grace_secs > 2_592_000 {
+            return Err(crate::error::RavynError::Invalid(
+                "RAVYN_COMPONENT_MANIFEST_STALE_GRACE_SECS may not exceed 2592000".into(),
+            ));
+        }
+        if let Some(endpoint) = self.effective_component_manifest_endpoint() {
+            let endpoint = url::Url::parse(endpoint)?;
+            if endpoint.scheme() != "https"
+                || endpoint.host_str().is_none()
+                || !endpoint.username().is_empty()
+                || endpoint.password().is_some()
+                || endpoint.fragment().is_some()
+            {
+                return Err(crate::error::RavynError::Invalid(
+                    "RAVYN_COMPONENT_MANIFEST_ENDPOINT must be an HTTPS URL without credentials or fragments".into(),
+                ));
+            }
         }
         if self.max_extract_mib == 0 || self.max_extract_mib > 1_048_576 {
             return Err(crate::error::RavynError::Invalid(
@@ -489,6 +562,8 @@ pub struct PersistentSettings {
     pub bandwidth_schedule: BandwidthSchedule,
     pub ytdlp: PathBuf,
     pub ffmpeg: PathBuf,
+    #[serde(default = "default_rqbit")]
+    pub rqbit: PathBuf,
     pub rqbit_api: String,
     pub rqbit_credentials_secret_id: Option<uuid::Uuid>,
     pub seven_zip: PathBuf,
@@ -578,6 +653,9 @@ fn default_media_probe_timeout_secs() -> u64 {
 fn default_media_probe_max_mib() -> usize {
     32
 }
+fn default_rqbit() -> PathBuf {
+    PathBuf::from("rqbit")
+}
 fn default_rqbit_timeout_secs() -> u64 {
     120
 }
@@ -625,6 +703,7 @@ pub struct PersistentSettingsPatch {
     pub bandwidth_schedule: Option<BandwidthSchedule>,
     pub ytdlp: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
+    pub rqbit: Option<PathBuf>,
     pub rqbit_api: Option<String>,
     pub rqbit_credentials_secret_id: Option<Option<uuid::Uuid>>,
     pub seven_zip: Option<PathBuf>,
@@ -671,6 +750,7 @@ impl PersistentSettings {
             bandwidth_schedule: BandwidthSchedule::default(),
             ytdlp: config.ytdlp.clone(),
             ffmpeg: config.ffmpeg.clone(),
+            rqbit: config.rqbit.clone(),
             rqbit_api: config.rqbit_api.clone(),
             rqbit_credentials_secret_id: config.rqbit_credentials_secret_id,
             seven_zip: config.seven_zip.clone(),
@@ -716,6 +796,7 @@ impl PersistentSettings {
         config.global_speed_limit_bps = self.global_speed_limit_bps;
         config.ytdlp = self.ytdlp.clone();
         config.ffmpeg = self.ffmpeg.clone();
+        config.rqbit = self.rqbit.clone();
         config.rqbit_api = self.rqbit_api.clone();
         config.rqbit_credentials_secret_id = self.rqbit_credentials_secret_id;
         config.seven_zip = self.seven_zip.clone();
@@ -784,6 +865,9 @@ impl PersistentSettings {
         }
         if let Some(value) = patch.ffmpeg {
             self.ffmpeg = value;
+        }
+        if let Some(value) = patch.rqbit {
+            self.rqbit = value;
         }
         if let Some(value) = patch.rqbit_api {
             self.rqbit_api = value;
@@ -890,6 +974,7 @@ mod tests {
             "global_speed_limit_bps":0,
             "ytdlp":"yt-dlp",
             "ffmpeg":"ffmpeg",
+            "rqbit":"rqbit",
             "rqbit_api":"http://127.0.0.1:3030",
             "rqbit_credentials_secret_id":null,
             "seven_zip":"7z",

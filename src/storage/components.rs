@@ -16,7 +16,7 @@ impl Repository {
     pub async fn load_component_records(
         &self,
     ) -> Result<BTreeMap<ComponentId, PersistedComponent>> {
-        let rows = sqlx::query("SELECT component,state,managed_version,managed_path,custom_path,error_message,last_checked_at,install_started_at,install_completed_at FROM component_states")
+        let rows = sqlx::query("SELECT component,state,managed_version,detected_version,managed_path,custom_path,error_message,last_checked_at,verified_at,install_started_at,install_completed_at FROM component_states")
             .fetch_all(self.pool())
             .await?;
 
@@ -27,10 +27,12 @@ impl Repository {
             let state_str: String = row.try_get("state")?;
             let state = parse_component_state(&state_str)?;
             let managed_version: Option<String> = row.try_get("managed_version")?;
+            let detected_version: Option<String> = row.try_get("detected_version")?;
             let managed_path: Option<String> = row.try_get("managed_path")?;
             let custom_path: Option<String> = row.try_get("custom_path")?;
             let error_message: Option<String> = row.try_get("error_message")?;
             let last_checked_at: Option<chrono::DateTime<Utc>> = row.try_get("last_checked_at")?;
+            let verified_at: Option<chrono::DateTime<Utc>> = row.try_get("verified_at")?;
             let install_started_at: Option<chrono::DateTime<Utc>> =
                 row.try_get("install_started_at")?;
             let install_completed_at: Option<chrono::DateTime<Utc>> =
@@ -42,10 +44,12 @@ impl Repository {
                     component,
                     state,
                     managed_version,
+                    detected_version,
                     managed_path: managed_path.map(std::path::PathBuf::from),
                     custom_path: custom_path.map(std::path::PathBuf::from),
                     error_message,
                     last_checked_at,
+                    verified_at,
                     install_started_at,
                     install_completed_at,
                 },
@@ -60,6 +64,7 @@ impl Repository {
         let state = serde_json::to_string(&record.state)?;
         let state_trimmed = state.trim_matches('"');
         let managed_version = &record.managed_version;
+        let detected_version = &record.detected_version;
         let managed_path = record
             .managed_path
             .as_ref()
@@ -72,15 +77,17 @@ impl Repository {
         let now = Utc::now();
 
         sqlx::query(
-            "INSERT INTO component_states(component,state,managed_version,managed_path,custom_path,error_message,last_checked_at,install_started_at,install_completed_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO component_states(component,state,managed_version,detected_version,managed_path,custom_path,error_message,last_checked_at,verified_at,install_started_at,install_completed_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(component) DO UPDATE SET
                state=excluded.state,
                managed_version=excluded.managed_version,
+               detected_version=excluded.detected_version,
                managed_path=excluded.managed_path,
                custom_path=excluded.custom_path,
                error_message=excluded.error_message,
                last_checked_at=excluded.last_checked_at,
+               verified_at=excluded.verified_at,
                install_started_at=excluded.install_started_at,
                install_completed_at=excluded.install_completed_at,
                updated_at=excluded.updated_at",
@@ -88,13 +95,39 @@ impl Repository {
         .bind(component)
         .bind(state_trimmed)
         .bind(managed_version)
+        .bind(detected_version)
         .bind(managed_path)
         .bind(custom_path)
         .bind(error_message)
         .bind(record.last_checked_at)
+        .bind(record.verified_at)
         .bind(record.install_started_at)
         .bind(record.install_completed_at)
         .bind(now)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Update only the lifecycle state of an existing component operation.
+    pub async fn update_component_lifecycle(
+        &self,
+        component: ComponentId,
+        state: ComponentState,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let state = serde_json::to_string(&state)?;
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE component_states
+             SET state=?, error_message=?, last_checked_at=?, updated_at=?
+             WHERE component=?",
+        )
+        .bind(state.trim_matches('"'))
+        .bind(error_message)
+        .bind(now)
+        .bind(now)
+        .bind(component.engine_name())
         .execute(self.pool())
         .await?;
         Ok(())
@@ -205,4 +238,39 @@ mod tests {
         );
         assert!(parse_component_state("unknown").is_err());
     }
+    #[tokio::test]
+    async fn component_health_metadata_round_trips() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("components.sqlite3");
+        let repository = Repository::connect(&format!("sqlite://{}", database.display()))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        repository
+            .save_component_record(&PersistedComponent {
+                component: ComponentId::Ytdlp,
+                state: ComponentState::Installed,
+                managed_version: Some("2026.07.04".into()),
+                detected_version: Some("2026.07.04".into()),
+                managed_path: Some(temporary.path().join("yt-dlp")),
+                custom_path: None,
+                error_message: None,
+                last_checked_at: Some(now),
+                verified_at: Some(now),
+                install_started_at: Some(now),
+                install_completed_at: Some(now),
+            })
+            .await
+            .unwrap();
+
+        let record = repository
+            .load_component_records()
+            .await
+            .unwrap()
+            .remove(&ComponentId::Ytdlp)
+            .unwrap();
+        assert_eq!(record.detected_version.as_deref(), Some("2026.07.04"));
+        assert_eq!(record.verified_at, Some(now));
+    }
+
 }

@@ -1,24 +1,32 @@
 # Ravyn
 
-Ravyn is a Rust download manager focused on reliable transfers, managed media engines and an organized local download library.
+Ravyn is a Rust download manager with a native Windows desktop application built with Tauri 2 and Svelte 5.
+
+## Product surfaces
+
+- **Rust backend** — transfers, queueing, engines, automation, library and HTTP API.
+- **Tauri desktop** — native setup, lifecycle and Windows integration.
+- **Svelte frontend** — downloads, library, media, torrents, automation and settings.
 
 ## Highlights
 
-- Segmented and resumable HTTP transfers.
-- Persistent queue, schedules, rules, priorities and tags.
-- Managed yt-dlp, FFmpeg and rqbit provisioning with integrity checks.
-- Automatic library organization for videos, music, documents, images, archives and torrents.
-- Duplicate detection, SHA-256 identity and verified local cache reuse.
-- Presets, filename templates, basket workflows and library import/repair.
-- REST API, replayable events, metrics and database backup support.
+- Resumable segmented transfers with persistent recovery.
+- Managed yt-dlp, FFmpeg and rqbit engines.
+- Organized download library, presets, templates and basket workflows.
+- Native Windows setup and application integration.
+- Fluent-inspired desktop interface with responsive list/detail layouts.
+- REST API and replayable server-sent events.
 
-## Development
+## Build
 
 ```bash
-cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
+npm ci --prefix frontend
+npm run check --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+
+cargo test --locked --workspace --all-targets
+cargo build --locked -p ravyn-desktop
 ```
 
 ## Maintainer
