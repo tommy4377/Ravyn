@@ -25,7 +25,7 @@
     "test:fixtures": "node test-pages/server.mjs"
   },
   "devDependencies": {
-    "@eslint/js": "^9.31.0",
+    "@eslint/js": "^10.0.1",
     "@types/firefox-webext-browser": "^143.0.0",
     "@types/node": "^24.0.15",
     "esbuild": "^0.25.6",
