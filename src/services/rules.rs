@@ -236,6 +236,7 @@ mod tests {
     #[test]
     fn higher_priority_scalar_action_wins() {
         let mut request = CreateJob {
+            preset_id: None,
             kind: crate::core::models::JobKind::Http,
             source: "https://example.com/file.bin".into(),
             destination: None,
@@ -296,6 +297,7 @@ mod tests {
 
     fn base_request() -> CreateJob {
         CreateJob {
+            preset_id: None,
             kind: crate::core::models::JobKind::Http,
             source: "https://example.com/file.bin".into(),
             destination: None,

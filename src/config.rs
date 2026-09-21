@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,14 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[arg(long, env = "RAVYN_DOWNLOAD_DIR")]
     pub download_dir: Option<PathBuf>,
+    /// Optional root for the organized Ravyn library.
+    #[arg(long, env = "RAVYN_LIBRARY_ROOT")]
+    pub library_root: Option<PathBuf>,
+    #[arg(long, env = "RAVYN_LIBRARY_AUTO_ORGANIZE", default_value_t = true)]
+    pub library_auto_organize: bool,
+    /// Persistent extension-to-category overrides loaded from runtime settings.
+    #[arg(skip)]
+    pub library_category_overrides: BTreeMap<String, crate::services::library::LibraryCategory>,
     #[arg(long, env = "RAVYN_COOKIE_DIR")]
     pub cookie_dir: Option<PathBuf>,
     #[arg(long, env = "RAVYN_LISTEN", default_value = "127.0.0.1:47821")]
@@ -106,6 +114,9 @@ pub struct Config {
     pub avif_quality: u8,
     #[arg(long, env = "RAVYN_7Z", default_value = "7z")]
     pub seven_zip: PathBuf,
+    /// Automatically download managed engine binaries for enabled features at startup.
+    #[arg(long, env = "RAVYN_AUTO_PROVISION", default_value_t = true)]
+    pub auto_provision: bool,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_MIB", default_value_t = 10_240)]
     pub max_extract_mib: u64,
     #[arg(long, env = "RAVYN_MAX_EXTRACT_FILES", default_value_t = 100_000)]
@@ -116,6 +127,15 @@ pub struct Config {
     pub max_extract_ratio: u64,
 }
 
+fn platform_downloads_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    home.map(|path| path.join("Downloads"))
+}
+
 impl Config {
     pub fn database_url(&self) -> String {
         format!("sqlite://{}", self.data_dir.join("ravyn.sqlite3").display())
@@ -124,6 +144,19 @@ impl Config {
         self.download_dir
             .clone()
             .unwrap_or_else(|| self.data_dir.join("downloads"))
+    }
+    /// Returns the configured library root or a safe platform-aware default.
+    ///
+    /// Explicit download directories keep test and portable deployments self-contained;
+    /// otherwise Ravyn uses the current user's Downloads directory when available.
+    pub fn effective_library_root(&self) -> Option<PathBuf> {
+        Some(self.library_root.clone().unwrap_or_else(|| {
+            self.download_dir
+                .clone()
+                .or_else(platform_downloads_directory)
+                .unwrap_or_else(|| self.data_dir.join("downloads"))
+                .join("Ravyn")
+        }))
     }
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs)
@@ -297,17 +330,26 @@ impl Config {
                 "RAVYN_MAX_EXTRACT_RATIO must be between 1 and 1000000".into(),
             ));
         }
+        crate::services::library::validate_category_overrides(&self.library_category_overrides)?;
+        Ok(())
+    }
+
+    /// Creates only the directories required before persistent settings can be loaded.
+    ///
+    /// The library layout is intentionally deferred until settings have been applied so
+    /// startup never creates an unused default `Downloads/Ravyn` directory.
+    pub(crate) async fn prepare_bootstrap_directories(&self) -> Result<()> {
+        fs::create_dir_all(&self.data_dir).await?;
+        fs::create_dir_all(self.effective_download_dir()).await?;
+        fs::create_dir_all(self.effective_cookie_dir()).await?;
         Ok(())
     }
 
     pub async fn prepare_directories(&self) -> Result<()> {
-        fs::create_dir_all(&self.data_dir).await?;
-        let download_dir = self
-            .download_dir
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("downloads"));
-        fs::create_dir_all(download_dir).await?;
-        fs::create_dir_all(self.effective_cookie_dir()).await?;
+        self.prepare_bootstrap_directories().await?;
+        if let Some(root) = self.effective_library_root() {
+            crate::services::library::prepare_library_layout(&root).await?;
+        }
         Ok(())
     }
 }
@@ -432,6 +474,12 @@ impl BandwidthSchedule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentSettings {
     pub download_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub library_root: Option<PathBuf>,
+    #[serde(default = "default_library_auto_organize")]
+    pub library_auto_organize: bool,
+    #[serde(default)]
+    pub library_category_overrides: BTreeMap<String, crate::services::library::LibraryCategory>,
     pub max_active: usize,
     pub max_segments: usize,
     pub segment_threshold_mib: u64,
@@ -444,6 +492,8 @@ pub struct PersistentSettings {
     pub rqbit_api: String,
     pub rqbit_credentials_secret_id: Option<uuid::Uuid>,
     pub seven_zip: PathBuf,
+    #[serde(default = "default_auto_provision")]
+    pub auto_provision: bool,
     pub max_extract_mib: u64,
     pub max_extract_files: usize,
     pub max_extract_depth: usize,
@@ -492,6 +542,9 @@ pub struct PersistentSettings {
     pub api_rate_limit_burst: u64,
 }
 
+fn default_library_auto_organize() -> bool {
+    true
+}
 fn default_max_retries() -> u32 {
     4
 }
@@ -540,6 +593,9 @@ fn default_image_converter() -> PathBuf {
 fn default_avif_quality() -> u8 {
     65
 }
+fn default_auto_provision() -> bool {
+    true
+}
 
 fn default_api_request_timeout_secs() -> u64 {
     120
@@ -554,9 +610,13 @@ fn default_api_rate_limit_burst() -> u64 {
     200
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistentSettingsPatch {
     pub download_dir: Option<Option<PathBuf>>,
+    pub library_root: Option<Option<PathBuf>>,
+    pub library_auto_organize: Option<bool>,
+    pub library_category_overrides:
+        Option<BTreeMap<String, crate::services::library::LibraryCategory>>,
     pub max_active: Option<usize>,
     pub max_segments: Option<usize>,
     pub segment_threshold_mib: Option<u64>,
@@ -568,6 +628,7 @@ pub struct PersistentSettingsPatch {
     pub rqbit_api: Option<String>,
     pub rqbit_credentials_secret_id: Option<Option<uuid::Uuid>>,
     pub seven_zip: Option<PathBuf>,
+    pub auto_provision: Option<bool>,
     pub max_extract_mib: Option<u64>,
     pub max_extract_files: Option<usize>,
     pub max_extract_depth: Option<usize>,
@@ -599,6 +660,9 @@ impl PersistentSettings {
     pub fn from_config(config: &Config) -> Self {
         Self {
             download_dir: config.download_dir.clone(),
+            library_root: config.library_root.clone(),
+            library_auto_organize: config.library_auto_organize,
+            library_category_overrides: config.library_category_overrides.clone(),
             max_active: config.max_active,
             max_segments: config.max_segments,
             segment_threshold_mib: config.segment_threshold_mib,
@@ -610,6 +674,7 @@ impl PersistentSettings {
             rqbit_api: config.rqbit_api.clone(),
             rqbit_credentials_secret_id: config.rqbit_credentials_secret_id,
             seven_zip: config.seven_zip.clone(),
+            auto_provision: config.auto_provision,
             max_extract_mib: config.max_extract_mib,
             max_extract_files: config.max_extract_files,
             max_extract_depth: config.max_extract_depth,
@@ -641,6 +706,9 @@ impl PersistentSettings {
     pub fn apply_to(&self, config: &mut Config) -> Result<()> {
         self.bandwidth_schedule.validate()?;
         config.download_dir = self.download_dir.clone();
+        config.library_root = self.library_root.clone();
+        config.library_auto_organize = self.library_auto_organize;
+        config.library_category_overrides = self.library_category_overrides.clone();
         config.max_active = self.max_active;
         config.max_segments = self.max_segments;
         config.segment_threshold_mib = self.segment_threshold_mib;
@@ -651,6 +719,7 @@ impl PersistentSettings {
         config.rqbit_api = self.rqbit_api.clone();
         config.rqbit_credentials_secret_id = self.rqbit_credentials_secret_id;
         config.seven_zip = self.seven_zip.clone();
+        config.auto_provision = self.auto_provision;
         config.max_extract_mib = self.max_extract_mib;
         config.max_extract_files = self.max_extract_files;
         config.max_extract_depth = self.max_extract_depth;
@@ -682,6 +751,15 @@ impl PersistentSettings {
     pub fn merge(&mut self, patch: PersistentSettingsPatch) {
         if let Some(value) = patch.download_dir {
             self.download_dir = value;
+        }
+        if let Some(value) = patch.library_root {
+            self.library_root = value;
+        }
+        if let Some(value) = patch.library_auto_organize {
+            self.library_auto_organize = value;
+        }
+        if let Some(value) = patch.library_category_overrides {
+            self.library_category_overrides = value;
         }
         if let Some(value) = patch.max_active {
             self.max_active = value;
@@ -715,6 +793,9 @@ impl PersistentSettings {
         }
         if let Some(value) = patch.seven_zip {
             self.seven_zip = value;
+        }
+        if let Some(value) = patch.auto_provision {
+            self.auto_provision = value;
         }
         if let Some(value) = patch.max_extract_mib {
             self.max_extract_mib = value;
@@ -825,6 +906,45 @@ mod tests {
         assert_eq!(settings.api_max_concurrent_requests, 128);
         assert_eq!(settings.api_rate_limit_per_minute, 1_200);
         assert_eq!(settings.api_rate_limit_burst, 200);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_directory_preparation_defers_the_library_layout() {
+        let temporary = tempfile::tempdir().unwrap();
+        let downloads = temporary.path().join("Downloads");
+        let config = Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            temporary.path().join("data").to_str().unwrap(),
+            "--download-dir",
+            downloads.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        config.prepare_bootstrap_directories().await.unwrap();
+        assert!(downloads.is_dir());
+        assert!(!downloads.join("Ravyn").exists());
+    }
+
+    #[tokio::test]
+    async fn prepares_an_automatic_ravyn_library_below_an_explicit_download_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let downloads = temporary.path().join("Downloads");
+        let config = Config::try_parse_from([
+            "ravyn",
+            "--data-dir",
+            temporary.path().join("data").to_str().unwrap(),
+            "--download-dir",
+            downloads.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        config.prepare_directories().await.unwrap();
+        let root = config.effective_library_root().unwrap();
+        assert_eq!(root, downloads.join("Ravyn"));
+        for directory in crate::services::library::LIBRARY_DIRECTORIES {
+            assert!(root.join(directory).is_dir(), "{directory}");
+        }
     }
 
     #[test]

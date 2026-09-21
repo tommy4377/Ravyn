@@ -1,23 +1,16 @@
 # Ravyn
 
-Ravyn is a high-performance download manager backend written in Rust.
+Ravyn is a Rust download manager focused on reliable transfers, managed media engines and an organized local download library.
 
-## Core capabilities
+## Highlights
 
-- Segmented HTTP downloads with strict range validation and resume support.
-- Persistent SQLite queue with pause, resume, cancel, retry and recovery.
-- Global and per-host concurrency and bandwidth controls.
-- yt-dlp, FFmpeg and rqbit integration.
-- REST API, server-sent events, readiness checks and metrics.
-- Checksum verification and post-processing pipelines.
-
-## Run
-
-```bash
-cargo run --release -- --data-dir ./ravyn-data --listen 127.0.0.1:47821
-```
-
-The API binds to loopback by default.
+- Segmented and resumable HTTP transfers.
+- Persistent queue, schedules, rules, priorities and tags.
+- Managed yt-dlp, FFmpeg and rqbit provisioning with integrity checks.
+- Automatic library organization for videos, music, documents, images, archives and torrents.
+- Duplicate detection, SHA-256 identity and verified local cache reuse.
+- Presets, filename templates, basket workflows and library import/repair.
+- REST API, replayable events, metrics and database backup support.
 
 ## Development
 

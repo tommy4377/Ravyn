@@ -77,6 +77,7 @@ impl JobManager {
         options.media = Some(media);
         let retry = self
             .create(CreateJob {
+                preset_id: None,
                 kind: JobKind::Media,
                 source,
                 destination: Some(parent.destination.clone().into()),

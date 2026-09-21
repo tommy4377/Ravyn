@@ -52,6 +52,8 @@ pub struct ApiState {
     pub manager: Arc<JobManager>,
     pub base_config: Arc<crate::config::Config>,
     pub protection: super::ApiProtectionState,
+    pub library_import_status: crate::services::library::SharedImportStatus,
+    pub provisioning_cancellation: tokio_util::sync::CancellationToken,
 }
 
 async fn audited<T>(
@@ -117,6 +119,49 @@ pub fn router(state: ApiState) -> Router {
             get(get_job).patch(update_job).delete(delete_job),
         )
         .route("/v1/jobs/{id}/outputs", get(list_job_outputs))
+        .route("/v1/library", get(list_library))
+        .route("/v1/library/duplicates", get(find_library_duplicates))
+        .route(
+            "/v1/library/{id}",
+            get(get_library_entry).delete(delete_library_entry),
+        )
+        .route("/v1/library/{id}/restore", post(restore_library_entry))
+        .route("/v1/templates/preview", post(preview_template))
+        .route(
+            "/v1/library/import",
+            get(library_import_status).post(start_library_import),
+        )
+        .route("/v1/library/verify", post(verify_library))
+        .route("/v1/library/relocate", post(relocate_library))
+        .route("/v1/presets", get(list_presets).post(create_preset))
+        .route(
+            "/v1/presets/{id}",
+            get(get_preset).put(update_preset).delete(delete_preset),
+        )
+        .route(
+            "/v1/basket",
+            get(list_basket).post(add_basket_item).delete(clear_basket),
+        )
+        .route(
+            "/v1/basket/{id}",
+            axum::routing::patch(update_basket_item).delete(delete_basket_item),
+        )
+        .route("/v1/basket/reorder", post(reorder_basket))
+        .route("/v1/basket/start", post(start_basket))
+        .route("/v1/profiles", get(list_profiles).post(create_profile))
+        .route(
+            "/v1/profiles/{id}",
+            get(get_profile).put(update_profile).delete(delete_profile),
+        )
+        .route("/v1/profiles/{id}/activate", post(activate_profile))
+        .route("/v1/trust/preview", post(preview_trust))
+        .route("/v1/jobs/{id}/trust", get(job_trust))
+        .route(
+            "/v1/system/cleanup-policies",
+            get(get_cleanup_policies).put(put_cleanup_policies),
+        )
+        .route("/v1/system/cleanup", post(run_library_cleanup))
+        .route("/v1/statistics", get(personal_statistics))
         .route("/v1/jobs/{id}/media-items", get(list_media_items))
         .route(
             "/v1/jobs/{id}/media-items/{item_id}/outputs",
@@ -229,6 +274,15 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/browser/sniff", post(sniff_page))
         .route("/v1/browser/import", post(import_browser_resources))
+        .route("/v1/components", get(list_components))
+        .route("/v1/components/features", post(save_feature_selections))
+        .route(
+            "/v1/components/{id}",
+            axum::routing::delete(remove_component),
+        )
+        .route("/v1/components/{id}/install", post(install_component))
+        .route("/v1/components/{id}/rollback", post(rollback_component))
+        .route("/v1/components/{id}/cancel", post(cancel_installation))
         .route("/v1/events", get(events))
         .with_state(state)
 }
@@ -243,9 +297,13 @@ fn import_status(result: &ImportResult) -> StatusCode {
 
 mod automation;
 mod browser;
+mod components;
 mod jobs;
+mod library;
 mod media;
 mod system;
 mod torrents;
 
-use self::{automation::*, browser::*, jobs::*, media::*, system::*, torrents::*};
+use self::{
+    automation::*, browser::*, components::*, jobs::*, library::*, media::*, system::*, torrents::*,
+};
