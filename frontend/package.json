@@ -15,7 +15,7 @@
     "@tauri-apps/plugin-dialog": "^2.4.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@testing-library/svelte": "^5.4.2",
     "@tsconfig/svelte": "^5.0.4",
     "jsdom": "^29.1.1",
