@@ -74,7 +74,7 @@ jobs:
           npm run check --prefix extension
           npm run package:verify --prefix extension
       - name: Upload extension validation artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ravyn-firefox-validation
           path: extension/artifacts/*
