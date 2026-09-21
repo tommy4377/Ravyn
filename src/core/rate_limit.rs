@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 pub struct RateLimiter {
     bytes_per_second: AtomicU64,
     state: Mutex<State>,
+    on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 struct State {
@@ -20,12 +21,20 @@ struct State {
 
 impl RateLimiter {
     pub fn new(bytes_per_second: u64) -> Self {
+        Self::with_activity_hook(bytes_per_second, None)
+    }
+
+    pub(crate) fn with_activity_hook(
+        bytes_per_second: u64,
+        on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         Self {
             bytes_per_second: AtomicU64::new(bytes_per_second),
             state: Mutex::new(State {
                 available: bytes_per_second as f64,
                 updated_at: Instant::now(),
             }),
+            on_activity,
         }
     }
 
@@ -39,13 +48,19 @@ impl RateLimiter {
     }
 
     pub async fn consume(&self, bytes: usize) {
-        let configured = self.bytes_per_second();
-        if configured == 0 || bytes == 0 {
+        if bytes == 0 {
             return;
         }
-        let capacity = configured as f64;
         let mut remaining = bytes as f64;
         while remaining > 0.0 {
+            if let Some(on_activity) = &self.on_activity {
+                on_activity();
+            }
+            let configured = self.bytes_per_second();
+            if configured == 0 {
+                return;
+            }
+            let capacity = configured as f64;
             let wait = {
                 let mut state = self.state.lock().await;
                 let now = Instant::now();
@@ -64,7 +79,9 @@ impl RateLimiter {
                 }
             };
             if let Some(duration) = wait {
-                tokio::time::sleep(duration).await;
+                // Re-read live configuration promptly even when the previous
+                // rate would imply a very long sleep for this chunk.
+                tokio::time::sleep(duration.min(Duration::from_millis(100))).await;
             }
         }
     }
@@ -80,6 +97,12 @@ impl RateLimiters {
     pub fn new(job: Arc<RateLimiter>, global: Arc<RateLimiter>) -> Self {
         Self { job, global }
     }
+    pub fn single(limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            job: limiter,
+            global: Arc::new(RateLimiter::new(0)),
+        }
+    }
     pub async fn consume(&self, bytes: usize) {
         tokio::join!(self.job.consume(bytes), self.global.consume(bytes));
     }
@@ -93,6 +116,21 @@ mod tests {
         let limiter = RateLimiter::new(1_000_000);
         tokio::time::timeout(Duration::from_secs(3), limiter.consume(1_500_000))
             .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_unlimited_update_releases_an_in_flight_consumer() {
+        let limiter = Arc::new(RateLimiter::new(1));
+        let consumer = {
+            let limiter = limiter.clone();
+            tokio::spawn(async move { limiter.consume(1_000).await })
+        };
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        limiter.set_bytes_per_second(0);
+        tokio::time::timeout(Duration::from_millis(500), consumer)
+            .await
+            .expect("live unlimited update did not wake the throttled consumer")
             .unwrap();
     }
 }

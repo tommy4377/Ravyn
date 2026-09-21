@@ -1,0 +1,40 @@
+name: nightly-hardening
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Run bounded parser fuzzing
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in url_security cron import_lines engine_manifest metalink content_disposition content_range ytdlp_progress rqbit_payload browser_origin restore_marker; do
+            cargo fuzz run "$target" -- -max_total_time=60 -timeout=10
+          done
+
+  release-and-migrations:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo bench --locked --bench transfer_policy -- --noplot

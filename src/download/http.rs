@@ -18,9 +18,10 @@ use reqwest::{
         REFERER, RETRY_AFTER, USER_AGENT,
     },
 };
+use sha2::{Digest, Sha256};
 use tokio::{
     fs::{self, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
@@ -28,23 +29,24 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::Config,
     core::{
+        bandwidth::{FairBandwidthScheduler, FlowClass, FlowConfig},
         models::{CreateJob, DuplicatePolicy, Job, JobKind, ProgressSnapshot},
         progress::ProgressPublisher,
-        rate_limit::{RateLimiter, RateLimiters},
+        rate_limit::RateLimiters,
     },
     download::{
         adapter::{DownloadAdapter, DownloadOutcome},
         probe, segmented,
     },
     error::{RavynError, Result},
-    services::{filename, rules, security},
+    services::{checksum, filename, rules, security},
     storage::{Repository, host_profiles, segments},
 };
 
 pub struct HttpAdapter {
     config: Arc<Config>,
     host_limits: Mutex<HashMap<String, Arc<Semaphore>>>,
-    global_limiter: Arc<RateLimiter>,
+    bandwidth: FairBandwidthScheduler,
     progress_publisher: ProgressPublisher,
     repository: Repository,
 }
@@ -56,7 +58,7 @@ impl HttpAdapter {
         repository: Repository,
     ) -> Result<Self> {
         Ok(Self {
-            global_limiter: Arc::new(RateLimiter::new(config.global_speed_limit_bps)),
+            bandwidth: FairBandwidthScheduler::new(config.global_speed_limit_bps),
             config,
             host_limits: Mutex::new(HashMap::new()),
             progress_publisher,
@@ -65,7 +67,7 @@ impl HttpAdapter {
     }
 
     pub fn set_global_speed_limit(&self, bytes_per_second: u64) {
-        self.global_limiter.set_bytes_per_second(bytes_per_second);
+        self.bandwidth.set_capacity_bps(bytes_per_second);
     }
 
     fn destination(&self, job: &Job, metadata: &probe::RemoteMetadata) -> PathBuf {
@@ -82,7 +84,12 @@ impl HttpAdapter {
         let host = url
             .host_str()
             .ok_or_else(|| RavynError::Invalid("download URL has no host".into()))?;
-        let addresses = security::resolve_network_source(&self.config, source).await?;
+        let started = Instant::now();
+        let resolved = security::resolve_network_source(&self.config, source).await;
+        self.progress_publisher
+            .metrics()
+            .dns_resolved(resolved.is_ok(), started.elapsed());
+        let addresses = resolved?;
         build_client(
             &self.config,
             job.options_json.proxy.as_deref().map(str::trim),
@@ -235,7 +242,11 @@ impl HttpAdapter {
             .to_str()
             .ok_or_else(|| RavynError::Invalid("destination path must be UTF-8".into()))?
             .to_owned();
-        effective.speed_limit_bps = request.speed_limit_bps.map(|value| value as i64);
+        effective.speed_limit_bps = request
+            .speed_limit_bps
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| RavynError::Invalid("speed limit exceeds SQLite integer range".into()))?;
         effective.options_json = request.options;
         Ok(effective)
     }
@@ -324,6 +335,14 @@ impl HttpAdapter {
             })?
         };
         let job = self.apply_post_probe_rules(job, &metadata).await?;
+        if let Some(metalink) = job.options_json.metalink.as_ref() {
+            if metadata.length != Some(metalink.size) {
+                return Err(RavynError::Protocol(format!(
+                    "Metalink mirror size mismatch: expected {}, received {:?}",
+                    metalink.size, metadata.length
+                )));
+            }
+        }
         fs::create_dir_all(&job.destination).await?;
         let client = self.client_for_job(&job, &metadata.final_url).await?;
         let headers = self.request_headers(&job)?;
@@ -358,10 +377,23 @@ impl HttpAdapter {
             )));
         }
 
-        let job_limiter = Arc::new(RateLimiter::new(
-            job.speed_limit_bps.unwrap_or_default().max(0) as u64,
-        ));
-        let limiters = RateLimiters::new(job_limiter, self.global_limiter.clone());
+        let priority = u32::try_from(job.priority.max(0)).unwrap_or(u32::MAX);
+        let bandwidth_flow = self.bandwidth.register_scoped(
+            job.id,
+            FlowConfig {
+                weight: priority.saturating_add(1),
+                class: if job.priority < 0 {
+                    FlowClass::Background
+                } else {
+                    FlowClass::Foreground
+                },
+                min_bps: None,
+                max_bps: job
+                    .speed_limit_bps
+                    .and_then(|value| u64::try_from(value).ok()),
+            },
+        );
+        let limiters = RateLimiters::single(bandwidth_flow.limiter());
         let progress = Arc::new(AtomicU64::new(0));
 
         let requested_segments = job
@@ -405,6 +437,112 @@ impl HttpAdapter {
                 length >= self.config.segment_threshold() && adaptive_segments > 1
             });
 
+        let primary_validator = metadata.etag.clone().or(metadata.last_modified.clone());
+        let mut admitted_sources = vec![segmented::SourceContext {
+            client: client.clone(),
+            url: metadata.final_url.clone(),
+            host: host.clone(),
+            throughput_score: profile
+                .as_ref()
+                .and_then(|value| value.average_throughput_bps)
+                .unwrap_or(0),
+            headers: headers.clone(),
+            validator: primary_validator.clone(),
+            host_limit: host_limit.clone(),
+        }];
+        if use_segments {
+            for mirror in &job.options_json.mirrors {
+                if mirror == &job.source || mirror == &metadata.final_url {
+                    continue;
+                }
+                let admission = async {
+                    security::validate_network_source(&self.config, mirror)?;
+                    let mut mirror_url = url::Url::parse(mirror)?;
+                    let mirror_metadata = {
+                        let mut resolved = None;
+                        for _ in 0..=10 {
+                            let mirror_client =
+                                self.client_for_job(&job, mirror_url.as_str()).await?;
+                            match probe::probe(&mirror_client, mirror_url.as_str(), &headers)
+                                .await?
+                            {
+                                probe::ProbeResult::Metadata(value) => {
+                                    resolved = Some((mirror_client, value));
+                                    break;
+                                }
+                                probe::ProbeResult::Redirect(location) => {
+                                    mirror_url = mirror_url.join(&location)?;
+                                    security::validate_network_source(
+                                        &self.config,
+                                        mirror_url.as_str(),
+                                    )?;
+                                }
+                            }
+                        }
+                        resolved.ok_or_else(|| {
+                            RavynError::Protocol("mirror probe exceeded the redirect limit".into())
+                        })?
+                    };
+                    let (mirror_client, mirror_metadata) = mirror_metadata;
+                    if !mirror_metadata.range_supported || mirror_metadata.length != metadata.length
+                    {
+                        return Err(RavynError::Protocol(
+                            "mirror does not expose the same ranged object length".into(),
+                        ));
+                    }
+                    let mirror_validator = mirror_metadata
+                        .etag
+                        .clone()
+                        .or(mirror_metadata.last_modified.clone());
+                    let checksum_identity = job.expected_sha256.is_some()
+                        || job
+                            .options_json
+                            .metalink
+                            .as_ref()
+                            .is_some_and(|value| !value.piece_sha256.is_empty());
+                    if !checksum_identity
+                        && (primary_validator.is_none() || mirror_validator != primary_validator)
+                    {
+                        return Err(RavynError::Protocol(
+                            "mirror lacks a validator matching the primary object".into(),
+                        ));
+                    }
+                    let mirror_host = Self::host_from_source(&mirror_metadata.final_url)?;
+                    let mirror_profile =
+                        host_profiles::get(self.repository.pool(), &mirror_host).await?;
+                    if let Some(until) = mirror_profile
+                        .as_ref()
+                        .and_then(|profile| profile.circuit_open_until)
+                        .filter(|until| *until > chrono::Utc::now())
+                    {
+                        return Err(RavynError::Unavailable(format!(
+                            "mirror circuit is open for {mirror_host} until {until}"
+                        )));
+                    }
+                    let mirror_limit = self.host_limit(&mirror_metadata.final_url).await?;
+                    Ok::<_, RavynError>(segmented::SourceContext {
+                        client: mirror_client,
+                        url: mirror_metadata.final_url,
+                        host: mirror_host,
+                        throughput_score: mirror_profile
+                            .and_then(|value| value.average_throughput_bps)
+                            .unwrap_or(0),
+                        headers: headers.clone(),
+                        validator: mirror_validator,
+                        host_limit: mirror_limit,
+                    })
+                }
+                .await;
+                match admission {
+                    Ok(source) => admitted_sources.push(source),
+                    Err(error) => {
+                        tracing::warn!(%mirror, %error, "mirror was not admitted for concurrent range scheduling")
+                    }
+                }
+            }
+            admitted_sources.sort_by_key(|source| std::cmp::Reverse(source.throughput_score));
+        }
+
         // A dedicated token stops only the reporting task. Cancelling it must
         // never cancel checksum verification or post-processing for the job.
         let reporter_cancellation = cancellation.child_token();
@@ -416,28 +554,34 @@ impl HttpAdapter {
             reporter_cancellation.clone(),
         );
 
-        let result: Result<()> = async {
+        let result: Result<bool> = async {
             if use_segments {
                 self.repository
                     .set_transfer_mode(job.id, "segmented")
                     .await?;
-                let segmented_result = segmented::download(
+                let segmented_result = segmented::download_multi(
                     self.repository.clone(),
                     job.id,
-                    client.clone(),
-                    metadata.final_url.clone(),
-                    headers.clone(),
-                    metadata.etag.clone().or(metadata.last_modified.clone()),
+                    admitted_sources,
                     partial.clone(),
                     metadata.length.ok_or_else(|| {
                         RavynError::Protocol("missing length for segmented download".into())
                     })?,
                     adaptive_segments,
                     limiters.clone(),
-                    host_limit.clone(),
                     self.config.max_retries,
                     cancellation.child_token(),
                     progress.clone(),
+                    self.progress_publisher.metrics(),
+                    job.options_json.metalink.as_ref().and_then(|value| {
+                        value.piece_length.map(|length| segmented::PieceChecksums {
+                            length,
+                            sha256: value.piece_sha256.clone(),
+                        })
+                    }),
+                    self.config.host_circuit_threshold,
+                    self.config.host_circuit_cooldown_secs,
+                    job.expected_sha256.clone(),
                 )
                 .await;
                 match segmented_result {
@@ -472,10 +616,12 @@ impl HttpAdapter {
                             self.config.max_retries,
                             cancellation.child_token(),
                             progress.clone(),
+                            job.expected_sha256.as_deref(),
                         )
                         .await
                     }
-                    other => other,
+                    Ok(incrementally_verified) => Ok(incrementally_verified),
+                    Err(error) => Err(error),
                 }
             } else {
                 if job.transfer_mode == "segmented"
@@ -501,6 +647,7 @@ impl HttpAdapter {
                     self.config.max_retries,
                     cancellation.child_token(),
                     progress.clone(),
+                    job.expected_sha256.as_deref(),
                 )
                 .await
             }
@@ -511,7 +658,30 @@ impl HttpAdapter {
         if let Err(error) = reporter.await {
             tracing::warn!(job_id = %job.id, %error, "progress reporter task failed");
         }
-        result?;
+        let incrementally_verified = result?;
+
+        let verification = async {
+            if let Some(metalink) = job.options_json.metalink.as_ref() {
+                if let Some(piece_length) = metalink.piece_length {
+                    checksum::verify_pieces(
+                        &partial,
+                        piece_length,
+                        &metalink.piece_sha256,
+                        &cancellation,
+                    )
+                    .await?;
+                }
+            }
+            if !incrementally_verified && let Some(expected) = job.expected_sha256.as_deref() {
+                checksum::verify(&partial, expected, &cancellation).await?;
+            }
+            Ok::<(), RavynError>(())
+        }
+        .await;
+        if let Err(error) = verification {
+            reset_partial(&self.repository, job.id, &partial).await?;
+            return Err(error);
+        }
 
         let final_downloaded = progress.load(Ordering::Relaxed);
         self.progress_publisher
@@ -581,7 +751,6 @@ impl DownloadAdapter for HttpAdapter {
                         crate::error::FailureClass::Cancellation
                             | crate::error::FailureClass::DiskFull
                             | crate::error::FailureClass::Permission
-                            | crate::error::FailureClass::ChecksumMismatch
                     ) =>
                 {
                     return Err(error);
@@ -674,6 +843,34 @@ async fn rename_with_retry(source: &Path, destination: &Path) -> Result<()> {
     unreachable!("bounded file-rename retry loop must return")
 }
 
+async fn hash_file_prefix(
+    path: &Path,
+    length: u64,
+    cancellation: &CancellationToken,
+) -> Result<Sha256> {
+    let mut file = fs::File::open(path).await?;
+    let mut remaining = length;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut hasher = Sha256::new();
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+            RavynError::Internal("hash prefix length exceeds platform limits".into())
+        })?;
+        let read = tokio::select! {
+            _ = cancellation.cancelled() => return Err(RavynError::Cancelled),
+            read = file.read(&mut buffer[..wanted]) => read?,
+        };
+        if read == 0 {
+            return Err(RavynError::Protocol(
+                "partial file ended while rebuilding incremental checksum state".into(),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(hasher)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn single_stream(
     client: &Client,
@@ -687,7 +884,11 @@ async fn single_stream(
     max_retries: u32,
     cancellation: CancellationToken,
     progress: Arc<AtomicU64>,
-) -> Result<()> {
+    expected_sha256: Option<&str>,
+) -> Result<bool> {
+    if let Some(expected) = expected_sha256 {
+        checksum::validate_sha256(expected)?;
+    }
     for attempt in 0..=max_retries {
         let mut existing = fs::metadata(path)
             .await
@@ -705,7 +906,15 @@ async fn single_stream(
                 .await?
                 .sync_all()
                 .await?;
-            return Ok(());
+            if let Some(expected) = expected_sha256 {
+                if let Err(error) = checksum::verify(path, expected, &cancellation).await {
+                    remove_file_with_retry(path).await?;
+                    progress.store(0, Ordering::Relaxed);
+                    return Err(error);
+                }
+                return Ok(true);
+            }
+            return Ok(false);
         }
 
         let permit = tokio::select! {
@@ -768,6 +977,15 @@ async fn single_stream(
         };
 
         progress.store(if append { existing } else { 0 }, Ordering::Relaxed);
+        let mut hasher = if expected_sha256.is_some() {
+            Some(if append {
+                hash_file_prefix(path, existing, &cancellation).await?
+            } else {
+                Sha256::new()
+            })
+        } else {
+            None
+        };
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -793,13 +1011,28 @@ async fn single_stream(
                 _ = limiters.consume(chunk.len()) => {}
             }
             file.write_all(&chunk).await?;
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&chunk);
+            }
             progress.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         }
         file.sync_all().await?;
+        drop(file);
         drop(permit);
         let actual = fs::metadata(path).await?.len();
         if stream_error.is_none() && total.is_none_or(|expected| actual == expected) {
-            return Ok(());
+            if let (Some(expected), Some(hasher)) = (expected_sha256, hasher) {
+                let actual_hash = format!("{:x}", hasher.finalize());
+                if !actual_hash.eq_ignore_ascii_case(expected) {
+                    remove_file_with_retry(path).await?;
+                    progress.store(0, Ordering::Relaxed);
+                    return Err(RavynError::Protocol(format!(
+                        "SHA-256 mismatch: expected {expected}, got {actual_hash}"
+                    )));
+                }
+                return Ok(true);
+            }
+            return Ok(false);
         }
         if attempt >= max_retries {
             if let Some(error) = stream_error {
@@ -817,7 +1050,9 @@ async fn single_stream(
     ))
 }
 
-fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) -> Result<()> {
+/// Validates a resume response's `Content-Range` contract. Public so the
+/// protocol boundary can be fuzzed independently of network I/O.
+pub fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) -> Result<()> {
     let value = value.ok_or_else(|| RavynError::Protocol("missing Content-Range".into()))?;
     let (range, response_total) = value
         .strip_prefix("bytes ")
@@ -847,7 +1082,9 @@ fn validate_resume_range(value: Option<&str>, start: u64, total: Option<u64>) ->
     Ok(())
 }
 
-fn content_disposition_filename(value: Option<&str>) -> Option<String> {
+/// Extracts and sanitizes a filename candidate from Content-Disposition.
+/// Public so this untrusted-header parser remains directly fuzzable.
+pub fn content_disposition_filename(value: Option<&str>) -> Option<String> {
     let value = value?;
     for part in value.split(';').map(str::trim) {
         if let Some(encoded) = part.strip_prefix("filename*=") {

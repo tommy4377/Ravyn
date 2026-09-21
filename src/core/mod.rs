@@ -1,6 +1,15 @@
+mod automation;
+pub mod bandwidth;
+mod bulk;
+mod dispatcher;
 pub mod events;
+mod execution;
+mod lifecycle;
+mod maintenance;
 pub mod manager;
+mod media_control;
 pub mod metrics;
 pub mod models;
 pub mod progress;
 pub mod rate_limit;
+mod torrent_control;

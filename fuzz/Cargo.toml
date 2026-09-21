@@ -1,0 +1,95 @@
+[package]
+name = "ravyn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+clap = "4"
+chrono = "0.4"
+libfuzzer-sys = "0.4"
+ravyn = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "url_security"
+path = "fuzz_targets/url_security.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cron"
+path = "fuzz_targets/cron.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_lines"
+path = "fuzz_targets/import_lines.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_manifest"
+path = "fuzz_targets/engine_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metalink"
+path = "fuzz_targets/metalink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_disposition"
+path = "fuzz_targets/content_disposition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_range"
+path = "fuzz_targets/content_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ytdlp_progress"
+path = "fuzz_targets/ytdlp_progress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rqbit_payload"
+path = "fuzz_targets/rqbit_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "browser_origin"
+path = "fuzz_targets/browser_origin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "restore_marker"
+path = "fuzz_targets/restore_marker.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

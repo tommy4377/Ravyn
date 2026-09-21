@@ -13,6 +13,7 @@ const PENDING_DATABASE: &str = ".ravyn-restore-pending.sqlite3";
 const PENDING_REQUEST: &str = ".ravyn-restore-request.json";
 const ROLLBACK_DATABASE: &str = ".ravyn-restore-rollback.sqlite3";
 const LAST_RESULT: &str = "restore-last-result.json";
+const MAX_RESTORE_STATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +46,7 @@ pub struct RestoreStatus {
     pub restart_required: bool,
 }
 
+#[derive(Debug)]
 pub(crate) struct AppliedRestore {
     request: PendingRestore,
     rollback_exists: bool,
@@ -138,8 +140,7 @@ pub(crate) async fn apply_pending(data_dir: &Path) -> Result<Option<AppliedResto
                         "an applied restore has both an active and staged database".into(),
                     ));
                 }
-                let integrity = Repository::verify_database_file(&pending_path).await?;
-                if integrity != "ok" {
+                if !staged_database_is_valid(&pending_path).await {
                     return Err(RavynError::Invalid(
                         "the staged database backup is not valid".into(),
                     ));
@@ -164,8 +165,7 @@ pub(crate) async fn apply_pending(data_dir: &Path) -> Result<Option<AppliedResto
                 ));
             }
 
-            let integrity = Repository::verify_database_file(&pending_path).await?;
-            if integrity != "ok" {
+            if !staged_database_is_valid(&pending_path).await {
                 record_result(
                     data_dir,
                     RestoreResultRecord {
@@ -276,6 +276,17 @@ pub(crate) async fn rollback_after_open_failure(
         },
     )
     .await
+}
+
+/// Returns whether a staged database passes its integrity check. A file that
+/// cannot even be opened as SQLite (for example, one corrupted on disk) is
+/// treated the same as one that fails `integrity_check`, so startup abandons
+/// the restore gracefully instead of failing on a raw database error forever.
+async fn staged_database_is_valid(path: &Path) -> bool {
+    matches!(
+        Repository::verify_database_file(path).await.as_deref(),
+        Ok("ok")
+    )
 }
 
 fn validate_backup_name(name: &str) -> Result<()> {
@@ -397,6 +408,12 @@ async fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result
     } else {
         return Ok(None);
     };
+    let metadata = tokio::fs::metadata(selected).await?;
+    if !metadata.is_file() || metadata.len() > MAX_RESTORE_STATE_BYTES {
+        return Err(RavynError::Invalid(format!(
+            "restore state must be a regular file no larger than {MAX_RESTORE_STATE_BYTES} bytes"
+        )));
+    }
     let bytes = tokio::fs::read(selected).await?;
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
@@ -425,6 +442,16 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_restore_state_is_rejected_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = pending_request_path(temp.path());
+        let file = tokio::fs::File::create(&marker).await.unwrap();
+        file.set_len(MAX_RESTORE_STATE_BYTES + 1).await.unwrap();
+
+        assert!(status(temp.path()).await.is_err());
+    }
     use crate::config::{Config, PersistentSettings};
 
     #[tokio::test]
@@ -494,5 +521,115 @@ mod tests {
         assert_eq!(recovered.request.phase, RestorePhase::Applied);
         finalize(data_dir, recovered).await.unwrap();
         assert!(status(data_dir).await.unwrap().pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupted_staged_backup_fails_startup_and_preserves_the_active_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let database_url = format!("sqlite://{}", data_dir.join("ravyn.sqlite3").display());
+        let repository = Repository::connect(&database_url).await.unwrap();
+        let config = Config::parse_from(["ravyn"]);
+        let mut settings = PersistentSettings::from_config(&config);
+        settings.max_active = 9;
+        repository
+            .save_persistent_settings(&settings)
+            .await
+            .unwrap();
+        let backups = data_dir.join("backups");
+        tokio::fs::create_dir_all(&backups).await.unwrap();
+        let backup = backups.join("known-good.sqlite3");
+        repository.backup_to(&backup).await.unwrap();
+        repository.pool().close().await;
+
+        schedule(data_dir, &backup, "known-good.sqlite3")
+            .await
+            .unwrap();
+        // Simulate on-disk corruption of the staged database between the
+        // restart request and the next startup.
+        tokio::fs::write(pending_database_path(data_dir), b"not a sqlite database")
+            .await
+            .unwrap();
+
+        let error = apply_pending(data_dir).await.unwrap_err();
+        assert!(matches!(error, RavynError::Invalid(_)), "{error}");
+        let state = status(data_dir).await.unwrap();
+        assert!(state.pending.is_none());
+        assert_eq!(state.last_result.unwrap().outcome, "failure");
+        assert!(!pending_database_path(data_dir).exists());
+
+        // The active database was never touched and still opens with its data.
+        let survivor = Repository::connect(&database_url).await.unwrap();
+        assert_eq!(
+            survivor
+                .load_persistent_settings()
+                .await
+                .unwrap()
+                .unwrap()
+                .max_active,
+            9
+        );
+        survivor.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn open_failure_after_apply_rolls_back_to_the_previous_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let database_url = format!("sqlite://{}", data_dir.join("ravyn.sqlite3").display());
+        let repository = Repository::connect(&database_url).await.unwrap();
+        let config = Config::parse_from(["ravyn"]);
+        let mut original = PersistentSettings::from_config(&config);
+        original.max_active = 3;
+        repository
+            .save_persistent_settings(&original)
+            .await
+            .unwrap();
+        let backups = data_dir.join("backups");
+        tokio::fs::create_dir_all(&backups).await.unwrap();
+        let backup = backups.join("known-good.sqlite3");
+        repository.backup_to(&backup).await.unwrap();
+
+        let mut current = original.clone();
+        current.max_active = 17;
+        repository.save_persistent_settings(&current).await.unwrap();
+        repository.pool().close().await;
+
+        schedule(data_dir, &backup, "known-good.sqlite3")
+            .await
+            .unwrap();
+        let applied = apply_pending(data_dir).await.unwrap().unwrap();
+        // Simulate the restored database failing to open or migrate.
+        rollback_after_open_failure(data_dir, applied)
+            .await
+            .unwrap();
+
+        let state = status(data_dir).await.unwrap();
+        assert!(state.pending.is_none());
+        assert_eq!(state.last_result.unwrap().outcome, "failure");
+
+        // The database from before the restore is active again.
+        let recovered = Repository::connect(&database_url).await.unwrap();
+        assert_eq!(
+            recovered
+                .load_persistent_settings()
+                .await
+                .unwrap()
+                .unwrap()
+                .max_active,
+            17
+        );
+        recovered.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn a_staged_database_without_a_request_marker_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        tokio::fs::write(pending_database_path(data_dir), b"orphaned staged bytes")
+            .await
+            .unwrap();
+        let error = apply_pending(data_dir).await.unwrap_err();
+        assert!(matches!(error, RavynError::Internal(_)), "{error}");
     }
 }

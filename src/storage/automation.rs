@@ -615,3 +615,27 @@ fn schedule_missed_run_policy_text(
         crate::services::schedules::ScheduleMissedRunPolicy::CatchUp => "catch_up",
     }
 }
+
+impl Repository {
+    pub async fn list_rules(&self) -> Result<Vec<Rule>> {
+        let rows = sqlx::query("SELECT id,name,enabled,priority,matcher_json,actions_json FROM rules WHERE enabled=1 ORDER BY priority DESC")
+            .fetch_all(self.pool()).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Rule {
+                    id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+                        .map_err(|e| RavynError::Internal(e.to_string()))?,
+                    name: row.try_get("name")?,
+                    enabled: row.try_get::<i64, _>("enabled")? != 0,
+                    priority: row.try_get("priority")?,
+                    matcher: serde_json::from_str::<RuleMatcher>(
+                        &row.try_get::<String, _>("matcher_json")?,
+                    )?,
+                    actions: serde_json::from_str::<RuleActions>(
+                        &row.try_get::<String, _>("actions_json")?,
+                    )?,
+                })
+            })
+            .collect()
+    }
+}

@@ -154,6 +154,8 @@ impl Default for TorrentOptions {
 pub struct DownloadOptions {
     /// Alternate HTTP mirrors tried in order when the primary source fails.
     pub mirrors: Vec<String>,
+    /// Verified identity and piece layout imported from a Metalink v4 file.
+    pub metalink: Option<MetalinkMetadata>,
     pub headers: BTreeMap<String, String>,
     pub cookies: BTreeMap<String, String>,
     pub proxy: Option<String>,
@@ -171,6 +173,14 @@ pub struct DownloadOptions {
     pub post_actions: Vec<PostAction>,
     pub media: Option<MediaOptions>,
     pub torrent: Option<TorrentOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetalinkMetadata {
+    pub size: u64,
+    pub piece_length: Option<u64>,
+    #[serde(default)]
+    pub piece_sha256: Vec<String>,
 }
 
 impl DownloadOptions {
