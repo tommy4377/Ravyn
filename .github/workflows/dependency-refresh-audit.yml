@@ -1,0 +1,31 @@
+name: dependency-refresh-audit
+
+on:
+  push:
+    branches: [maintenance-audit]
+    paths:
+      - .github/workflows/dependency-refresh-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Refresh compatible lockfile and inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo update
+          echo '===== audit after compatible update ====='
+          cargo audit || true
+          for crate in h2 quick-xml quinn-proto rsa rustls time proc-macro-error unic-char-property unic-char-range unic-common unic-ucd-ident unic-ucd-version event-listener glib spin; do
+            echo "===== TREE $crate ====="
+            cargo tree -i "$crate" || true
+          done
