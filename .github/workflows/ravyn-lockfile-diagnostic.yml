@@ -1,0 +1,89 @@
+name: ravyn-lockfile-diagnostic
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/ravyn-lockfile-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate candidate lockfile and trace stale packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("Cargo.toml")
+          s=p.read_text()
+          s=s.replace('quick-xml = "0.38"', 'quick-xml = "0.41"')
+          s=s.replace(
+              'sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }',
+              'sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate", "macros"] }'
+          )
+          p.write_text(s)
+          Path("Cargo.lock").unlink(missing_ok=True)
+          PY
+          cargo generate-lockfile
+
+          python3 - <<'PY'
+          import tomllib
+          from collections import defaultdict, deque
+          from pathlib import Path
+
+          data=tomllib.loads(Path("Cargo.lock").read_text())
+          packages=data["package"]
+          nodes={(p["name"],p["version"]):p for p in packages}
+          by_name=defaultdict(list)
+          for key in nodes: by_name[key[0]].append(key)
+
+          reverse=defaultdict(set)
+          def dep_key(dep):
+              if isinstance(dep,str):
+                  parts=dep.split()
+                  name=parts[0]
+                  version=parts[1] if len(parts)>1 and parts[1][0].isdigit() else None
+                  if version and (name,version) in nodes:
+                      return (name,version)
+                  opts=by_name.get(name,[])
+                  return opts[0] if len(opts)==1 else None
+              return None
+
+          for parent,p in nodes.items():
+              for dep in p.get("dependencies",[]):
+                  child=dep_key(dep)
+                  if child: reverse[child].add(parent)
+
+          roots={("ravyn","1.0.1"),("ravyn-desktop","1.0.1")}
+          targets=[("quick-xml","0.38.4"),("rsa","0.9.10"),("time","0.3.45")]
+          for target in targets:
+              print(f"=== {target[0]} {target[1]} ===")
+              if target not in nodes:
+                  print("not in lockfile")
+                  continue
+              q=deque([(target,[target])])
+              seen={target}
+              found=False
+              while q:
+                  cur,path=q.popleft()
+                  for parent in reverse.get(cur,[]):
+                      if parent in roots:
+                          print(" <- ".join(f"{n}@{v}" for n,v in path+[parent]))
+                          found=True
+                      elif parent not in seen:
+                          seen.add(parent); q.append((parent,path+[parent]))
+              if not found:
+                  parents=sorted(reverse.get(target,[]))
+                  print("no path to Ravyn roots; direct lockfile parents:", parents[:30])
+          PY
