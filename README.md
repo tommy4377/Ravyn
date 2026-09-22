@@ -1,156 +1,168 @@
+<div align="center">
+
 # Ravyn
 
-Ravyn is a download manager with a Rust backend and a native Windows desktop application. The backend exposes a local HTTP API and supports direct HTTP downloads, media through yt-dlp, BitTorrent through rqbit, automation, post-processing, and a persistent organized download library.
+**A fast, native download manager for Windows with browser integration, media tools and a persistent library.**
 
-## Desktop application and setup
+[![CI](https://github.com/tommy4377/Ravyn/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/tommy4377/Ravyn/actions/workflows/backend-ci.yml)
+[![Release](https://img.shields.io/github/v/release/tommy4377/Ravyn?display_name=tag&sort=semver)](https://github.com/tommy4377/Ravyn/releases/latest)
+[![License](https://img.shields.io/github/license/tommy4377/Ravyn)](LICENSE)
+![Windows](https://img.shields.io/badge/desktop-Windows%2010%20%7C%2011-0078D4?logo=windows11&logoColor=white)
 
-The repository contains four product surfaces:
+![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri%202-24C8DB?logo=tauri&logoColor=white)
+![Svelte](https://img.shields.io/badge/Svelte%205-FF3E00?logo=svelte&logoColor=white)
+![Firefox](https://img.shields.io/badge/Firefox-extension-FF7139?logo=firefoxbrowser&logoColor=white)
 
-- the root `ravyn` crate — the backend (HTTP API, engines, storage);
-- `src-tauri/` — the `ravyn-desktop` Tauri 2 shell that embeds the backend in-process on an ephemeral loopback port and hosts the setup and main windows;
-- `frontend/` — the Svelte 5 + Vite frontend (Fluent Design 2 tokens, custom setup flow);
-- `extension/` — the Firefox Manifest V3 extension, resource picker, safe download interceptor, and deterministic AMO packaging.
+</div>
 
-Frontend development:
+Ravyn is a download manager built around a Rust backend and a Tauri 2 desktop application. It combines direct HTTP downloads, segmented transfers, media downloads through yt-dlp, BitTorrent through rqbit, post-processing, scheduling, browser integration and a persistent organized library in one native-first application.
+
+## Highlights
+
+- **Direct and segmented HTTP downloads** with resume, retries, checksums and bounded concurrency.
+- **Media downloads** through yt-dlp with playlist support and selective retry.
+- **BitTorrent and magnet support** through rqbit.
+- **Post-processing** with FFmpeg and 7-Zip, including conversion and extraction workflows.
+- **Persistent library** with categories, search, duplicate detection, trash, relocation repair and statistics.
+- **Automation** with priorities, tags, rules, schedules and batch operations.
+- **Firefox integration** through restricted Native Messaging.
+- **Compact desktop experience** with tray controls, notifications and Windows integration.
+- **Portable-first distribution** as a single `Ravyn.exe`.
+
+## Download
+
+Download the latest Windows build from [GitHub Releases](https://github.com/tommy4377/Ravyn/releases/latest).
 
 ```text
-cd frontend
-npm install
-npm run check   # svelte-check, strict TypeScript
-npm run test    # vitest
-npm run build   # production bundle
+Ravyn.exe
 ```
 
-Desktop shell development (starts the Vite dev server automatically when using the Tauri CLI, or run `npm run dev` manually and then start the exe):
+Requirements:
+
+- Windows 10 or Windows 11, 64-bit
+- Microsoft Edge WebView2 Runtime
+- No installer is required for portable use
+
+Running `Ravyn.exe` can either start Ravyn portably or install it for the current user under `%LOCALAPPDATA%\Ravyn`.
+
+## Desktop application
+
+The desktop application embeds the backend in-process and exposes the Svelte frontend through Tauri.
 
 ```text
-cargo build -p ravyn-desktop
-target/debug/ravyn-desktop.exe
+Ravyn/
+├─ src/          Rust backend, download engines and API
+├─ src-tauri/    Tauri desktop shell and Windows integration
+├─ frontend/     Svelte 5 desktop frontend
+├─ extension/    Firefox Manifest V3 extension
+├─ migrations/   SQLite schema migrations
+├─ assets/       Managed component metadata and product assets
+├─ tests/        Integration tests
+└─ tools/        Validation and release tooling
 ```
 
-On Windows 11 22H2 and later, the main and setup windows use the real
-compositor acrylic backdrop. Windows 10 and earlier Windows 11 builds have no
-stable compositor backdrop, so the windows stay opaque there and Ravyn renders
-an equivalent wallpaper-based material itself. See
-[`docs/WINDOWS_BACKDROP.md`](docs/WINDOWS_BACKDROP.md) for the rendering and
-compatibility details.
+On supported Windows 11 versions Ravyn can use the compositor-backed acrylic material. Older Windows versions fall back to an opaque or application-rendered material.
 
-Windows distribution is a single self-installing `Ravyn.exe`: running the downloaded executable opens the custom Ravyn setup, which can copy the application into the per-user location (`%LOCALAPPDATA%\Ravyn`, no elevation), register it in Installed Apps, and create the requested shortcuts — or run fully portable. There is no separate MSI/NSIS installer. The shell stores application data under `%LOCALAPPDATA%\Ravyn` (override with `RAVYN_DATA_DIR`); after setup completes it opens the main window.
+## Download engines
 
-## Firefox extension
+Ravyn supports:
 
-The Firefox extension delegates downloads through a restricted Native Messaging mode in the installed Ravyn executable. New installations intercept compatible downloads by default, with rule-based, confirmed, and disabled modes available in Options; it also supports link/image/media context menus, page resource scanning, an optional network observer, per-site cookie grants, icon-only media overlays, and a compact popup resource picker with batch submission.
+- direct HTTP/HTTPS transfers;
+- segmented downloads with dynamic work distribution;
+- yt-dlp media probing and downloading;
+- rqbit torrents and magnet links;
+- FFmpeg conversion;
+- 7-Zip extraction;
+- checksums and output lineage;
+- pause, resume, cancel, retry and recovery.
 
-The official extension uses Native Messaging exclusively. The authenticated `/v1/browser/*` HTTP surface remains a separate, token-scoped integration API for external/local browser clients and is not part of the Firefox extension transport.
+External engines are managed as components and validated before use.
+
+## Organized library
+
+By default Ravyn creates an organized library under:
 
 ```text
+%USERPROFILE%\Downloads\Ravyn
+```
+
+Typical categories include Downloads, Videos, Music, Documents, Images, Archives, Torrents, Playlists, Temporary and Trash.
+
+The library supports persistent records, duplicate detection, local cache reuse, filename templates, import, relocation repair, managed trash and usage statistics.
+
+## Firefox integration
+
+The Firefox extension communicates with the installed desktop application through Native Messaging. It can intercept compatible downloads, send links and media to Ravyn, scan page resources and expose configurable browser rules.
+
+Extension development:
+
+```bash
 cd extension
 npm ci
 npm run check
 npm run package:verify
 ```
 
-The generated unsigned XPI and human-readable source archive are written to `extension/artifacts/`. Normal Firefox installation requires Mozilla signing; tagged CI releases support unlisted AMO signing with repository credentials.
+## Backend API
 
-## Current capabilities
+The backend exposes a local `/v1` HTTP API and replayable server-sent events. The generated `/openapi.json` document is the authoritative API contract.
 
-- Strict range validation, segmented HTTP transfers, safe fallback, and persistent resume.
-- Independent file handles, dynamic work stealing, and bounded global/per-host concurrency.
-- Global and per-job bandwidth limits, persistent host profiles, and circuit breakers.
-- Persistent SQLite queue, priorities, tags, rules, schedules, checksums, and output lineage.
-- Pause, resume, cancel, retry, delete, recovery, and graceful shutdown.
-- yt-dlp probing/downloads with persistent playlist-item state, archive-based deduplication, partial completion, and selective retry.
-- rqbit lifecycle/statistics/file selection with persisted ratio/time seeding policies and API capability reporting.
-- FFmpeg conversion, dedicated AVIF fallback, 7-Zip extraction, move, open, and original-file retention actions.
-- Bulk jobs and bounded text imports with per-item results.
-- One-shot, interval, and cron schedules, including scheduled page imports.
-- REST API, replayable server-sent events, OpenMetrics, readiness checks, integrity checks, and online database backups.
+The API binds to loopback by default. Non-loopback binding requires explicit opt-in, authentication and deployment behind a trusted TLS reverse proxy.
 
-## Organized Ravyn library
+## Build from source
 
-On first startup Ravyn creates an organized library automatically. Unless `--library-root` or `RAVYN_LIBRARY_ROOT` is set, the root is:
+Prerequisites:
 
-- Windows: `%USERPROFILE%\Downloads\Ravyn`
-- Linux and macOS: `$HOME/Downloads/Ravyn`
-- Portable/test deployments with an explicit `--download-dir`: `<download-dir>/Ravyn`
+- Rust 1.85 or newer
+- Node.js 22 or newer
+- Tauri 2 Windows prerequisites for the desktop build
+- Microsoft Edge WebView2 Runtime
 
-The root contains:
-
-```text
-Ravyn/
-├── Downloads/
-├── Videos/
-├── Music/
-├── Documents/
-├── Images/
-├── Archives/
-├── Torrents/
-├── Playlists/
-├── Temporary/
-└── Trash/
-```
-
-When automatic organization is enabled, jobs without an explicit destination are routed by extension and job type before transfer. Direct HTTP primary files are classified again after completion using MIME information and bounded local magic-byte inspection, so a generic or misleading filename can be moved into the correct category without overriding explicit user destinations. Operator-defined extension overrides take precedence. Set `--library-auto-organize false` to keep the normal download directory behavior while retaining the persistent library index.
-
-The library implementation includes:
-
-- permanent searchable records for downloaded and imported files;
-- SHA-256 identity, duplicate candidate lookup, and verified local cache reuse;
-- filename templates with safe per-segment sanitization and preview;
-- reusable presets and profile-specific settings overlays;
-- a deferred download basket with stable ordering and batch start;
-- bounded folder import, missing-file verification, and hash-based relocation repair;
-- managed trash, restore, permanent purge, and retention policies;
-- explainable source/artifact trust reports, including optional Ed25519 verification;
-- user-facing storage, activity, average-speed, and saved-bandwidth statistics.
-
-## Library API overview
-
-The additive `/v1` API includes:
-
-- `/v1/library`, `/v1/library/duplicates`, `/v1/library/import`, `/v1/library/verify`, and `/v1/library/relocate`;
-- `/v1/templates/preview`;
-- `/v1/presets` and `/v1/profiles`;
-- `/v1/basket`, `/v1/basket/reorder`, and `/v1/basket/start`;
-- `/v1/trust/preview` and `/v1/jobs/{id}/trust`;
-- `/v1/system/cleanup-policies`, `/v1/system/cleanup`, and `/v1/statistics`.
-
-The generated document at `/openapi.json` is the authoritative contract.
-
-## External programs
-
-- `yt-dlp` for supported media sites.
-- `rqbit` for BitTorrent and magnet links.
-
-On Windows, **Settings > Browser integration > Torrent default app** registers Ravyn as a candidate for `.torrent` files and `magnet:` links, then opens Windows Default Apps so the user can make the final selection.
-- `ffmpeg` for audio/video conversion.
-- `7z` for archive extraction.
-
-Paths are configurable through environment variables or command-line arguments.
-
-## Run
-
-```bash
-ravyn --data-dir ./ravyn-data --listen 127.0.0.1:47821
-```
-
-A custom library location can be selected at startup:
-
-```bash
-ravyn \
-  --data-dir ./ravyn-data \
-  --library-root /path/to/Ravyn
-```
-
-The API binds to loopback by default. Non-loopback binding requires explicit opt-in, a global bearer token, and `--remote-api-behind-tls-proxy`; the listener must be behind a trusted TLS reverse proxy.
-
-## Validation gate
+Backend:
 
 ```bash
 cargo fmt --all -- --check
 cargo check --locked --all-targets
-cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
+cargo build --locked --release -p ravyn
 ```
 
-The repository also contains migration, HTTP integration, fuzz-target, and release-build workflows. See `AGENTS.md` for the full verification contract.
+Frontend:
+
+```bash
+npm ci --prefix frontend
+npm run check --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+```
+
+Desktop:
+
+```bash
+cargo build --release -p ravyn-desktop
+```
+
+The Windows desktop executable is produced as:
+
+```text
+target/release/Ravyn.exe
+```
+
+## Repository health
+
+- CI validates Rust on Windows, Linux and macOS.
+- Frontend and Firefox extension checks run independently.
+- Supply-chain checks use cargo-audit and cargo-deny.
+- Nightly jobs exercise fuzz targets, migrations and managed component validation.
+- Tagged releases are version-synchronized across the backend, desktop, frontend and extension.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## Maintainer
+
+Maintained by [@tommy4377](https://github.com/tommy4377).
+
+## License
+
+Released under the [MIT License](LICENSE).

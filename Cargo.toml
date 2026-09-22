@@ -3,8 +3,12 @@ name = "ravyn"
 version = "1.0.1"
 edition = "2024"
 rust-version = "1.85"
+authors = ["tommy4377"]
 license = "MIT"
 description = "High-performance download manager backend"
+repository = "https://github.com/tommy4377/Ravyn"
+homepage = "https://github.com/tommy4377/Ravyn"
+publish = false
 
 [dependencies]
 async-trait = "0.1"

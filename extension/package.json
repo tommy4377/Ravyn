@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Firefox integration for the Ravyn download manager",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tommy4377/Ravyn.git"
+  },
+  "homepage": "https://github.com/tommy4377/Ravyn#readme",
+  "bugs": {
+    "url": "https://github.com/tommy4377/Ravyn/issues"
+  },
   "scripts": {
     "clean": "node scripts/clean.mjs",
     "build": "node scripts/build-firefox.mjs",

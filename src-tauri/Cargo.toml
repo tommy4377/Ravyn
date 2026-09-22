@@ -3,8 +3,12 @@ name = "ravyn-desktop"
 version = "1.0.1"
 edition = "2024"
 rust-version = "1.85"
+authors = ["tommy4377"]
 license = "MIT"
 description = "Ravyn desktop shell: setup and main application windows"
+repository = "https://github.com/tommy4377/Ravyn"
+homepage = "https://github.com/tommy4377/Ravyn"
+publish = false
 
 [lib]
 name = "ravyn_desktop"

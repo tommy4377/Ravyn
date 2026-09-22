@@ -1,7 +1,17 @@
 {
   "name": "ravyn-frontend",
-  "private": true,
   "version": "1.0.1",
+  "private": true,
+  "description": "Desktop frontend for the Ravyn download manager",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tommy4377/Ravyn.git"
+  },
+  "homepage": "https://github.com/tommy4377/Ravyn#readme",
+  "bugs": {
+    "url": "https://github.com/tommy4377/Ravyn/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
