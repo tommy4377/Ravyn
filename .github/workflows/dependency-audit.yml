@@ -1,0 +1,25 @@
+name: dependency-audit
+
+on:
+  push:
+    branches: [maintenance-audit]
+    paths:
+      - .github/workflows/dependency-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependency ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in h2 quick-xml quinn-proto rsa rustls time proc-macro-error unic-char-property unic-char-range unic-common unic-ucd-ident unic-ucd-version event-listener glib spin; do
+            echo "===== $crate ====="
+            cargo tree -i "$crate" --locked || true
+          done
