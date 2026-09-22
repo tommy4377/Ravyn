@@ -1,0 +1,96 @@
+name: ravyn-security-candidate
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/ravyn-security-candidate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Build security candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for p in [Path("Cargo.toml"), Path("src-tauri/Cargo.toml")]:
+              s=p.read_text()
+              s=s.replace('rust-version = "1.85"', 'rust-version = "1.88"')
+              p.write_text(s)
+
+          p=Path("Cargo.toml")
+          s=p.read_text()
+          s=s.replace('quick-xml = "0.38"', 'quick-xml = "0.41"')
+          s=s.replace(
+              'sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }',
+              'sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }'
+          )
+          p.write_text(s)
+
+          p=Path("src/services/metalink.rs")
+          s=p.read_text().replace(
+              ".decode_and_unescape_value(reader.decoder())",
+              ".normalized_value(quick_xml::XmlVersion::default())"
+          )
+          p.write_text(s)
+
+          for lock in [Path("Cargo.lock"), Path("fuzz/Cargo.lock")]:
+              lock.unlink(missing_ok=True)
+          PY
+
+          cargo generate-lockfile
+          cargo generate-lockfile --manifest-path fuzz/Cargo.toml
+          cargo update -p time --precise 0.3.47
+          cargo fmt --all
+
+      - name: Validate candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --lib
+          cargo test --locked --bins
+
+      - name: Inspect unwanted dependency paths
+        shell: bash
+        run: |
+          set +e
+          echo '=== rsa ==='
+          cargo tree --target all -i rsa@0.9.10
+          echo '=== sqlx-mysql ==='
+          cargo tree --target all -i sqlx-mysql@0.8.6
+          echo '=== quick-xml old ==='
+          cargo tree --target all -i quick-xml@0.38.4
+          echo '=== time old ==='
+          cargo tree --target all -i time@0.3.45
+          echo '=== AUDIT ==='
+          cargo audit
+          exit 0
+
+      - name: Validate Rust 1.88
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --locked --all-targets
