@@ -1,0 +1,84 @@
+name: ravyn-dependency-diagnostic
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/ravyn-dependency-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Apply candidate dependency cleanup in workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cargo = Path("Cargo.toml")
+          text = cargo.read_text()
+          text = text.replace('quick-xml = "0.38"', 'quick-xml = "0.41"')
+          text = text.replace(
+              'sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }',
+              'sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate", "macros"] }'
+          )
+          cargo.write_text(text)
+
+          metalink = Path("src/services/metalink.rs")
+          text = metalink.read_text()
+          text = text.replace(
+              ".decode_and_unescape_value(reader.decoder())",
+              ".normalized_value(quick_xml::XmlVersion::default())"
+          )
+          metalink.write_text(text)
+
+          rm = Path("Cargo.lock")
+          if rm.exists():
+              rm.unlink()
+          PY
+
+          cargo generate-lockfile
+          cargo fmt --all
+
+      - name: Validate candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+
+      - name: Show advisory dependency paths
+        shell: bash
+        run: |
+          set +e
+          for spec in             h2@0.4.15             quick-xml@0.38.4             quinn-proto@0.11.14             rsa@0.9.10             rustls@0.23.41             time@0.3.45             event-listener@5.4.1             glib@0.18.5             spin@0.9.8; do
+            echo "=== $spec ==="
+            cargo tree --target all -i "$spec"
+          done
+          echo "=== AUDIT ==="
+          cargo audit
+
+      - name: Check candidate with Rust 1.85
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --locked --all-targets
