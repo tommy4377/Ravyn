@@ -1,0 +1,522 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/ravyn"
+
+jobs:
+  windows-desktop:
+    runs-on: windows-2025
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate component catalogue and artifacts
+        shell: pwsh
+        run: |
+          python -m unittest tools/test_validate_component_manifest.py
+          python tools/validate_component_manifest.py --provision --target x86_64-pc-windows-msvc
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Validate frontend
+        shell: pwsh
+        run: |
+          npm run check --prefix frontend
+          npm test --prefix frontend
+          npm run build --prefix frontend
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate synchronized release versions
+        shell: pwsh
+        run: |
+          $tauri = (Get-Content 'src-tauri\tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $frontend = (Get-Content 'frontend\package.json' -Raw | ConvertFrom-Json).version
+          $root = ([regex]::Match((Get-Content 'Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          $desktop = ([regex]::Match((Get-Content 'src-tauri\Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          $extension = (Get-Content 'extension\package.json' -Raw | ConvertFrom-Json).version
+          $extensionManifest = (Get-Content 'extension\manifests\base.json' -Raw | ConvertFrom-Json).version
+          $versions = @($tauri, $frontend, $root, $desktop, $extension, $extensionManifest) | Select-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Ravyn versions are not synchronized: tauri=$tauri frontend=$frontend root=$root desktop=$desktop extension=$extension manifest=$extensionManifest"
+          }
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($tagVersion -ne $tauri) {
+              throw "Release tag v$tagVersion does not match application version $tauri"
+            }
+          }
+
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Parse generated updater helper
+        shell: pwsh
+        run: ./tools/validate_update_helper.ps1
+
+      - name: Validate release signing configuration
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY: ${{ secrets.RAVYN_APP_UPDATE_PRIVATE_KEY }}
+          UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+          COMPONENT_PRIVATE_KEY: ${{ secrets.RAVYN_ENGINE_MANIFEST_PRIVATE_KEY }}
+          COMPONENT_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.RAVYN_AUTHENTICODE_TIMESTAMP_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_PRIVATE_KEY)) {
+            throw 'RAVYN_APP_UPDATE_PRIVATE_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_PUBLIC_KEY)) {
+            throw 'RAVYN_APP_UPDATE_PUBLIC_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:COMPONENT_PRIVATE_KEY)) {
+            throw 'RAVYN_ENGINE_MANIFEST_PRIVATE_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:COMPONENT_PUBLIC_KEY)) {
+            throw 'RAVYN_ENGINE_MANIFEST_PUBLIC_KEY is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            throw 'RAVYN_WINDOWS_CERTIFICATE is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw 'RAVYN_WINDOWS_CERTIFICATE_PASSWORD is required for tagged releases.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            throw 'RAVYN_AUTHENTICODE_TIMESTAMP_URL is required for tagged releases.'
+          }
+
+      - name: Import Authenticode certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.RAVYN_WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'ravyn-authenticode.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes(
+              $certificatePath,
+              [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+            )
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate `
+              -FilePath $certificatePath `
+              -CertStoreLocation 'Cert:\CurrentUser\My' `
+              -Password $password
+            if (-not $certificate.Thumbprint) {
+              throw 'The Authenticode certificate did not expose a thumbprint after import.'
+            }
+            $thumbprint = $certificate.Thumbprint.ToUpperInvariant()
+            "RAVYN_AUTHENTICODE_THUMBPRINT=$thumbprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Build Tauri desktop executable
+        shell: pwsh
+        env:
+          RAVYN_APP_UPDATE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ravyn-app-update.json
+          RAVYN_APP_UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+          RAVYN_COMPONENT_MANIFEST_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/ravyn-component-manifest.json
+          RAVYN_ENGINE_MANIFEST_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Bundling is disabled: the single executable is the distribution.
+          npx --yes "@tauri-apps/cli@^2" build --no-bundle
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit code $LASTEXITCODE" }
+
+      - name: Sign the application executable
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          WINDOWS_TIMESTAMP_URL: ${{ vars.RAVYN_AUTHENTICODE_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
+          & $signtool.FullName sign /sha1 $env:RAVYN_AUTHENTICODE_THUMBPRINT /fd sha256 `
+            /tr $env:WINDOWS_TIMESTAMP_URL /td sha256 'target\release\Ravyn.exe'
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+
+      - name: Collect desktop artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          # The single self-installing executable is the entire Windows
+          # distribution: running it offers installed, portable, or repair
+          # setup from inside the application.
+          $desktopExe = Join-Path $env:GITHUB_WORKSPACE 'target\release\Ravyn.exe'
+          if (-not (Test-Path $desktopExe)) {
+            throw "The desktop executable was not produced at $desktopExe"
+          }
+          Copy-Item $desktopExe 'dist\Ravyn.exe'
+          Compress-Archive -Path 'dist\Ravyn.exe' -DestinationPath 'dist\ravyn-windows-x86_64.zip'
+
+      - name: Verify Authenticode signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            Get-Item 'target\release\Ravyn.exe'
+            Get-ChildItem 'dist' -File | Where-Object { $_.Extension -eq '.exe' }
+          ) | Sort-Object FullName -Unique
+          if ($files.Count -lt 2) {
+            throw 'Expected the application executable and its publishable copy before signature verification.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RAVYN_AUTHENTICODE_THUMBPRINT)) {
+            throw 'The imported Authenticode certificate thumbprint is unavailable.'
+          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.FullName): $($signature.StatusMessage)"
+            }
+            if ($null -eq $signature.SignerCertificate -or
+                $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $env:RAVYN_AUTHENTICODE_THUMBPRINT) {
+              throw "Unexpected Authenticode signer for $($file.FullName)."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "The Authenticode signature for $($file.FullName) is not timestamped."
+            }
+          }
+
+      - name: Generate signed application-update metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          RAVYN_APP_UPDATE_PRIVATE_KEY: ${{ secrets.RAVYN_APP_UPDATE_PRIVATE_KEY }}
+          RAVYN_APP_UPDATE_PUBLIC_KEY: ${{ vars.RAVYN_APP_UPDATE_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-Item 'dist\Ravyn.exe'
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $publishedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $assetUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($installer.Name)"
+          cargo run --locked --release -p ravyn --bin manifest_tool -- sign-app-update `
+            --version $version `
+            --published-at $publishedAt `
+            --url $assetUrl `
+            --artifact $installer.FullName `
+            --notes 'A signed Ravyn update is ready. See the GitHub release notes for details.' `
+            --out 'dist\ravyn-app-update.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- verify-app-update `
+            --signed 'dist\ravyn-app-update.json' `
+            --artifact $installer.FullName `
+            --public-key $env:RAVYN_APP_UPDATE_PUBLIC_KEY
+
+      - name: Generate signed component manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          RAVYN_ENGINE_MANIFEST_PRIVATE_KEY: ${{ secrets.RAVYN_ENGINE_MANIFEST_PRIVATE_KEY }}
+          RAVYN_ENGINE_MANIFEST_PUBLIC_KEY: ${{ vars.RAVYN_ENGINE_MANIFEST_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content 'assets\engines\stable.json' -Raw | ConvertFrom-Json
+          $now = [DateTimeOffset]::UtcNow
+          $manifest | Add-Member -NotePropertyName manifest_version -NotePropertyValue $now.ToUnixTimeSeconds() -Force
+          $manifest | Add-Member -NotePropertyName generated_at -NotePropertyValue $now.ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+          $manifest | Add-Member -NotePropertyName expires_at -NotePropertyValue $now.AddDays(30).ToString('yyyy-MM-ddTHH:mm:ssZ') -Force
+          $manifest | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 'dist\ravyn-component-manifest-unsigned.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- sign `
+            --manifest 'dist\ravyn-component-manifest-unsigned.json' `
+            --out 'dist\ravyn-component-manifest.json'
+          cargo run --locked --release -p ravyn --bin manifest_tool -- verify `
+            'dist\ravyn-component-manifest.json' `
+            $env:RAVYN_ENGINE_MANIFEST_PUBLIC_KEY
+          Remove-Item 'dist\ravyn-component-manifest-unsigned.json'
+
+      - name: Smoke-test installed-mode integration and backend readiness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Native Messaging registration intentionally refuses portable paths.
+          # Mirror the real per-user installed location so this smoke test
+          # exercises the same trust boundary as the in-app installer.
+          $publishableExe = Join-Path $env:GITHUB_WORKSPACE 'dist\Ravyn.exe'
+          if (-not (Test-Path $publishableExe)) {
+            throw "The publishable executable was not found at $publishableExe"
+          }
+
+          $smokeInstallDir = Join-Path $env:LOCALAPPDATA 'Ravyn'
+          $installedExe = Join-Path $smokeInstallDir 'Ravyn.exe'
+          $nativeHostKey = 'HKCU:\Software\Mozilla\NativeMessagingHosts\com.ravyn.download_manager'
+          $env:RAVYN_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ravyn-smoke-data'
+          $readyMarker = Join-Path $env:RUNNER_TEMP 'ravyn-desktop-ready.json'
+          $process = $null
+
+          try {
+            Remove-Item $smokeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $smokeInstallDir | Out-Null
+            Copy-Item $publishableExe $installedExe
+
+            & $installedExe --register-firefox-native-host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Firefox native-host registration failed with exit code $LASTEXITCODE"
+            }
+            if (-not (Test-Path $nativeHostKey)) {
+              throw 'The native-host registration did not create the registry entry.'
+            }
+
+            & $installedExe --unregister-firefox-native-host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Firefox native-host unregistration failed with exit code $LASTEXITCODE"
+            }
+            if (Test-Path $nativeHostKey) {
+              throw 'The native-host unregistration left the registry entry behind.'
+            }
+
+            Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+            $env:RAVYN_DESKTOP_READY_FILE = $readyMarker
+            $process = Start-Process -FilePath $installedExe -PassThru
+
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
+            while (-not (Test-Path $readyMarker) -and [DateTimeOffset]::UtcNow -lt $deadline) {
+              if ($process.HasExited) {
+                throw "Ravyn exited during the startup smoke test with code $($process.ExitCode)"
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not (Test-Path $readyMarker)) {
+              throw 'Ravyn did not publish its desktop readiness marker within 45 seconds.'
+            }
+
+            $ready = Get-Content $readyMarker -Raw | ConvertFrom-Json
+            if ($ready.schema -ne 1 -or $ready.process_id -ne $process.Id) {
+              throw 'The desktop readiness marker does not describe the launched process.'
+            }
+            $health = Invoke-RestMethod -Uri "$($ready.base_url)/health/ready" -TimeoutSec 10
+            if (-not $health.ready -or -not $health.database_writable -or -not $health.progress_writer_running) {
+              throw "The installed Ravyn backend failed readiness: $($health | ConvertTo-Json -Compress)"
+            }
+          } finally {
+            if ($null -ne $process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item $nativeHostKey -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $readyMarker -Force -ErrorAction SilentlyContinue
+            Remove-Item $env:RAVYN_DATA_DIR -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $smokeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:RAVYN_DESKTOP_READY_FILE -ErrorAction SilentlyContinue
+            Remove-Item Env:RAVYN_DATA_DIR -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate CycloneDX SBOM
+        shell: pwsh
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json
+          $sbom = Get-ChildItem -Recurse -Filter '*.cdx.json' | Select-Object -First 1
+          if (-not $sbom) { throw 'cargo-cyclonedx did not produce a JSON SBOM' }
+          Copy-Item $sbom.FullName dist\ravyn.cdx.json
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File |
+            Where-Object { $_.Extension -notin '.sha256' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash *$($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+            }
+
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravyn-windows-desktop-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Remove imported Authenticode certificate
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:RAVYN_AUTHENTICODE_THUMBPRINT)) {
+            Remove-Item "Cert:\CurrentUser\My\$env:RAVYN_AUTHENTICODE_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+
+  firefox-extension:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install extension dependencies
+        run: npm ci --prefix extension
+      - name: Validate deterministic Firefox packages
+        run: |
+          npm run check --prefix extension
+          npm run package:verify --prefix extension
+      - name: Validate synchronized extension version
+        shell: bash
+        run: |
+          set -euo pipefail
+          extension_version="$(node -p "require('./extension/package.json').version")"
+          manifest_version="$(node -p "require('./extension/manifests/base.json').version")"
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          test "$extension_version" = "$manifest_version"
+          test "$extension_version" = "$app_version"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test "${GITHUB_REF_NAME#v}" = "$extension_version"
+          fi
+      - name: Sign Firefox extension through AMO
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: extension
+        env:
+          AMO_API_KEY: ${{ secrets.RAVYN_AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.RAVYN_AMO_API_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$AMO_API_KEY" || { echo 'RAVYN_AMO_API_KEY is required for tagged releases.' >&2; exit 1; }
+          test -n "$AMO_API_SECRET" || { echo 'RAVYN_AMO_API_SECRET is required for tagged releases.' >&2; exit 1; }
+          mkdir -p artifacts/signed
+          npx web-ext sign \
+            --source-dir dist/firefox \
+            --artifacts-dir artifacts/signed \
+            --api-key "$AMO_API_KEY" \
+            --api-secret "$AMO_API_SECRET" \
+            --channel unlisted \
+            --upload-source-code "artifacts/ravyn-firefox-source-$(node -p "require('./package.json').version").zip" \
+            --no-input
+          signed="$(find artifacts/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+          test -n "$signed" || { echo 'AMO did not return a signed XPI.' >&2; exit 1; }
+          version="$(node -p "require('./package.json').version")"
+          mv "$signed" "artifacts/ravyn-firefox-${version}-signed.xpi"
+      - name: Generate extension checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in extension/artifacts/*.xpi extension/artifacts/*.zip; do
+            sha256sum "$file" > "$file.sha256"
+          done
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            extension/artifacts/*.xpi
+            extension/artifacts/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravyn-firefox-extension
+          path: extension/artifacts/*
+          if-no-files-found: error
+
+  backend-portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ravyn-linux-x86_64
+          - os: macos-latest
+            artifact: ravyn-macos-native
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p ravyn --all-targets
+      - run: cargo build --locked --release -p ravyn
+      - name: Package and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/ravyn dist/ravyn
+          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" ravyn
+          (cd dist && shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256")
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/${{ matrix.artifact }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-desktop, firefox-extension, backend-portable]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo '{'
+            echo '  "schema": 1,'
+            echo '  "channel": "stable",'
+            echo "  \"version\": \"${version}\","
+            echo "  \"published_at\": \"${published_at}\","
+            echo "  \"source_commit\": \"${GITHUB_SHA}\","
+            echo '  "artifacts": ['
+            first=1
+            for checksum in dist/*.sha256; do
+              hash="$(awk '{print $1}' "$checksum")"
+              file="$(basename "$checksum" .sha256)"
+              [ "$first" -eq 1 ] || echo ','
+              first=0
+              printf '    {"name": "%s", "sha256": "%s"}' "$file" "$hash"
+            done
+            echo ''
+            echo '  ]'
+            echo '}'
+          } > dist/ravyn-release.json
+          cat dist/ravyn-release.json
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes
